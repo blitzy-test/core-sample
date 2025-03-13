@@ -1,0 +1,7 @@
+brik:
+   database:
+      sample:
+         url: jdbc:postgresql://localhost:5432/sample
+         user: briklabs
+         password: briklabs
+         schema: sample

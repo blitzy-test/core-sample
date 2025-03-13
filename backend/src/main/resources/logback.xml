@@ -1,0 +1,27 @@
+<configuration>
+
+  	<statusListener class="ch.qos.logback.core.status.NopStatusListener" />
+
+	<!-- "This makes it reasonable for real-world applications to use the jul-to-slf4j 
+		bridge." see https://logback.qos.ch/manual/configuration.html#LevelChangePropagator -->
+	<contextListener class="ch.qos.logback.classic.jul.LevelChangePropagator">
+		<resetJUL>true</resetJUL>
+	</contextListener>
+
+	<appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+		<!-- encoders are assigned the type ch.qos.logback.classic.encoder.PatternLayoutEncoder by default -->
+		<encoder>
+			<pattern>%date{dd-MM-yyyy HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n</pattern>
+		</encoder>
+	</appender>
+
+	<root level="${log.root.level:-INFO}">
+		<appender-ref ref="STDOUT" />
+	</root>
+
+	<logger name="io.briklabs" level="${log.briklabs.level:-INFO}" />
+	<logger name="io.rsocket" level="${log.briklabs.level:-ERROR}" />
+	<logger name="org.glassfish.jersey.internal.inject.Providers" level="${log.briklabs.level:-ERROR}" />
+	<logger name="org.glassfish.grizzly.http.server" level="${log.briklabs.level:-ERROR}" />
+	
+</configuration>

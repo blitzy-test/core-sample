@@ -1,327 +1,418 @@
 package io.briklabs.sample.payments.data.query;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.briklabs.sample.payments.model.PaymentStatus;
+import io.briklabs.sample.payments.model.PaymentTransaction.PaymentStatus;
 
 /**
  * A specialized filter component for handling status-based filtering in payment queries.
  * This class provides structured representation and validation of transaction status filters
  * with support for multiple status values, status groups, and state-based filtering.
+ * 
+ * It handles the validation of status values against the allowed transaction states and
+ * generates appropriate SQL conditions for status filtering.
  */
 public class StatusFilter {
     private static final Logger logger = LoggerFactory.getLogger(StatusFilter.class);
     
     /**
-     * Set of status values to filter by
+     * Predefined status groups for common filtering scenarios.
      */
-    private final Set<String> statusValues;
-    
-    /**
-     * Flag indicating if this is a negation filter (exclude these statuses)
-     */
-    private final boolean negated;
-    
-    /**
-     * Predefined status groups for common filtering scenarios
-     */
-    private static final Set<String> ACTIVE_STATUSES = Collections.unmodifiableSet(
-            Arrays.stream(PaymentStatus.values())
-                  .filter(PaymentStatus::isActiveState)
-                  .map(PaymentStatus::name)
-                  .collect(Collectors.toSet()));
-    
-    private static final Set<String> FINAL_STATUSES = Collections.unmodifiableSet(
-            Arrays.stream(PaymentStatus.values())
-                  .filter(PaymentStatus::isFinalState)
-                  .map(PaymentStatus::name)
-                  .collect(Collectors.toSet()));
-    
-    private static final Set<String> SUCCESSFUL_STATUSES = Collections.unmodifiableSet(
-            Arrays.stream(PaymentStatus.values())
-                  .filter(PaymentStatus::isSuccessful)
-                  .map(PaymentStatus::name)
-                  .collect(Collectors.toSet()));
-    
-    private static final Set<String> FAILED_STATUSES = Collections.unmodifiableSet(
-            Arrays.stream(PaymentStatus.values())
-                  .filter(PaymentStatus::isFailed)
-                  .map(PaymentStatus::name)
-                  .collect(Collectors.toSet()));
-    
-    /**
-     * Creates a new status filter with a single status value.
-     * 
-     * @param status The status value to filter by
-     */
-    public StatusFilter(String status) {
-        this(status, false);
-    }
-    
-    /**
-     * Creates a new status filter with a single status value and negation flag.
-     * 
-     * @param status The status value to filter by
-     * @param negated If true, the filter will exclude this status rather than include it
-     */
-    public StatusFilter(String status, boolean negated) {
-        this.statusValues = new HashSet<>();
-        this.negated = negated;
+    public enum StatusGroup {
+        /**
+         * Active transactions that are in progress (not in terminal state).
+         */
+        ACTIVE(PaymentStatus.PENDING, PaymentStatus.PROCESSING, PaymentStatus.AUTHORIZED, 
+               PaymentStatus.PARTIALLY_CAPTURED, PaymentStatus.CAPTURED, PaymentStatus.PARTIALLY_REFUNDED),
         
-        if (status != null && !status.trim().isEmpty()) {
-            addStatusValue(status.trim());
+        /**
+         * Completed transactions that have reached a terminal state.
+         */
+        COMPLETED(PaymentStatus.CAPTURED, PaymentStatus.REFUNDED),
+        
+        /**
+         * Failed transactions that did not complete successfully.
+         */
+        FAILED(PaymentStatus.FAILED, PaymentStatus.DECLINED, PaymentStatus.VOIDED),
+        
+        /**
+         * Transactions that have been authorized but not yet fully captured.
+         */
+        AUTHORIZED(PaymentStatus.AUTHORIZED, PaymentStatus.PARTIALLY_CAPTURED),
+        
+        /**
+         * Transactions that have been captured (fully or partially).
+         */
+        CAPTURED(PaymentStatus.CAPTURED, PaymentStatus.PARTIALLY_CAPTURED),
+        
+        /**
+         * Transactions that have been refunded (fully or partially).
+         */
+        REFUNDED(PaymentStatus.REFUNDED, PaymentStatus.PARTIALLY_REFUNDED),
+        
+        /**
+         * Transactions that are in a partial state (partially captured or refunded).
+         */
+        PARTIAL(PaymentStatus.PARTIALLY_CAPTURED, PaymentStatus.PARTIALLY_REFUNDED);
+        
+        private final Set<PaymentStatus> statuses;
+        
+        StatusGroup(PaymentStatus... statuses) {
+            this.statuses = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(statuses)));
+        }
+        
+        /**
+         * Gets the set of payment statuses in this group.
+         * 
+         * @return An unmodifiable set of payment statuses
+         */
+        public Set<PaymentStatus> getStatuses() {
+            return statuses;
         }
     }
     
+    private final Set<String> statuses;
+    private boolean negated;
+    
     /**
-     * Creates a new status filter with multiple status values.
+     * Creates a new empty status filter.
+     */
+    public StatusFilter() {
+        this.statuses = new HashSet<>();
+        this.negated = false;
+    }
+    
+    /**
+     * Creates a new status filter with the specified statuses.
      * 
-     * @param statuses The collection of status values to filter by
+     * @param statuses The status values to include in the filter
      */
     public StatusFilter(Collection<String> statuses) {
-        this(statuses, false);
-    }
-    
-    /**
-     * Creates a new status filter with multiple status values and negation flag.
-     * 
-     * @param statuses The collection of status values to filter by
-     * @param negated If true, the filter will exclude these statuses rather than include them
-     */
-    public StatusFilter(Collection<String> statuses, boolean negated) {
-        this.statusValues = new HashSet<>();
-        this.negated = negated;
-        
+        this.statuses = new HashSet<>();
         if (statuses != null) {
-            for (String status : statuses) {
-                if (status != null && !status.trim().isEmpty()) {
-                    addStatusValue(status.trim());
-                }
-            }
+            this.statuses.addAll(statuses);
         }
+        this.negated = false;
     }
     
     /**
-     * Creates a new status filter for a predefined status group.
+     * Creates a new status filter with the specified status group.
      * 
-     * @param statusGroup The name of the status group ("ACTIVE", "FINAL", "SUCCESSFUL", "FAILED")
-     * @return A new status filter for the specified group
-     * @throws IllegalArgumentException If the status group name is invalid
+     * @param group The status group to include in the filter
      */
-    public static StatusFilter forStatusGroup(String statusGroup) {
-        return forStatusGroup(statusGroup, false);
+    public StatusFilter(StatusGroup group) {
+        this.statuses = new HashSet<>();
+        if (group != null) {
+            this.statuses.addAll(group.getStatuses().stream()
+                    .map(PaymentStatus::name)
+                    .collect(Collectors.toSet()));
+        }
+        this.negated = false;
     }
     
     /**
-     * Creates a new status filter for a predefined status group with negation option.
-     * 
-     * @param statusGroup The name of the status group ("ACTIVE", "FINAL", "SUCCESSFUL", "FAILED")
-     * @param negated If true, the filter will exclude these statuses rather than include them
-     * @return A new status filter for the specified group
-     * @throws IllegalArgumentException If the status group name is invalid
-     */
-    public static StatusFilter forStatusGroup(String statusGroup, boolean negated) {
-        if (statusGroup == null || statusGroup.trim().isEmpty()) {
-            throw new IllegalArgumentException("Status group name cannot be null or empty");
-        }
-        
-        String groupName = statusGroup.trim().toUpperCase();
-        Set<String> statuses;
-        
-        switch (groupName) {
-            case "ACTIVE":
-                statuses = ACTIVE_STATUSES;
-                break;
-            case "FINAL":
-                statuses = FINAL_STATUSES;
-                break;
-            case "SUCCESSFUL":
-                statuses = SUCCESSFUL_STATUSES;
-                break;
-            case "FAILED":
-                statuses = FAILED_STATUSES;
-                break;
-            default:
-                throw new IllegalArgumentException("Invalid status group name: " + statusGroup);
-        }
-        
-        return new StatusFilter(statuses, negated);
-    }
-    
-    /**
-     * Adds a status value to this filter.
+     * Adds a status value to the filter.
      * 
      * @param status The status value to add
+     * @return This filter for method chaining
+     * @throws IllegalArgumentException if the status is not a valid PaymentStatus
      */
-    private void addStatusValue(String status) {
-        // Handle special status group names
-        if (status.startsWith("@")) {
-            String groupName = status.substring(1).toUpperCase();
-            Set<String> groupStatuses = null;
-            
-            switch (groupName) {
-                case "ACTIVE":
-                    groupStatuses = ACTIVE_STATUSES;
-                    break;
-                case "FINAL":
-                    groupStatuses = FINAL_STATUSES;
-                    break;
-                case "SUCCESSFUL":
-                    groupStatuses = SUCCESSFUL_STATUSES;
-                    break;
-                case "FAILED":
-                    groupStatuses = FAILED_STATUSES;
-                    break;
-                default:
-                    logger.warn("Unknown status group: {}", groupName);
-                    break;
-            }
-            
-            if (groupStatuses != null) {
-                statusValues.addAll(groupStatuses);
-            }
-        } else {
-            // Handle individual status values
-            try {
-                // Validate that the status is a valid PaymentStatus enum value
-                PaymentStatus.valueOf(status.toUpperCase());
-                statusValues.add(status.toUpperCase());
-            } catch (IllegalArgumentException e) {
-                logger.warn("Invalid status value: {}", status);
-                // Don't add invalid status values
-            }
+    public StatusFilter addStatus(String status) {
+        if (status == null || status.isEmpty()) {
+            return this;
         }
+        
+        // Validate that the status is a valid PaymentStatus
+        try {
+            PaymentStatus.valueOf(status);
+            statuses.add(status);
+        } catch (IllegalArgumentException e) {
+            logger.warn("Invalid payment status: {}", status);
+            throw new IllegalArgumentException("Invalid payment status: " + status);
+        }
+        
+        return this;
     }
     
     /**
-     * Validates that all status values in this filter are valid.
+     * Adds multiple status values to the filter.
      * 
-     * @throws IllegalArgumentException If any status value is invalid
+     * @param statusValues The status values to add
+     * @return This filter for method chaining
+     * @throws IllegalArgumentException if any status is not a valid PaymentStatus
      */
-    public void validate() {
-        if (statusValues.isEmpty()) {
-            return; // Empty filter is valid (no filtering)
+    public StatusFilter addStatuses(String... statusValues) {
+        if (statusValues == null) {
+            return this;
         }
-        
-        Set<String> invalidStatuses = new HashSet<>();
         
         for (String status : statusValues) {
-            try {
-                PaymentStatus.valueOf(status);
-            } catch (IllegalArgumentException e) {
-                invalidStatuses.add(status);
-            }
+            addStatus(status);
         }
         
-        if (!invalidStatuses.isEmpty()) {
-            throw new IllegalArgumentException("Invalid status values: " + String.join(", ", invalidStatuses));
-        }
+        return this;
     }
     
     /**
-     * Generates a SQL condition for this status filter.
+     * Adds multiple status values to the filter.
      * 
-     * @param columnName The name of the status column in the SQL query
-     * @return A SQL condition string, or null if no filtering should be applied
+     * @param statusValues The status values to add
+     * @return This filter for method chaining
+     * @throws IllegalArgumentException if any status is not a valid PaymentStatus
      */
-    public String toSqlCondition(String columnName) {
-        if (statusValues.isEmpty()) {
-            return null; // No filtering
+    public StatusFilter addStatuses(Collection<String> statusValues) {
+        if (statusValues == null) {
+            return this;
         }
         
-        StringBuilder condition = new StringBuilder();
-        
-        if (statusValues.size() == 1) {
-            // Single status value
-            String status = statusValues.iterator().next();
-            condition.append(columnName)
-                    .append(negated ? " <> '" : " = '")
-                    .append(status)
-                    .append("'");
-        } else {
-            // Multiple status values
-            condition.append(columnName)
-                    .append(negated ? " NOT IN (" : " IN (");
-            
-            boolean first = true;
-            for (String status : statusValues) {
-                if (!first) {
-                    condition.append(", ");
-                }
-                condition.append("'").append(status).append("'");
-                first = false;
-            }
-            
-            condition.append(")");
+        for (String status : statusValues) {
+            addStatus(status);
         }
         
-        return condition.toString();
+        return this;
     }
     
     /**
-     * Generates SQL parameters for this status filter.
+     * Adds a PaymentStatus enum value to the filter.
      * 
-     * @return An array of status values as parameters, or an empty array if no filtering
+     * @param status The PaymentStatus enum value to add
+     * @return This filter for method chaining
      */
-    public Object[] toSqlParameters() {
-        if (statusValues.isEmpty()) {
-            return new Object[0];
+    public StatusFilter addStatus(PaymentStatus status) {
+        if (status == null) {
+            return this;
         }
         
-        return statusValues.toArray();
+        statuses.add(status.name());
+        return this;
     }
     
     /**
-     * Gets the status values in this filter.
+     * Adds multiple PaymentStatus enum values to the filter.
      * 
-     * @return The set of status values
+     * @param statusValues The PaymentStatus enum values to add
+     * @return This filter for method chaining
      */
-    public Set<String> getStatusValues() {
-        return Collections.unmodifiableSet(statusValues);
+    public StatusFilter addStatuses(PaymentStatus... statusValues) {
+        if (statusValues == null) {
+            return this;
+        }
+        
+        for (PaymentStatus status : statusValues) {
+            addStatus(status);
+        }
+        
+        return this;
     }
     
     /**
-     * Checks if this is a negation filter.
+     * Adds all statuses from a status group to the filter.
      * 
-     * @return true if this filter excludes the specified statuses, false if it includes them
+     * @param group The status group to add
+     * @return This filter for method chaining
+     */
+    public StatusFilter addStatusGroup(StatusGroup group) {
+        if (group == null) {
+            return this;
+        }
+        
+        for (PaymentStatus status : group.getStatuses()) {
+            addStatus(status);
+        }
+        
+        return this;
+    }
+    
+    /**
+     * Sets whether this filter should be negated (exclude the specified statuses).
+     * 
+     * @param negated true to negate the filter, false otherwise
+     * @return This filter for method chaining
+     */
+    public StatusFilter setNegated(boolean negated) {
+        this.negated = negated;
+        return this;
+    }
+    
+    /**
+     * Negates this filter (exclude the specified statuses).
+     * 
+     * @return This filter for method chaining
+     */
+    public StatusFilter negate() {
+        this.negated = true;
+        return this;
+    }
+    
+    /**
+     * Checks if this filter is negated.
+     * 
+     * @return true if the filter is negated, false otherwise
      */
     public boolean isNegated() {
         return negated;
     }
     
     /**
-     * Checks if this filter is empty (no status values).
+     * Gets the set of status values in this filter.
      * 
-     * @return true if this filter has no status values, false otherwise
+     * @return An unmodifiable set of status values
      */
-    public boolean isEmpty() {
-        return statusValues.isEmpty();
+    public Set<String> getStatuses() {
+        return Collections.unmodifiableSet(statuses);
     }
     
     /**
-     * Creates a negated version of this filter.
+     * Checks if this filter is empty (no status values).
      * 
-     * @return A new status filter with the same status values but opposite negation
+     * @return true if the filter is empty, false otherwise
      */
-    public StatusFilter negate() {
-        return new StatusFilter(statusValues, !negated);
+    public boolean isEmpty() {
+        return statuses.isEmpty();
+    }
+    
+    /**
+     * Clears all status values from this filter.
+     * 
+     * @return This filter for method chaining
+     */
+    public StatusFilter clear() {
+        statuses.clear();
+        return this;
+    }
+    
+    /**
+     * Generates an SQL condition for this status filter.
+     * 
+     * @param columnName The name of the status column in the database
+     * @return An SQL condition string, or null if the filter is empty
+     */
+    public String toSqlCondition(String columnName) {
+        if (isEmpty()) {
+            return null;
+        }
+        
+        StringBuilder condition = new StringBuilder();
+        
+        if (negated) {
+            condition.append(columnName).append(" NOT IN (");
+        } else {
+            condition.append(columnName).append(" IN (");
+        }
+        
+        List<String> quotedStatuses = new ArrayList<>();
+        for (String status : statuses) {
+            quotedStatuses.add("'" + status + "'");
+        }
+        
+        condition.append(String.join(", ", quotedStatuses));
+        condition.append(")");
+        
+        return condition.toString();
+    }
+    
+    /**
+     * Applies this status filter to a PaymentQueryBuilder.
+     * 
+     * @param queryBuilder The query builder to apply the filter to
+     * @param columnName The name of the status column in the database
+     * @return The query builder with the filter applied
+     */
+    public PaymentQueryBuilder applyToQuery(PaymentQueryBuilder queryBuilder, String columnName) {
+        if (isEmpty() || queryBuilder == null) {
+            return queryBuilder;
+        }
+        
+        if (negated) {
+            queryBuilder.and(columnName + " NOT IN (" + 
+                    statuses.stream().map(s -> "?").collect(Collectors.joining(", ")) + ")");
+        } else {
+            queryBuilder.and(columnName + " IN (" + 
+                    statuses.stream().map(s -> "?").collect(Collectors.joining(", ")) + ")");
+        }
+        
+        for (String status : statuses) {
+            queryBuilder.addParameter(status);
+        }
+        
+        return queryBuilder;
+    }
+    
+    /**
+     * Creates a new status filter with the specified statuses.
+     * 
+     * @param statuses The status values to include in the filter
+     * @return A new status filter
+     */
+    public static StatusFilter of(String... statuses) {
+        return new StatusFilter().addStatuses(statuses);
+    }
+    
+    /**
+     * Creates a new status filter with the specified PaymentStatus values.
+     * 
+     * @param statuses The PaymentStatus values to include in the filter
+     * @return A new status filter
+     */
+    public static StatusFilter of(PaymentStatus... statuses) {
+        return new StatusFilter().addStatuses(statuses);
+    }
+    
+    /**
+     * Creates a new status filter with the specified status group.
+     * 
+     * @param group The status group to include in the filter
+     * @return A new status filter
+     */
+    public static StatusFilter ofGroup(StatusGroup group) {
+        return new StatusFilter(group);
+    }
+    
+    /**
+     * Creates a new negated status filter with the specified statuses.
+     * 
+     * @param statuses The status values to exclude from the filter
+     * @return A new negated status filter
+     */
+    public static StatusFilter not(String... statuses) {
+        return new StatusFilter().addStatuses(statuses).negate();
+    }
+    
+    /**
+     * Creates a new negated status filter with the specified PaymentStatus values.
+     * 
+     * @param statuses The PaymentStatus values to exclude from the filter
+     * @return A new negated status filter
+     */
+    public static StatusFilter not(PaymentStatus... statuses) {
+        return new StatusFilter().addStatuses(statuses).negate();
+    }
+    
+    /**
+     * Creates a new negated status filter with the specified status group.
+     * 
+     * @param group The status group to exclude from the filter
+     * @return A new negated status filter
+     */
+    public static StatusFilter notGroup(StatusGroup group) {
+        return new StatusFilter(group).negate();
     }
     
     @Override
     public String toString() {
-        if (statusValues.isEmpty()) {
-            return "StatusFilter[empty]";
-        }
-        
-        return "StatusFilter[" + (negated ? "NOT " : "") + 
-               String.join(", ", statusValues) + "]";
+        return "StatusFilter{" +
+                "statuses=" + statuses +
+                ", negated=" + negated +
+                '}';
     }
 }

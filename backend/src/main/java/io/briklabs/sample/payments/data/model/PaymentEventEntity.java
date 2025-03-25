@@ -4,19 +4,20 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
+import io.briklabs.sample.payments.model.PaymentEvent;
 import io.briklabs.sample.payments.model.PaymentStatus;
 
 /**
  * Entity class for payment lifecycle events, mapping to the payment_events table.
  * <p>
- * This entity creates a comprehensive audit trail of all activities related to payment
- * transactions, including status changes, processing steps, and user actions. It is critical
- * for payment tracking, debugging issues, and providing a complete history of each transaction
- * from creation through processing, capture, and potential refund operations.
+ * This class tracks all state changes, user actions, and processing milestones
+ * throughout a transaction's lifecycle. It provides a comprehensive audit trail
+ * with event type, timestamp, actor information, and detailed event data.
  * </p>
  * <p>
- * The entity maintains a relationship to the parent transaction through the transaction_id
- * foreign key, supporting the one-to-many relationship from transactions to events.
+ * The payment_events table maintains a complete history of all activities related
+ * to payment transactions, essential for troubleshooting, compliance, and user tracking.
+ * Each event is immutable once created and is associated with a specific payment transaction.
  * </p>
  */
 public class PaymentEventEntity extends PaymentEntityBase {
@@ -32,39 +33,41 @@ public class PaymentEventEntity extends PaymentEntityBase {
     private UUID transactionId;
 
     /**
-     * Event classification (e.g., CREATED, STATUS_CHANGE, CAPTURE, REFUND).
+     * Classification of the event (e.g., CREATED, STATUS_CHANGE, CAPTURE, REFUND).
      */
     private String eventType;
 
     /**
-     * Status before event (may be null for non-status-change events).
+     * Status of the transaction before this event occurred.
+     * May be null for events that don't involve status changes.
      */
-    private PaymentStatus previousStatus;
+    private String previousStatus;
 
     /**
-     * Status after event (may be null for non-status-change events).
+     * Status of the transaction after this event occurred.
+     * May be null for events that don't involve status changes.
      */
-    private PaymentStatus newStatus;
+    private String newStatus;
 
     /**
-     * Detailed event information in JSON format.
-     * This field can store structured data specific to each event type,
-     * such as capture amounts, refund details, or processing metadata.
+     * Detailed information about the event in JSONB format.
+     * This can include operation-specific details, amounts, error messages, etc.
      */
     private String eventData;
 
     /**
-     * Event timestamp.
+     * Timestamp when the event occurred.
      */
     private Instant createdAt;
 
     /**
-     * Actor identifier (user or system that triggered the event).
+     * Identifier of the user or system component that created this event.
      */
     private String createdBy;
 
     /**
-     * Request correlation ID for tracking related events across requests.
+     * Correlation ID to track related events across a request or operation.
+     * Useful for linking events that are part of the same logical operation.
      */
     private UUID correlationId;
 
@@ -76,58 +79,36 @@ public class PaymentEventEntity extends PaymentEntityBase {
     }
 
     /**
-     * Creates a new event entity with required fields.
+     * Creates a new payment event entity with required fields.
      *
-     * @param transactionId The associated transaction identifier
-     * @param eventType The event classification
-     * @param createdBy The actor identifier
+     * @param transactionId Reference to the associated payment transaction
+     * @param eventType Classification of the event
+     * @param createdBy Identifier of the actor creating the event
      */
     public PaymentEventEntity(UUID transactionId, String eventType, String createdBy) {
-        this.eventId = UUID.randomUUID();
+        this.eventId = generateId();
         this.transactionId = transactionId;
         this.eventType = eventType;
         this.createdBy = createdBy;
-        this.createdAt = Instant.now();
+        this.createdAt = getCurrentTimestamp();
     }
 
     /**
-     * Creates a new status change event entity.
+     * Creates a new payment event entity with all fields.
      *
-     * @param transactionId The associated transaction identifier
-     * @param previousStatus The status before the change
-     * @param newStatus The status after the change
-     * @param createdBy The actor identifier
-     * @param correlationId Optional correlation ID for tracking related events
-     */
-    public PaymentEventEntity(UUID transactionId, PaymentStatus previousStatus, 
-                             PaymentStatus newStatus, String createdBy, UUID correlationId) {
-        this.eventId = UUID.randomUUID();
-        this.transactionId = transactionId;
-        this.eventType = "STATUS_CHANGE";
-        this.previousStatus = previousStatus;
-        this.newStatus = newStatus;
-        this.createdBy = createdBy;
-        this.correlationId = correlationId;
-        this.createdAt = Instant.now();
-    }
-
-    /**
-     * Creates a new event entity with all fields.
-     *
-     * @param eventId The event identifier
-     * @param transactionId The associated transaction identifier
-     * @param eventType The event classification
-     * @param previousStatus The status before the event
-     * @param newStatus The status after the event
-     * @param eventData The detailed event information
-     * @param createdAt The event timestamp
-     * @param createdBy The actor identifier
-     * @param correlationId The request correlation ID
+     * @param eventId Unique identifier for this event
+     * @param transactionId Reference to the associated payment transaction
+     * @param eventType Classification of the event
+     * @param previousStatus Status before the event (may be null)
+     * @param newStatus Status after the event (may be null)
+     * @param eventData Detailed event information in JSON format
+     * @param createdAt Timestamp when the event occurred
+     * @param createdBy Identifier of the actor that created this event
+     * @param correlationId ID to track related events (may be null)
      */
     public PaymentEventEntity(UUID eventId, UUID transactionId, String eventType,
-                             PaymentStatus previousStatus, PaymentStatus newStatus,
-                             String eventData, Instant createdAt, String createdBy,
-                             UUID correlationId) {
+                             String previousStatus, String newStatus, String eventData,
+                             Instant createdAt, String createdBy, UUID correlationId) {
         this.eventId = eventId;
         this.transactionId = transactionId;
         this.eventType = eventType;
@@ -140,156 +121,92 @@ public class PaymentEventEntity extends PaymentEntityBase {
     }
 
     /**
-     * Creates a transaction creation event.
+     * Factory method to create a status change event entity.
      *
-     * @param transactionId The transaction identifier
-     * @param createdBy The actor identifier
-     * @return A new PaymentEventEntity for transaction creation
-     */
-    public static PaymentEventEntity createTransactionCreatedEvent(UUID transactionId, String createdBy) {
-        PaymentEventEntity event = new PaymentEventEntity();
-        event.setEventId(UUID.randomUUID());
-        event.setTransactionId(transactionId);
-        event.setEventType("CREATED");
-        event.setNewStatus(PaymentStatus.CREATED);
-        event.setCreatedAt(Instant.now());
-        event.setCreatedBy(createdBy);
-        return event;
-    }
-
-    /**
-     * Creates a status change event.
-     *
-     * @param transactionId The transaction identifier
-     * @param previousStatus The previous status
-     * @param newStatus The new status
-     * @param createdBy The actor identifier
-     * @param correlationId Optional correlation ID
-     * @return A new PaymentEventEntity for status change
+     * @param transactionId Reference to the associated payment transaction
+     * @param previousStatus Status before the change
+     * @param newStatus Status after the change
+     * @param eventData Additional event details
+     * @param createdBy Identifier of the actor making the change
+     * @param correlationId ID to track related events (may be null)
+     * @return A new PaymentEventEntity instance representing a status change
      */
     public static PaymentEventEntity createStatusChangeEvent(UUID transactionId,
                                                            PaymentStatus previousStatus,
                                                            PaymentStatus newStatus,
+                                                           String eventData,
                                                            String createdBy,
                                                            UUID correlationId) {
-        PaymentEventEntity event = new PaymentEventEntity();
-        event.setEventId(UUID.randomUUID());
-        event.setTransactionId(transactionId);
-        event.setEventType("STATUS_CHANGE");
-        event.setPreviousStatus(previousStatus);
-        event.setNewStatus(newStatus);
-        event.setCreatedAt(Instant.now());
-        event.setCreatedBy(createdBy);
-        event.setCorrelationId(correlationId);
-        return event;
+        return new PaymentEventEntity(
+                UUID.randomUUID(),
+                transactionId,
+                "STATUS_CHANGE",
+                previousStatus != null ? previousStatus.name() : null,
+                newStatus != null ? newStatus.name() : null,
+                eventData,
+                Instant.now(),
+                createdBy,
+                correlationId
+        );
     }
 
     /**
-     * Creates a capture event.
+     * Factory method to create a general event entity without status change.
      *
-     * @param transactionId The transaction identifier
-     * @param captureAmount The amount captured
-     * @param createdBy The actor identifier
-     * @param correlationId Optional correlation ID
-     * @return A new PaymentEventEntity for capture
+     * @param transactionId Reference to the associated payment transaction
+     * @param eventType Classification of the event
+     * @param eventData Detailed event information
+     * @param createdBy Identifier of the actor creating the event
+     * @param correlationId ID to track related events (may be null)
+     * @return A new PaymentEventEntity instance
      */
-    public static PaymentEventEntity createCaptureEvent(UUID transactionId,
-                                                      String captureAmount,
-                                                      String createdBy,
-                                                      UUID correlationId) {
-        PaymentEventEntity event = new PaymentEventEntity();
-        event.setEventId(UUID.randomUUID());
-        event.setTransactionId(transactionId);
-        event.setEventType("CAPTURE");
-        event.setPreviousStatus(PaymentStatus.AUTHORIZED);
-        event.setNewStatus(PaymentStatus.CAPTURED);
-        event.setEventData("{\"captureAmount\":\"" + captureAmount + "\"}");
-        event.setCreatedAt(Instant.now());
-        event.setCreatedBy(createdBy);
-        event.setCorrelationId(correlationId);
-        return event;
+    public static PaymentEventEntity createEvent(UUID transactionId,
+                                               String eventType,
+                                               String eventData,
+                                               String createdBy,
+                                               UUID correlationId) {
+        return new PaymentEventEntity(
+                UUID.randomUUID(),
+                transactionId,
+                eventType,
+                null,
+                null,
+                eventData,
+                Instant.now(),
+                createdBy,
+                correlationId
+        );
     }
 
     /**
-     * Creates a refund event.
+     * Factory method to create an error event entity.
      *
-     * @param transactionId The transaction identifier
-     * @param refundAmount The amount refunded
-     * @param reason The refund reason
-     * @param createdBy The actor identifier
-     * @param correlationId Optional correlation ID
-     * @return A new PaymentEventEntity for refund
-     */
-    public static PaymentEventEntity createRefundEvent(UUID transactionId,
-                                                     String refundAmount,
-                                                     String reason,
-                                                     String createdBy,
-                                                     UUID correlationId) {
-        PaymentEventEntity event = new PaymentEventEntity();
-        event.setEventId(UUID.randomUUID());
-        event.setTransactionId(transactionId);
-        event.setEventType("REFUND");
-        event.setPreviousStatus(PaymentStatus.CAPTURED);
-        event.setNewStatus(PaymentStatus.REFUNDED);
-        event.setEventData("{\"refundAmount\":\"" + refundAmount + "\",\"reason\":\"" + reason + "\"}");
-        event.setCreatedAt(Instant.now());
-        event.setCreatedBy(createdBy);
-        event.setCorrelationId(correlationId);
-        return event;
-    }
-
-    /**
-     * Creates a void event.
-     *
-     * @param transactionId The transaction identifier
-     * @param reason The void reason
-     * @param createdBy The actor identifier
-     * @param correlationId Optional correlation ID
-     * @return A new PaymentEventEntity for void
-     */
-    public static PaymentEventEntity createVoidEvent(UUID transactionId,
-                                                   String reason,
-                                                   String createdBy,
-                                                   UUID correlationId) {
-        PaymentEventEntity event = new PaymentEventEntity();
-        event.setEventId(UUID.randomUUID());
-        event.setTransactionId(transactionId);
-        event.setEventType("VOID");
-        event.setPreviousStatus(PaymentStatus.AUTHORIZED);
-        event.setNewStatus(PaymentStatus.VOIDED);
-        event.setEventData("{\"reason\":\"" + reason + "\"}");
-        event.setCreatedAt(Instant.now());
-        event.setCreatedBy(createdBy);
-        event.setCorrelationId(correlationId);
-        return event;
-    }
-
-    /**
-     * Creates a processing error event.
-     *
-     * @param transactionId The transaction identifier
-     * @param errorCode The error code
-     * @param errorMessage The error message
-     * @param createdBy The actor identifier
-     * @param correlationId Optional correlation ID
-     * @return A new PaymentEventEntity for processing error
+     * @param transactionId Reference to the associated payment transaction
+     * @param errorMessage Description of the error
+     * @param errorDetails Technical details about the error
+     * @param createdBy Identifier of the component reporting the error
+     * @param correlationId ID to track related events (may be null)
+     * @return A new PaymentEventEntity instance representing an error
      */
     public static PaymentEventEntity createErrorEvent(UUID transactionId,
-                                                    String errorCode,
                                                     String errorMessage,
+                                                    String errorDetails,
                                                     String createdBy,
                                                     UUID correlationId) {
-        PaymentEventEntity event = new PaymentEventEntity();
-        event.setEventId(UUID.randomUUID());
-        event.setTransactionId(transactionId);
-        event.setEventType("ERROR");
-        event.setPreviousStatus(PaymentStatus.PROCESSING);
-        event.setNewStatus(PaymentStatus.FAILED);
-        event.setEventData("{\"errorCode\":\"" + errorCode + "\",\"errorMessage\":\"" + errorMessage + "\"}");
-        event.setCreatedAt(Instant.now());
-        event.setCreatedBy(createdBy);
-        event.setCorrelationId(correlationId);
-        return event;
+        String errorData = String.format("{\"message\":\"%s\",\"details\":%s}",
+                errorMessage, errorDetails);
+        
+        return new PaymentEventEntity(
+                UUID.randomUUID(),
+                transactionId,
+                "ERROR",
+                null,
+                null,
+                errorData,
+                Instant.now(),
+                createdBy,
+                correlationId
+        );
     }
 
     /**
@@ -297,40 +214,92 @@ public class PaymentEventEntity extends PaymentEntityBase {
      *
      * @throws IllegalArgumentException if any validation fails
      */
+    @Override
     public void validate() {
+        validateId(eventId, "Event ID");
+        validateId(transactionId, "Transaction ID");
+        validateRequiredString(eventType, "Event type");
+        validateTimestamp(createdAt, "Created");
+        validateRequiredString(createdBy, "Created by");
+        
+        // If this is a status change event, validate status values
+        if ("STATUS_CHANGE".equals(eventType)) {
+            if (previousStatus == null && newStatus == null) {
+                throw new IllegalArgumentException("Status change event must have at least one status value");
+            }
+        }
+    }
+
+    /**
+     * Prepares the entity for persistence operations.
+     * <p>
+     * This method sets creation timestamp if it is not already set,
+     * and generates an event ID if it is not already set.
+     * </p>
+     */
+    @Override
+    public void prepareForPersistence() {
         if (eventId == null) {
-            throw new IllegalArgumentException("Event ID is required");
-        }
-        
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID is required");
-        }
-        
-        if (eventType == null || eventType.isEmpty()) {
-            throw new IllegalArgumentException("Event type is required");
+            eventId = generateId();
         }
         
         if (createdAt == null) {
-            throw new IllegalArgumentException("Created timestamp is required");
+            createdAt = getCurrentTimestamp();
         }
-        
-        if (createdBy == null || createdBy.isEmpty()) {
-            throw new IllegalArgumentException("Created by is required");
-        }
-        
-        // Validate status transitions if this is a status change event
-        if ("STATUS_CHANGE".equals(eventType)) {
-            if (previousStatus == null) {
-                throw new IllegalArgumentException("Previous status is required for status change events");
-            }
-            
-            if (newStatus == null) {
-                throw new IllegalArgumentException("New status is required for status change events");
-            }
-            
-            // Validate that the status transition is allowed
-            PaymentStatus.validateTransition(previousStatus, newStatus);
-        }
+    }
+
+    /**
+     * Updates the entity's audit information before an update operation.
+     * <p>
+     * Payment events are immutable once created, so this method throws
+     * an exception if called.
+     * </p>
+     * 
+     * @throws UnsupportedOperationException Payment events are immutable
+     */
+    @Override
+    public void prepareForUpdate() {
+        throw new UnsupportedOperationException("Payment events are immutable and cannot be updated");
+    }
+
+    /**
+     * Checks if this entity is new (not yet persisted).
+     *
+     * @return true if the entity is new, false otherwise
+     */
+    @Override
+    public boolean isNew() {
+        return createdAt == null;
+    }
+
+    /**
+     * Gets the primary key of this entity.
+     *
+     * @return The event ID (primary key)
+     */
+    @Override
+    public UUID getId() {
+        return eventId;
+    }
+
+    /**
+     * Creates a deep copy of the entity.
+     *
+     * @return A new PaymentEventEntity with the same values
+     */
+    @Override
+    public Object clone() {
+        return new PaymentEventEntity(
+            this.eventId,
+            this.transactionId,
+            this.eventType,
+            this.previousStatus,
+            this.newStatus,
+            this.eventData,
+            this.createdAt,
+            this.createdBy,
+            this.correlationId
+        );
     }
 
     /**
@@ -338,8 +307,9 @@ public class PaymentEventEntity extends PaymentEntityBase {
      *
      * @return A PaymentEvent domain model object
      */
-    public io.briklabs.sample.payments.model.PaymentEvent toDomainModel() {
-        return new io.briklabs.sample.payments.model.PaymentEvent(
+    @Override
+    public PaymentEvent toDomainModel() {
+        return new PaymentEvent(
             eventId,
             transactionId,
             eventType,
@@ -358,8 +328,7 @@ public class PaymentEventEntity extends PaymentEntityBase {
      * @param domainModel The domain model object
      * @return A PaymentEventEntity
      */
-    public static PaymentEventEntity fromDomainModel(
-            io.briklabs.sample.payments.model.PaymentEvent domainModel) {
+    public static PaymentEventEntity fromDomainModel(PaymentEvent domainModel) {
         return new PaymentEventEntity(
             domainModel.getEventId(),
             domainModel.getTransactionId(),
@@ -399,19 +368,19 @@ public class PaymentEventEntity extends PaymentEntityBase {
         this.eventType = eventType;
     }
 
-    public PaymentStatus getPreviousStatus() {
+    public String getPreviousStatus() {
         return previousStatus;
     }
 
-    public void setPreviousStatus(PaymentStatus previousStatus) {
+    public void setPreviousStatus(String previousStatus) {
         this.previousStatus = previousStatus;
     }
 
-    public PaymentStatus getNewStatus() {
+    public String getNewStatus() {
         return newStatus;
     }
 
-    public void setNewStatus(PaymentStatus newStatus) {
+    public void setNewStatus(String newStatus) {
         this.newStatus = newStatus;
     }
 
@@ -466,8 +435,8 @@ public class PaymentEventEntity extends PaymentEntityBase {
                 "eventId=" + eventId +
                 ", transactionId=" + transactionId +
                 ", eventType='" + eventType + '\'' +
-                ", previousStatus=" + previousStatus +
-                ", newStatus=" + newStatus +
+                ", previousStatus='" + previousStatus + '\'' +
+                ", newStatus='" + newStatus + '\'' +
                 ", createdAt=" + createdAt +
                 ", createdBy='" + createdBy + '\'' +
                 ", correlationId=" + correlationId +

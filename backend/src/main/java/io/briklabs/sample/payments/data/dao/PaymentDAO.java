@@ -1,207 +1,177 @@
 package io.briklabs.sample.payments.data.dao;
 
+import java.sql.Connection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-import io.briklabs.sample.payments.data.exception.ConnectionException;
-import io.briklabs.sample.payments.data.exception.QueryExecutionException;
-import io.briklabs.sample.payments.data.exception.ResourceNotFoundException;
-import io.briklabs.sample.payments.data.exception.TransactionException;
-import io.briklabs.sample.payments.data.exception.ValidationException;
-import io.briklabs.sample.payments.data.query.PaymentFilterParams;
-
 /**
  * Generic interface for payment data access operations.
- * <p>
- * This interface defines the standard operations to be performed on payment entities.
- * It serves as the foundation for all payment-specific DAOs, establishing a consistent
- * contract for database operations such as create, read, update, and delete.
- * </p>
- * <p>
- * All payment entities follow this pattern for data access, enabling uniform handling
- * across different payment data types while supporting specialized operations through
- * concrete implementations.
- * </p>
- *
- * @param <T> the entity type this DAO manages
- * @param <ID> the type of the entity's primary identifier
+ * Provides a consistent contract for database operations across all payment entities.
+ * 
+ * @param <T> The entity type this DAO operates on
+ * @param <ID> The type of the entity's primary key (typically UUID)
  */
 public interface PaymentDAO<T, ID> {
-
+    
     /**
      * Creates a new entity in the database.
-     *
-     * @param entity the entity to create
-     * @return the created entity with any database-generated values (e.g., IDs)
-     * @throws ValidationException if the entity fails validation
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * 
+     * @param entity The entity to create
+     * @return The created entity with any generated fields populated
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    T create(T entity) throws ValidationException, ConnectionException, 
-                             QueryExecutionException, TransactionException;
-
+    T create(T entity);
+    
     /**
      * Retrieves an entity by its primary identifier.
-     *
-     * @param id the entity identifier
-     * @return an Optional containing the found entity, or empty if not found
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * 
+     * @param id The primary identifier of the entity
+     * @return An Optional containing the entity if found, or empty if not found
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    Optional<T> findById(ID id) throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Retrieves an entity by its primary identifier, throwing an exception if not found.
-     *
-     * @param id the entity identifier
-     * @return the found entity
-     * @throws ResourceNotFoundException if the entity is not found
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    default T getById(ID id) throws ResourceNotFoundException, ConnectionException, QueryExecutionException {
-        return findById(id).orElseThrow(() -> 
-            new ResourceNotFoundException("Entity not found with id: " + id));
-    }
-
+    Optional<T> findById(ID id);
+    
     /**
      * Updates an existing entity in the database.
-     *
-     * @param entity the entity to update
-     * @return the updated entity
-     * @throws ValidationException if the entity fails validation
-     * @throws ResourceNotFoundException if the entity to update is not found
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * 
+     * @param entity The entity to update
+     * @return The updated entity
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     * @throws io.briklabs.sample.payments.data.exception.PaymentEntityNotFoundException if the entity does not exist
      */
-    T update(T entity) throws ValidationException, ResourceNotFoundException, 
-                             ConnectionException, QueryExecutionException, TransactionException;
-
+    T update(T entity);
+    
     /**
-     * Deletes an entity by its primary identifier.
-     *
-     * @param id the entity identifier
+     * Deletes an entity from the database.
+     * 
+     * @param id The primary identifier of the entity to delete
      * @return true if the entity was deleted, false if it did not exist
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    boolean delete(ID id) throws ConnectionException, QueryExecutionException, TransactionException;
-
+    boolean delete(ID id);
+    
     /**
      * Queries for entities based on the provided filter parameters.
-     *
-     * @param filterParams the parameters to filter the query results
-     * @return a list of entities matching the filter criteria
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * 
+     * @param params The query parameters to filter by
+     * @return A list of entities matching the query parameters
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<T> query(PaymentFilterParams filterParams) throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Counts the number of entities matching the provided filter parameters.
-     *
-     * @param filterParams the parameters to filter the count
-     * @return the count of matching entities
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    long count(PaymentFilterParams filterParams) throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Checks if an entity with the given ID exists.
-     *
-     * @param id the entity identifier
-     * @return true if an entity with the given ID exists, false otherwise
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    boolean exists(ID id) throws ConnectionException, QueryExecutionException;
-
+    List<T> query(Object params);
+    
     /**
      * Begins a database transaction.
-     * <p>
-     * This method should be called before a sequence of operations that need to be executed
-     * within a single transaction.
-     * </p>
-     *
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws TransactionException if the transaction cannot be started
+     * 
+     * @return A Connection with transaction started
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    void beginTransaction() throws ConnectionException, TransactionException;
-
+    Connection beginTransaction();
+    
     /**
-     * Commits the current database transaction.
-     * <p>
-     * This method should be called after a sequence of operations that were executed
-     * within a single transaction to persist the changes.
-     * </p>
-     *
-     * @throws TransactionException if the transaction cannot be committed
+     * Commits a database transaction.
+     * 
+     * @param connection The connection with an active transaction
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    void commitTransaction() throws TransactionException;
-
+    void commitTransaction(Connection connection);
+    
     /**
-     * Rolls back the current database transaction.
-     * <p>
-     * This method should be called to discard changes made within a transaction
-     * when an error occurs.
-     * </p>
-     *
-     * @throws TransactionException if the transaction cannot be rolled back
+     * Rolls back a database transaction.
+     * 
+     * @param connection The connection with an active transaction
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    void rollbackTransaction() throws TransactionException;
-
+    void rollbackTransaction(Connection connection);
+    
     /**
      * Creates multiple entities in a batch operation.
-     * <p>
-     * This method is optimized for bulk insertions, providing better performance
-     * than individual create operations.
-     * </p>
-     *
-     * @param entities the list of entities to create
-     * @return the list of created entities with any database-generated values
-     * @throws ValidationException if any entity fails validation
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * 
+     * @param entities The list of entities to create
+     * @return The list of created entities with any generated fields populated
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<T> batchCreate(List<T> entities) throws ValidationException, ConnectionException,
-                                               QueryExecutionException, TransactionException;
-
+    List<T> batchCreate(List<T> entities);
+    
     /**
      * Updates multiple entities in a batch operation.
-     * <p>
-     * This method is optimized for bulk updates, providing better performance
-     * than individual update operations.
-     * </p>
-     *
-     * @param entities the list of entities to update
-     * @return the list of updated entities
-     * @throws ValidationException if any entity fails validation
-     * @throws ResourceNotFoundException if any entity to update is not found
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * 
+     * @param entities The list of entities to update
+     * @return The list of updated entities
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<T> batchUpdate(List<T> entities) throws ValidationException, ResourceNotFoundException,
-                                               ConnectionException, QueryExecutionException, TransactionException;
-
+    List<T> batchUpdate(List<T> entities);
+    
     /**
-     * Deletes multiple entities in a batch operation.
-     * <p>
-     * This method is optimized for bulk deletions, providing better performance
-     * than individual delete operations.
-     * </p>
-     *
-     * @param ids the list of entity identifiers to delete
-     * @return the number of entities deleted
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * Executes a database operation within a transaction.
+     * 
+     * @param <R> The return type of the operation
+     * @param operation The operation to execute
+     * @return The result of the operation
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    int batchDelete(List<ID> ids) throws ConnectionException, QueryExecutionException, TransactionException;
+    <R> R executeInTransaction(TransactionOperation<R> operation);
+    
+    /**
+     * Functional interface for operations that execute within a transaction.
+     *
+     * @param <R> The return type of the operation
+     */
+    @FunctionalInterface
+    interface TransactionOperation<R> {
+        /**
+         * Executes an operation within a transaction.
+         *
+         * @param connection The database connection with an active transaction
+         * @return The result of the operation
+         * @throws Exception if an error occurs during the operation
+         */
+        R execute(Connection connection) throws Exception;
+    }
+    
+    /**
+     * Counts the total number of entities matching the provided filter parameters.
+     * 
+     * @param params The query parameters to filter by
+     * @return The count of matching entities
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    long count(Object params);
+    
+    /**
+     * Checks if an entity with the given ID exists.
+     * 
+     * @param id The primary identifier to check
+     * @return true if an entity with the given ID exists, false otherwise
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    boolean exists(ID id);
+    
+    /**
+     * Retrieves entities by their organization ID.
+     * 
+     * @param organizationId The organization ID to filter by
+     * @return A list of entities belonging to the specified organization
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    List<T> findByOrganizationId(UUID organizationId);
+    
+    /**
+     * Retrieves entities by their account ID.
+     * 
+     * @param accountId The account ID to filter by
+     * @return A list of entities belonging to the specified account
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    List<T> findByAccountId(UUID accountId);
+    
+    /**
+     * Retrieves entities by both organization ID and account ID.
+     * 
+     * @param organizationId The organization ID to filter by
+     * @param accountId The account ID to filter by
+     * @return A list of entities belonging to the specified organization and account
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    List<T> findByOrganizationAndAccountId(UUID organizationId, UUID accountId);
 }

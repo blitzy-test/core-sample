@@ -1,21 +1,16 @@
 package io.briklabs.sample.payments.data.dao.impl;
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.zaxxer.hikari.HikariDataSource;
-
 import io.briklabs.sample.config.ConfigSource;
 import io.briklabs.sample.config.DatabaseConfig;
+import io.briklabs.sample.payments.data.ConnectionManager;
 import io.briklabs.sample.payments.data.dao.PaymentDAOFactory;
 import io.briklabs.sample.payments.data.dao.PaymentDataDAO;
 import io.briklabs.sample.payments.data.dao.PaymentEventDAO;
 import io.briklabs.sample.payments.data.dao.PaymentFeeDAO;
 import io.briklabs.sample.payments.data.dao.PaymentTransactionDAO;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Implementation of the PaymentDAOFactory interface that creates and manages DAO instances.
@@ -25,35 +20,43 @@ import io.briklabs.sample.payments.data.dao.PaymentTransactionDAO;
  * concrete DAO implementations through a unified interface while concealing implementation details.
  * </p>
  * <p>
- * The factory implements the Singleton pattern for efficient DAO instance management, ensuring
- * that only one instance of each DAO is created and reused throughout the application lifecycle.
- * It also supports test mode for mock implementations to facilitate testing.
+ * The factory implements the Singleton pattern for each DAO type, ensuring efficient resource
+ * usage and consistent state across the application. It also supports test mode for easier
+ * unit testing with mock implementations.
  * </p>
  */
 public class PaymentDAOFactoryImpl implements PaymentDAOFactory {
 
     private static final Logger logger = LoggerFactory.getLogger(PaymentDAOFactoryImpl.class);
-    
+
     /**
      * The HikariCP data source for database connectivity.
      */
     private final HikariDataSource dataSource;
-    
+
     /**
      * Flag indicating whether the factory is operating in test mode.
      */
     private final boolean testMode;
-    
+
     /**
-     * Cache of DAO instances to implement the Singleton pattern.
+     * Connection manager for database operations.
      */
-    private final Map<Class<?>, Object> daoInstances = new ConcurrentHashMap<>();
-    
+    private final ConnectionManager connectionManager;
+
+    /**
+     * Singleton instances of DAO implementations.
+     */
+    private PaymentTransactionDAO paymentTransactionDAO;
+    private PaymentDataDAO paymentDataDAO;
+    private PaymentFeeDAO paymentFeeDAO;
+    private PaymentEventDAO paymentEventDAO;
+
     /**
      * Flag indicating whether the factory has been initialized.
      */
     private boolean initialized = false;
-    
+
     /**
      * Creates a new PaymentDAOFactoryImpl with the specified data source.
      *
@@ -62,7 +65,7 @@ public class PaymentDAOFactoryImpl implements PaymentDAOFactory {
     public PaymentDAOFactoryImpl(HikariDataSource dataSource) {
         this(dataSource, false);
     }
-    
+
     /**
      * Creates a new PaymentDAOFactoryImpl with the specified data source and test mode flag.
      *
@@ -70,384 +73,206 @@ public class PaymentDAOFactoryImpl implements PaymentDAOFactory {
      * @param testMode Flag indicating whether to use test implementations
      */
     public PaymentDAOFactoryImpl(HikariDataSource dataSource, boolean testMode) {
+        logger.info("Creating PaymentDAOFactory with testMode={}", testMode);
         this.dataSource = dataSource;
         this.testMode = testMode;
-        logger.info("Created PaymentDAOFactory with testMode={}", testMode);
+        this.connectionManager = new ConnectionManager(dataSource);
     }
-    
+
     /**
-     * Initializes all DAO instances.
-     * <p>
-     * This method ensures that all DAO implementations are properly initialized
-     * and ready for use. It should be called during application startup.
-     * </p>
+     * Creates a new PaymentDAOFactoryImpl with the specified database configuration.
+     *
+     * @param databaseConfig The database configuration
+     * @param configSource The configuration source
+     */
+    public PaymentDAOFactoryImpl(DatabaseConfig databaseConfig, ConfigSource configSource) {
+        this(databaseConfig, configSource, false);
+    }
+
+    /**
+     * Creates a new PaymentDAOFactoryImpl with the specified database configuration and test mode flag.
+     *
+     * @param databaseConfig The database configuration
+     * @param configSource The configuration source
+     * @param testMode Flag indicating whether to use test implementations
+     */
+    public PaymentDAOFactoryImpl(DatabaseConfig databaseConfig, ConfigSource configSource, boolean testMode) {
+        logger.info("Creating PaymentDAOFactory with database configuration and testMode={}", testMode);
+        this.connectionManager = new ConnectionManager(databaseConfig, configSource);
+        this.dataSource = connectionManager.getDataSource();
+        this.testMode = testMode;
+    }
+
+    /**
+     * {@inheritDoc}
      */
     @Override
     public void initialize() {
         if (initialized) {
-            logger.warn("PaymentDAOFactory already initialized");
+            logger.debug("PaymentDAOFactory already initialized");
             return;
         }
-        
+
         logger.info("Initializing PaymentDAOFactory");
-        
-        // Pre-initialize all DAO instances
-        getPaymentTransactionDAO();
-        getPaymentDataDAO();
-        getPaymentFeeDAO();
-        getPaymentEventDAO();
-        
-        initialized = true;
-        logger.info("PaymentDAOFactory initialization complete");
+
+        try {
+            // Create DAO instances
+            if (testMode) {
+                // In test mode, we would create mock implementations
+                // This would typically be handled by a testing framework like Mockito
+                logger.info("Creating mock DAO implementations for test mode");
+                // For now, we'll use the real implementations even in test mode
+                createRealImplementations();
+            } else {
+                // Create real implementations
+                createRealImplementations();
+            }
+
+            initialized = true;
+            logger.info("PaymentDAOFactory initialized successfully");
+        } catch (Exception e) {
+            logger.error("Failed to initialize PaymentDAOFactory", e);
+            throw new RuntimeException("Failed to initialize PaymentDAOFactory", e);
+        }
     }
-    
+
     /**
-     * Releases all resources held by the DAO implementations.
-     * <p>
-     * This method ensures proper cleanup of resources when the DAOs are no longer
-     * needed. It should be called during application shutdown.
-     * </p>
+     * Creates real DAO implementations.
+     */
+    private void createRealImplementations() {
+        logger.debug("Creating real DAO implementations");
+        paymentTransactionDAO = new PaymentTransactionDaoImpl(connectionManager);
+        paymentDataDAO = new PaymentDataDaoImpl(connectionManager);
+        paymentFeeDAO = new PaymentFeeDaoImpl(connectionManager);
+        paymentEventDAO = new PaymentEventDaoImpl(connectionManager);
+    }
+
+    /**
+     * {@inheritDoc}
      */
     @Override
     public void shutdown() {
         logger.info("Shutting down PaymentDAOFactory");
         
-        // Clear all cached instances
-        daoInstances.clear();
+        // Release resources
+        paymentTransactionDAO = null;
+        paymentDataDAO = null;
+        paymentFeeDAO = null;
+        paymentEventDAO = null;
         
-        // Close the data source if it's not null and not already closed
-        if (dataSource != null && !dataSource.isClosed()) {
-            dataSource.close();
-            logger.info("Closed HikariCP data source");
+        // Shutdown connection manager
+        if (connectionManager != null) {
+            connectionManager.shutdown();
         }
         
         initialized = false;
-        logger.info("PaymentDAOFactory shutdown complete");
+        logger.info("PaymentDAOFactory shut down successfully");
     }
-    
+
     /**
-     * Gets the PaymentTransactionDAO implementation.
-     * <p>
-     * This DAO provides access to payment transaction data, supporting operations
-     * such as creation, retrieval, updates, and complex querying capabilities.
-     * </p>
-     *
-     * @return The PaymentTransactionDAO implementation
+     * {@inheritDoc}
      */
     @Override
     public PaymentTransactionDAO getPaymentTransactionDAO() {
-        return getOrCreateDAO(PaymentTransactionDAO.class, () -> {
-            if (testMode) {
-                // Return a mock implementation for testing
-                logger.debug("Creating mock PaymentTransactionDAO for test mode");
-                return createMockPaymentTransactionDAO();
-            } else {
-                // Return the real implementation
-                logger.debug("Creating PaymentTransactionDAO implementation");
-                return createPaymentTransactionDAO();
-            }
-        });
+        ensureInitialized();
+        return paymentTransactionDAO;
     }
-    
+
     /**
-     * Gets the PaymentDataDAO implementation.
-     * <p>
-     * This DAO provides access to payment method data, supporting operations
-     * for storing and retrieving payment instrument details.
-     * </p>
-     *
-     * @return The PaymentDataDAO implementation
+     * {@inheritDoc}
      */
     @Override
     public PaymentDataDAO getPaymentDataDAO() {
-        return getOrCreateDAO(PaymentDataDAO.class, () -> {
-            if (testMode) {
-                // Return a mock implementation for testing
-                logger.debug("Creating mock PaymentDataDAO for test mode");
-                return createMockPaymentDataDAO();
-            } else {
-                // Return the real implementation
-                logger.debug("Creating PaymentDataDAO implementation");
-                return createPaymentDataDAO();
-            }
-        });
+        ensureInitialized();
+        return paymentDataDAO;
     }
-    
+
     /**
-     * Gets the PaymentFeeDAO implementation.
-     * <p>
-     * This DAO provides access to payment fee data, supporting operations
-     * for fee tracking, reporting, and analysis.
-     * </p>
-     *
-     * @return The PaymentFeeDAO implementation
+     * {@inheritDoc}
      */
     @Override
     public PaymentFeeDAO getPaymentFeeDAO() {
-        return getOrCreateDAO(PaymentFeeDAO.class, () -> {
-            if (testMode) {
-                // Return a mock implementation for testing
-                logger.debug("Creating mock PaymentFeeDAO for test mode");
-                return createMockPaymentFeeDAO();
-            } else {
-                // Return the real implementation
-                logger.debug("Creating PaymentFeeDAO implementation");
-                return createPaymentFeeDAO();
-            }
-        });
+        ensureInitialized();
+        return paymentFeeDAO;
     }
-    
+
     /**
-     * Gets the PaymentEventDAO implementation.
-     * <p>
-     * This DAO provides access to payment event data, supporting operations
-     * for comprehensive event tracking and audit trails.
-     * </p>
-     *
-     * @return The PaymentEventDAO implementation
+     * {@inheritDoc}
      */
     @Override
     public PaymentEventDAO getPaymentEventDAO() {
-        return getOrCreateDAO(PaymentEventDAO.class, () -> {
-            if (testMode) {
-                // Return a mock implementation for testing
-                logger.debug("Creating mock PaymentEventDAO for test mode");
-                return createMockPaymentEventDAO();
-            } else {
-                // Return the real implementation
-                logger.debug("Creating PaymentEventDAO implementation");
-                return createPaymentEventDAO();
-            }
-        });
+        ensureInitialized();
+        return paymentEventDAO;
     }
-    
+
     /**
-     * Checks if the factory is operating in test mode.
-     * <p>
-     * Test mode may use different implementations or configurations
-     * suitable for testing environments.
-     * </p>
-     *
-     * @return true if the factory is in test mode, false otherwise
+     * {@inheritDoc}
      */
     @Override
     public boolean isTestMode() {
         return testMode;
     }
-    
+
     /**
-     * Gets the HikariDataSource used by this factory.
-     * <p>
-     * This method provides access to the underlying connection pool
-     * for advanced configuration or monitoring.
-     * </p>
-     *
-     * @return The HikariDataSource instance
+     * {@inheritDoc}
      */
     @Override
     public HikariDataSource getDataSource() {
         return dataSource;
     }
-    
+
     /**
-     * Gets or creates a DAO instance of the specified type.
-     * <p>
-     * This method implements the Singleton pattern for DAO instances,
-     * ensuring that only one instance of each DAO type is created.
-     * </p>
-     *
-     * @param <T> The DAO interface type
-     * @param daoClass The DAO interface class
-     * @param creator A function that creates a new DAO instance
-     * @return The DAO instance
+     * Ensures that the factory has been initialized.
+     * If not, initializes it.
      */
-    @SuppressWarnings("unchecked")
-    private <T> T getOrCreateDAO(Class<T> daoClass, DAOCreator<T> creator) {
-        return (T) daoInstances.computeIfAbsent(daoClass, k -> creator.create());
+    private void ensureInitialized() {
+        if (!initialized) {
+            initialize();
+        }
     }
-    
+
     /**
-     * Creates a real PaymentTransactionDAO implementation.
+     * Gets the connection manager used by this factory.
      *
-     * @return A new PaymentTransactionDAO instance
+     * @return The connection manager
      */
-    private PaymentTransactionDAO createPaymentTransactionDAO() {
-        // In a real implementation, we might inject additional dependencies
-        // such as a DatabaseConfig or ConfigSource
-        return new PaymentTransactionDaoImpl(createDatabaseConfig());
+    public ConnectionManager getConnectionManager() {
+        return connectionManager;
     }
-    
+
     /**
-     * Creates a real PaymentDataDAO implementation.
+     * Checks if the factory is initialized.
      *
-     * @return A new PaymentDataDAO instance
+     * @return true if the factory is initialized, false otherwise
      */
-    private PaymentDataDAO createPaymentDataDAO() {
-        // Create the DAO with appropriate dependencies
-        return new PaymentDataDaoImpl(createDatabaseConfig(), createConfigSource());
+    public boolean isInitialized() {
+        return initialized;
     }
-    
+
     /**
-     * Creates a real PaymentFeeDAO implementation.
+     * Performs a health check on the database connection.
      *
-     * @return A new PaymentFeeDAO instance
+     * @return true if the connection is healthy, false otherwise
      */
-    private PaymentFeeDAO createPaymentFeeDAO() {
-        // Create the DAO with appropriate dependencies
-        return new PaymentFeeDaoImpl(createDatabaseConfig(), createConfigSource());
+    public boolean isHealthy() {
+        return connectionManager != null && connectionManager.isHealthy();
     }
-    
+
     /**
-     * Creates a real PaymentEventDAO implementation.
+     * Gets the current connection pool metrics.
      *
-     * @return A new PaymentEventDAO instance
+     * @return A map of connection pool metrics
      */
-    private PaymentEventDAO createPaymentEventDAO() {
-        // Create the DAO with appropriate dependencies
-        return new PaymentEventDaoImpl(createDatabaseConfig(), createConfigSource());
+    public java.util.Map<String, Object> getConnectionPoolMetrics() {
+        return connectionManager != null ? connectionManager.getConnectionPoolMetrics() : java.util.Collections.emptyMap();
     }
-    
+
     /**
-     * Creates a mock PaymentTransactionDAO implementation for testing.
+     * Gets the current connection manager metrics.
      *
-     * @return A mock PaymentTransactionDAO instance
+     * @return A map of connection manager metrics
      */
-    private PaymentTransactionDAO createMockPaymentTransactionDAO() {
-        // In a real implementation, this would return a mock or test implementation
-        // For now, we'll use the real implementation with a test flag
-        return new PaymentTransactionDaoImpl(createDatabaseConfig());
-    }
-    
-    /**
-     * Creates a mock PaymentDataDAO implementation for testing.
-     *
-     * @return A mock PaymentDataDAO instance
-     */
-    private PaymentDataDAO createMockPaymentDataDAO() {
-        // In a real implementation, this would return a mock or test implementation
-        // For now, we'll use the real implementation with a test flag
-        return new PaymentDataDaoImpl(createDatabaseConfig(), createConfigSource());
-    }
-    
-    /**
-     * Creates a mock PaymentFeeDAO implementation for testing.
-     *
-     * @return A mock PaymentFeeDAO instance
-     */
-    private PaymentFeeDAO createMockPaymentFeeDAO() {
-        // In a real implementation, this would return a mock or test implementation
-        // For now, we'll use the real implementation with a test flag
-        return new PaymentFeeDaoImpl(createDatabaseConfig(), createConfigSource());
-    }
-    
-    /**
-     * Creates a mock PaymentEventDAO implementation for testing.
-     *
-     * @return A mock PaymentEventDAO instance
-     */
-    private PaymentEventDAO createMockPaymentEventDAO() {
-        // In a real implementation, this would return a mock or test implementation
-        // For now, we'll use the real implementation with a test flag
-        return new PaymentEventDaoImpl(createDatabaseConfig(), createConfigSource());
-    }
-    
-    /**
-     * Creates a DatabaseConfig instance for use by DAOs.
-     * <p>
-     * This method creates a simple DatabaseConfig implementation that
-     * delegates to the HikariDataSource for connection parameters.
-     * </p>
-     *
-     * @return A DatabaseConfig instance
-     */
-    private DatabaseConfig createDatabaseConfig() {
-        // Create a simple DatabaseConfig that delegates to the HikariDataSource
-        return new DatabaseConfig() {
-            @Override
-            public String getDatabaseURL() {
-                return dataSource.getJdbcUrl();
-            }
-            
-            @Override
-            public String getDatabaseUsername() {
-                return dataSource.getUsername();
-            }
-            
-            @Override
-            public String getDatabasePassword() {
-                return dataSource.getPassword();
-            }
-            
-            @Override
-            public String getDatabaseSchema() {
-                return dataSource.getSchema();
-            }
-            
-            @Override
-            public java.util.Optional<Map<String, Object>> getConnectionPoolConfig() {
-                // Create a map of connection pool properties from the data source
-                Map<String, Object> poolConfig = new HashMap<>();
-                poolConfig.put("maximumPoolSize", dataSource.getMaximumPoolSize());
-                poolConfig.put("minimumIdle", dataSource.getMinimumIdle());
-                poolConfig.put("connectionTimeout", dataSource.getConnectionTimeout());
-                poolConfig.put("idleTimeout", dataSource.getIdleTimeout());
-                poolConfig.put("maxLifetime", dataSource.getMaxLifetime());
-                poolConfig.put("leakDetectionThreshold", dataSource.getLeakDetectionThreshold());
-                poolConfig.put("autoCommit", dataSource.isAutoCommit());
-                
-                return java.util.Optional.of(poolConfig);
-            }
-        };
-    }
-    
-    /**
-     * Creates a ConfigSource instance for use by DAOs.
-     * <p>
-     * This method creates a simple ConfigSource implementation that
-     * provides payment-specific configuration.
-     * </p>
-     *
-     * @return A ConfigSource instance
-     */
-    private ConfigSource createConfigSource() {
-        // In a real implementation, this would be injected or obtained from a central source
-        // For now, we'll create a simple implementation with default values
-        return new ConfigSource() {
-            @Override
-            public Map<String, Object> getPaymentConnectionPoolConfig() {
-                // Default payment-specific connection pool configuration
-                Map<String, Object> poolConfig = new HashMap<>();
-                poolConfig.put("maximumPoolSize", 30);
-                poolConfig.put("minimumIdle", 10);
-                poolConfig.put("connectionTimeout", 20000);
-                poolConfig.put("idleTimeout", 300000);
-                poolConfig.put("maxLifetime", 1200000);
-                poolConfig.put("leakDetectionThreshold", 60000);
-                poolConfig.put("autoCommit", false);
-                poolConfig.put("poolName", "PaymentHikariPool");
-                poolConfig.put("connectionTestQuery", "SELECT 1");
-                poolConfig.put("registerMbeans", true);
-                
-                return poolConfig;
-            }
-            
-            // Other ConfigSource methods would be implemented here
-            // For simplicity, we're only implementing the method needed by our DAOs
-        };
-    }
-    
-    /**
-     * Functional interface for creating DAO instances.
-     *
-     * @param <T> The DAO interface type
-     */
-    @FunctionalInterface
-    private interface DAOCreator<T> {
-        /**
-         * Creates a new DAO instance.
-         *
-         * @return A new DAO instance
-         */
-        T create();
+    public java.util.Map<String, Object> getConnectionManagerMetrics() {
+        return connectionManager != null ? connectionManager.getConnectionManagerMetrics() : java.util.Collections.emptyMap();
     }
 }

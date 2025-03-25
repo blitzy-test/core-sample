@@ -1,26 +1,128 @@
-@import "tailwindcss";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  
+  /* Payment status colors */
+  --payment-success: #10b981;
+  --payment-pending: #f59e0b;
+  --payment-error: #ef4444;
+  --payment-info: #3b82f6;
+  --payment-neutral: #6b7280;
+  
+  /* Payment UI specific colors */
+  --payment-card-border: #e5e7eb;
+  --payment-card-background: #f9fafb;
+  --payment-highlight: rgba(59, 130, 246, 0.1);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+@layer base {
+  :root {
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --font-sans: var(--font-geist-sans);
+    --font-mono: var(--font-geist-mono);
+    
+    /* Payment status theme variables */
+    --color-success: var(--payment-success);
+    --color-pending: var(--payment-pending);
+    --color-error: var(--payment-error);
+    --color-info: var(--payment-info);
+    --color-neutral: var(--payment-neutral);
+  }
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    
+    /* Dark mode payment status colors */
+    --payment-success: #34d399;
+    --payment-pending: #fbbf24;
+    --payment-error: #f87171;
+    --payment-info: #60a5fa;
+    --payment-neutral: #9ca3af;
+    
+    /* Dark mode payment UI specific colors */
+    --payment-card-border: #374151;
+    --payment-card-background: #1f2937;
+    --payment-highlight: rgba(59, 130, 246, 0.2);
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans, Arial, Helvetica, sans-serif);
+}
+
+/* Payment status indicator styles */
+.payment-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.payment-status-success {
+  background-color: rgba(16, 185, 129, 0.1);
+  color: var(--payment-success);
+}
+
+.payment-status-pending {
+  background-color: rgba(245, 158, 11, 0.1);
+  color: var(--payment-pending);
+}
+
+.payment-status-error {
+  background-color: rgba(239, 68, 68, 0.1);
+  color: var(--payment-error);
+}
+
+.payment-status-info {
+  background-color: rgba(59, 130, 246, 0.1);
+  color: var(--payment-info);
+}
+
+/* Payment card styles */
+.payment-card {
+  border: 1px solid var(--payment-card-border);
+  background-color: var(--payment-card-background);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  transition: all 0.2s ease;
+}
+
+.payment-card:hover {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+/* Payment amount formatting */
+.payment-amount {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+@media (prefers-color-scheme: dark) {
+  .payment-status-success {
+    background-color: rgba(52, 211, 153, 0.1);
+  }
+  
+  .payment-status-pending {
+    background-color: rgba(251, 191, 36, 0.1);
+  }
+  
+  .payment-status-error {
+    background-color: rgba(248, 113, 113, 0.1);
+  }
+  
+  .payment-status-info {
+    background-color: rgba(96, 165, 250, 0.1);
+  }
 }

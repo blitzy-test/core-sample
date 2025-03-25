@@ -1,7 +1,32 @@
 brik:
    database:
       sample:
-         url: jdbc:postgresql://localhost:5432/sample
+         url: jdbc:postgresql://localhost:5432/sample?currentSchema=sample
          user: briklabs
          password: briklabs
          schema: sample
+         version: 17.4
+   hikaricp:
+      configurationFile: hikari-config.properties
+   payments:
+      configFile: payment-config.yaml
+      enabled: true
+      accessRights:
+         integration: true
+         permissionsPath: /organizations/{org_id}/accounts/{account_id}/transactions
+         rolesConfigPath: accessRights.roles
+      database:
+         schema: payment
+         tables:
+            transaction: payment_transaction
+            paymentData: payment_data
+            paymentFee: payment_fee
+            paymentEvent: payment_event
+   logging:
+      configFile: logback.xml
+      paymentLoggingConfig: payment-logging.xml
+      levels:
+         payment: INFO
+         hikari: INFO
+         hikariMetrics: INFO
+         paymentSQL: INFO

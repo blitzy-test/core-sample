@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 17.4 database service
+  postgres:
+    image: postgres:17.4
+    container_name: core-sample-postgres
+    environment:
+      POSTGRES_USER: briklabs
+      POSTGRES_PASSWORD: briklabs
+      POSTGRES_DB: sample
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Mount initialization scripts for payment schema
+      - ./backend/src/main/resources/sql:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U briklabs"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - core-sample-network
+
+  # Backend service with payment module
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: core-sample-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database connection
+      BRIK_CONFIG: /config/config.yaml
+      HIKARI_CONFIG: /config/hikari-config.properties
+      # JVM and application settings
+      JAVA_OPTS: "-Xms512m -Xmx1024m -Dlogback.configurationFile=/config/logback.xml"
+      PAYMENT_OPTS: "-Dpayment.processing.threads=4 -Dpayment.transaction.timeout=300000"
+      # Payment module activation
+      PAYMENTS_ENABLED: "true"
+      # Logging configuration
+      LOG_LEVEL: "INFO"
+      PAYMENT_LOG_LEVEL: "INFO"
+    volumes:
+      - ./backend/config.yaml:/config/config.yaml
+      - ./backend/hikari-config.properties:/config/hikari-config.properties
+      - ./backend/payment-logging.xml:/config/payment-logging.xml
+      - ./backend/logback.xml:/config/logback.xml
+    ports:
+      - "5900:5900"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5900/up"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - core-sample-network
+
+  # Frontend service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: core-sample-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      # API configuration
+      VITE_API_URL: "http://backend:5900"
+      # Development mode
+      NODE_ENV: "development"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - core-sample-network
+
+networks:
+  core-sample-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local

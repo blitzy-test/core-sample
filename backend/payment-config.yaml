@@ -1,0 +1,243 @@
+# Payment Module Configuration
+# This file contains configuration settings for the payment transaction processing module
+
+# API Endpoint Configuration
+api:
+  # Base path pattern for payment endpoints
+  basePath: "/organizations/{org_id}/accounts/{account_id}/transactions"
+  # API version (for future versioning support)
+  version: "v1"
+  # Special placeholder for retrieving data across all accounts
+  allAccountsPlaceholder: "_all"
+  # Response pagination defaults
+  pagination:
+    defaultPageSize: 20
+    maxPageSize: 100
+    # Enable cursor-based pagination for large result sets
+    enableCursorPagination: true
+
+# Database Configuration
+database:
+  # Schema name for payment tables
+  schema: "payment"
+  # Table names
+  tables:
+    transaction: "payment_transaction"
+    paymentData: "payment_data"
+    paymentFee: "payment_fee"
+    paymentEvent: "payment_event"
+  # HikariCP connection pool settings optimized for payment processing
+  connectionPool:
+    maximumPoolSize: 30
+    minimumIdle: 10
+    connectionTimeout: 20000
+    idleTimeout: 300000
+    maxLifetime: 1200000
+    leakDetectionThreshold: 60000
+    autoCommit: false
+    poolName: "PaymentHikariPool"
+    registerMbeans: true
+
+# Payment Processing Configuration
+processing:
+  # Transaction timeout in milliseconds
+  transactionTimeout: 30000
+  # Maximum retry attempts for failed operations
+  maxRetryAttempts: 3
+  # Retry delay in milliseconds (with exponential backoff)
+  initialRetryDelay: 100
+  # Idempotency key expiration in seconds
+  idempotencyKeyExpiration: 86400
+  # Asynchronous processing settings
+  async:
+    # Thread pool size for async operations
+    threadPoolSize: 10
+    # Queue capacity for pending operations
+    queueCapacity: 100
+    # Maximum time to keep failed operations in queue (minutes)
+    failedOperationRetention: 1440
+
+# Transaction State Configuration
+transactionStates:
+  # Valid transaction states
+  valid:
+    - "created"
+    - "pending"
+    - "authorized"
+    - "processing"
+    - "completed"
+    - "captured"
+    - "partially_captured"
+    - "refunded"
+    - "partially_refunded"
+    - "voided"
+    - "failed"
+    - "expired"
+  # Valid state transitions
+  transitions:
+    created:
+      - "pending"
+      - "failed"
+      - "expired"
+    pending:
+      - "authorized"
+      - "failed"
+      - "expired"
+    authorized:
+      - "captured"
+      - "partially_captured"
+      - "voided"
+      - "expired"
+    partially_captured:
+      - "captured"
+      - "partially_refunded"
+      - "refunded"
+    captured:
+      - "refunded"
+      - "partially_refunded"
+    partially_refunded:
+      - "refunded"
+  # Default initial state for new transactions
+  initialState: "created"
+  # States that allow refund operations
+  refundableStates:
+    - "captured"
+    - "partially_captured"
+    - "partially_refunded"
+  # States that allow capture operations
+  capturableStates:
+    - "authorized"
+    - "partially_captured"
+
+# Merchant Configuration
+merchant:
+  # Default processing settings
+  defaults:
+    # Default currency if not specified
+    currency: "USD"
+    # Default capture delay in days (0 for immediate)
+    captureDelay: 0
+    # Default authorization expiration in days
+    authorizationExpiration: 7
+    # Default partial capture settings
+    partialCapture:
+      enabled: true
+      minimumAmount: 1.00
+    # Default partial refund settings
+    partialRefund:
+      enabled: true
+      minimumAmount: 1.00
+  # Validation rules
+  validation:
+    # Minimum transaction amount
+    minimumTransactionAmount: 0.50
+    # Maximum transaction amount
+    maximumTransactionAmount: 50000.00
+    # Supported currencies
+    supportedCurrencies:
+      - "USD"
+      - "EUR"
+      - "GBP"
+      - "CAD"
+      - "AUD"
+    # Supported payment methods
+    supportedPaymentMethods:
+      - "credit_card"
+      - "debit_card"
+      - "bank_transfer"
+      - "digital_wallet"
+
+# Access Rights Integration
+accessRights:
+  # Role-based permissions for payment operations
+  roles:
+    administrator:
+      description: "Full access to all payment operations"
+      permissions:
+        - "payment:read:all"
+        - "payment:create:all"
+        - "payment:process:all"
+        - "payment:capture:all"
+        - "payment:refund:all"
+        - "payment:void:all"
+    finance:
+      description: "Access to financial operations and reporting"
+      permissions:
+        - "payment:read:all"
+        - "payment:refund:all"
+        - "payment:report:all"
+    supportStaff:
+      description: "Limited access for customer support"
+      permissions:
+        - "payment:read:limited"
+        - "payment:report:limited"
+    merchant:
+      description: "Access to own merchant transactions only"
+      permissions:
+        - "payment:read:own"
+        - "payment:create:own"
+        - "payment:report:own"
+  # Field-level masking based on roles
+  fieldMasking:
+    paymentData:
+      # Fields to mask for different roles
+      supportStaff:
+        - "payment_token"
+        - "payment_details.card_number"
+        - "payment_details.cvv"
+      merchant:
+        - "payment_token"
+        - "payment_details.cvv"
+
+# Query Configuration
+query:
+  # Default sorting configuration
+  defaultSort:
+    field: "created_at"
+    direction: "desc"
+  # Supported filter fields
+  filterFields:
+    - "status"
+    - "amount"
+    - "currency"
+    - "created_at"
+    - "updated_at"
+    - "merchant_id"
+    - "payment_type"
+    - "transaction_reference"
+  # Supported sort fields
+  sortFields:
+    - "created_at"
+    - "updated_at"
+    - "amount"
+    - "status"
+  # Advanced query features
+  features:
+    enableFullTextSearch: true
+    enableDateRangeQueries: true
+    enableAmountRangeQueries: true
+    enableMultiStatusFilter: true
+    enableMetadataFiltering: true
+
+# Logging Configuration
+logging:
+  # Enable detailed payment operation logging
+  detailedLogging: true
+  # Log payment events to database
+  logToDatabase: true
+  # Sensitive fields to mask in logs
+  sensitiveFields:
+    - "payment_token"
+    - "payment_details.card_number"
+    - "payment_details.cvv"
+    - "payment_details.account_number"
+  # Event types to log
+  eventTypes:
+    - "transaction_created"
+    - "transaction_updated"
+    - "status_changed"
+    - "capture_initiated"
+    - "capture_completed"
+    - "refund_initiated"
+    - "refund_completed"
+    - "error_occurred"

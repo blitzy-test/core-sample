@@ -1,5 +1,19 @@
 package io.briklabs.sample.payments.data.dao.impl;
 
+import io.briklabs.sample.config.ConfigSource;
+import io.briklabs.sample.config.DatabaseConfig;
+import io.briklabs.sample.payments.data.ConnectionManager;
+import io.briklabs.sample.payments.data.dao.PaymentFeeDAO;
+import io.briklabs.sample.payments.data.exception.PaymentDataException;
+import io.briklabs.sample.payments.data.query.DateRangeFilter;
+import io.briklabs.sample.payments.data.query.PaymentFilterParams;
+import io.briklabs.sample.payments.data.query.PaymentQueryBuilder;
+import io.briklabs.sample.payments.model.PaymentFee;
+import io.briklabs.sample.payments.model.PaymentFee.FeeType;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -8,6 +22,7 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -15,142 +30,49 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import io.briklabs.sample.config.ConfigSource;
-import io.briklabs.sample.config.DatabaseConfig;
-import io.briklabs.sample.payments.data.dao.PaymentFeeDAO;
-import io.briklabs.sample.payments.data.exception.ConnectionException;
-import io.briklabs.sample.payments.data.exception.QueryExecutionException;
-import io.briklabs.sample.payments.data.exception.ResourceNotFoundException;
-import io.briklabs.sample.payments.data.exception.TransactionException;
-import io.briklabs.sample.payments.data.exception.ValidationException;
-import io.briklabs.sample.payments.data.query.DateRangeFilter;
-import io.briklabs.sample.payments.data.query.PaymentFilterParams;
-import io.briklabs.sample.payments.data.query.PaymentQueryBuilder;
-import io.briklabs.sample.payments.model.PaymentFee;
-
 /**
  * Concrete implementation of the PaymentFeeDAO interface that handles all database operations
- * for payment fee information.
+ * for payment fee information. This class implements methods for fee creation, retrieval by
+ * transaction ID, fee type filtering, and fee aggregation for reporting.
  * <p>
- * This class implements methods for fee creation, retrieval by transaction ID, fee type filtering,
- * and fee aggregation for reporting. It supports both individual fee management and bulk fee operations,
- * enabling comprehensive financial reporting and analysis for payment transactions.
- * </p>
- * <p>
- * The implementation ensures accurate tracking and retrieval of all fee-related data with proper
- * decimal precision for financial calculations.
+ * It supports both individual fee management and bulk fee operations, enabling comprehensive
+ * financial reporting and analysis for payment transactions. This implementation ensures
+ * accurate tracking and retrieval of all fee-related data.
  * </p>
  */
 public class PaymentFeeDaoImpl extends AbstractPaymentDaoImpl<PaymentFee, UUID> implements PaymentFeeDAO {
 
     private static final Logger logger = LoggerFactory.getLogger(PaymentFeeDaoImpl.class);
     
-    /**
-     * The name of the payment fee table in the database.
-     */
-    private static final String TABLE_NAME = "payment_fee";
+    // SQL statements for fee operations
+    private static final String SQL_INSERT_FEE = 
+            "INSERT INTO payment_fee (fee_id, transaction_id, fee_type, amount, currency, description, fee_reference, created_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
     
-    /**
-     * SQL query to find fees by transaction ID.
-     */
-    private static final String FIND_BY_TRANSACTION_ID_SQL = 
-            "SELECT * FROM " + TABLE_NAME + " WHERE transaction_id = ? ORDER BY created_at ASC";
+    private static final String SQL_UPDATE_FEE = 
+            "UPDATE payment_fee SET fee_type = ?, amount = ?, currency = ?, description = ?, fee_reference = ? " +
+            "WHERE fee_id = ?";
     
-    /**
-     * SQL query to find fees by fee type.
-     */
-    private static final String FIND_BY_FEE_TYPE_SQL = 
-            "SELECT * FROM " + TABLE_NAME + " WHERE fee_type = ?";
+    private static final String SQL_DELETE_FEE = 
+            "DELETE FROM payment_fee WHERE fee_id = ?";
     
-    /**
-     * SQL query to find fees by organization ID.
-     */
-    private static final String FIND_BY_ORGANIZATION_ID_SQL = 
-            "SELECT f.* FROM " + TABLE_NAME + " f " +
-            "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
-            "WHERE t.organization_id = ?";
+    private static final String SQL_FIND_FEE_BY_ID = 
+            "SELECT * FROM payment_fee WHERE fee_id = ?";
     
-    /**
-     * SQL query to find fees by organization ID and account ID.
-     */
-    private static final String FIND_BY_ORGANIZATION_AND_ACCOUNT_SQL = 
-            "SELECT f.* FROM " + TABLE_NAME + " f " +
-            "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
-            "WHERE t.organization_id = ? AND t.account_id = ?";
+    private static final String SQL_FIND_FEES_BY_TRANSACTION_ID = 
+            "SELECT * FROM payment_fee WHERE transaction_id = ? ORDER BY created_at ASC";
     
-    /**
-     * SQL query to calculate total fee amount for a transaction.
-     */
-    private static final String CALCULATE_TOTAL_FEE_AMOUNT_SQL = 
-            "SELECT SUM(amount) FROM " + TABLE_NAME + " WHERE transaction_id = ?";
+    private static final String SQL_DELETE_FEES_BY_TRANSACTION_ID = 
+            "DELETE FROM payment_fee WHERE transaction_id = ?";
     
-    /**
-     * SQL query to calculate fee amount by type for a transaction.
-     */
-    private static final String CALCULATE_FEE_AMOUNT_BY_TYPE_SQL = 
-            "SELECT fee_type, SUM(amount) FROM " + TABLE_NAME + " " +
-            "WHERE transaction_id = ? GROUP BY fee_type";
+    private static final String SQL_FIND_FEES_BY_FEE_REFERENCE = 
+            "SELECT * FROM payment_fee WHERE fee_reference = ?";
     
-    /**
-     * SQL query to calculate total fee amount for an organization.
-     */
-    private static final String CALCULATE_TOTAL_FEE_AMOUNT_FOR_ORGANIZATION_SQL = 
-            "SELECT SUM(f.amount) FROM " + TABLE_NAME + " f " +
-            "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
-            "WHERE t.organization_id = ?";
+    private static final String SQL_CALCULATE_TOTAL_FEE_AMOUNT_FOR_TRANSACTION = 
+            "SELECT SUM(amount) FROM payment_fee WHERE transaction_id = ?";
     
-    /**
-     * SQL query to calculate fee amount by type for an organization.
-     */
-    private static final String CALCULATE_FEE_AMOUNT_BY_TYPE_FOR_ORGANIZATION_SQL = 
-            "SELECT f.fee_type, SUM(f.amount) FROM " + TABLE_NAME + " f " +
-            "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
-            "WHERE t.organization_id = ? GROUP BY f.fee_type";
-    
-    /**
-     * SQL query to calculate fee amount by account for an organization.
-     */
-    private static final String CALCULATE_FEE_AMOUNT_BY_ACCOUNT_SQL = 
-            "SELECT t.account_id, SUM(f.amount) FROM " + TABLE_NAME + " f " +
-            "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
-            "WHERE t.organization_id = ? GROUP BY t.account_id";
-    
-    /**
-     * SQL query to get fee amount by day.
-     */
-    private static final String GET_FEE_AMOUNT_BY_DAY_SQL = 
-            "SELECT DATE(f.created_at) as fee_date, SUM(f.amount) FROM " + TABLE_NAME + " f " +
-            "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
-            "WHERE t.organization_id = ? GROUP BY fee_date ORDER BY fee_date";
-    
-    /**
-     * SQL query to get fee amount by type.
-     */
-    private static final String GET_FEE_AMOUNT_BY_TYPE_SQL = 
-            "SELECT f.fee_type, SUM(f.amount) FROM " + TABLE_NAME + " f " +
-            "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
-            "WHERE t.organization_id = ? GROUP BY f.fee_type";
-    
-    /**
-     * SQL query to find fees by fee reference.
-     */
-    private static final String FIND_BY_FEE_REFERENCE_SQL = 
-            "SELECT * FROM " + TABLE_NAME + " WHERE fee_reference = ?";
-    
-    /**
-     * SQL query to delete all fees for a transaction.
-     */
-    private static final String DELETE_ALL_FEES_FOR_TRANSACTION_SQL = 
-            "DELETE FROM " + TABLE_NAME + " WHERE transaction_id = ?";
-    
-    /**
-     * SQL query to check if a transaction exists.
-     */
-    private static final String CHECK_TRANSACTION_EXISTS_SQL = 
-            "SELECT 1 FROM payment_transaction WHERE transaction_id = ?";
+    private static final String SQL_CALCULATE_FEE_AMOUNT_BY_TYPE_FOR_TRANSACTION = 
+            "SELECT fee_type, SUM(amount) FROM payment_fee WHERE transaction_id = ? GROUP BY fee_type";
     
     /**
      * Creates a new PaymentFeeDaoImpl with the specified database configuration.
@@ -159,877 +81,1020 @@ public class PaymentFeeDaoImpl extends AbstractPaymentDaoImpl<PaymentFee, UUID> 
      * @param configSource the configuration source
      */
     public PaymentFeeDaoImpl(DatabaseConfig databaseConfig, ConfigSource configSource) {
-        super(databaseConfig, configSource, TABLE_NAME);
+        super(databaseConfig, configSource);
+        logger.debug("Initialized PaymentFeeDaoImpl with database configuration");
     }
 
     /**
-     * Validates a payment fee entity before database operations.
+     * Creates a new PaymentFeeDaoImpl with the specified connection manager.
      *
-     * @param fee the fee to validate
-     * @throws ValidationException if the fee fails validation
+     * @param connectionManager the connection manager
+     */
+    public PaymentFeeDaoImpl(ConnectionManager connectionManager) {
+        super(connectionManager);
+        logger.debug("Initialized PaymentFeeDaoImpl with provided connection manager");
+    }
+
+    /**
+     * {@inheritDoc}
      */
     @Override
-    protected void validateEntity(PaymentFee fee) throws ValidationException {
-        try {
-            if (fee == null) {
-                throw new ValidationException("Fee cannot be null");
+    protected PaymentFee executeCreate(Connection connection, PaymentFee fee) throws SQLException {
+        logger.debug("Creating fee: {}", fee);
+        
+        // Validate fee data
+        fee.validate();
+        
+        // Ensure fee ID is set
+        if (fee.getFeeId() == null) {
+            fee.setFeeId(UUID.randomUUID());
+        }
+        
+        // Ensure created timestamp is set
+        if (fee.getCreatedAt() == null) {
+            fee.setCreatedAt(Instant.now());
+        }
+        
+        try (PreparedStatement stmt = prepareStatement(connection, SQL_INSERT_FEE)) {
+            stmt.setObject(1, fee.getFeeId());
+            stmt.setObject(2, fee.getTransactionId());
+            stmt.setString(3, fee.getFeeType().name());
+            stmt.setBigDecimal(4, fee.getAmount());
+            stmt.setString(5, fee.getCurrency());
+            stmt.setString(6, fee.getDescription());
+            stmt.setString(7, fee.getFeeReference());
+            stmt.setTimestamp(8, Timestamp.from(fee.getCreatedAt()));
+            
+            int rowsAffected = stmt.executeUpdate();
+            if (rowsAffected != 1) {
+                throw new SQLException("Failed to create fee, expected 1 row affected but got " + rowsAffected);
             }
             
-            fee.validate();
-        } catch (IllegalArgumentException e) {
-            throw new ValidationException("Fee validation failed: " + e.getMessage(), e);
+            return fee;
         }
     }
 
     /**
-     * Maps a ResultSet row to a PaymentFee entity.
-     *
-     * @param rs the result set
-     * @return the mapped PaymentFee entity
-     * @throws SQLException if a database access error occurs
+     * {@inheritDoc}
      */
     @Override
-    protected PaymentFee mapRow(ResultSet rs) throws SQLException {
-        UUID feeId = (UUID) rs.getObject("fee_id");
-        UUID transactionId = (UUID) rs.getObject("transaction_id");
-        String feeType = rs.getString("fee_type");
-        BigDecimal amount = rs.getBigDecimal("amount");
-        String currency = rs.getString("currency");
-        String description = rs.getString("description");
-        String feeReference = rs.getString("fee_reference");
-        Instant createdAt = rs.getTimestamp("created_at").toInstant();
+    protected Optional<PaymentFee> executeFindById(Connection connection, UUID feeId) throws SQLException {
+        logger.debug("Finding fee by ID: {}", feeId);
         
-        return new PaymentFee(
-                feeId,
-                transactionId,
-                feeType,
-                amount,
-                currency,
-                description,
-                feeReference,
-                createdAt
-        );
+        try (PreparedStatement stmt = prepareStatement(connection, SQL_FIND_FEE_BY_ID)) {
+            stmt.setObject(1, feeId);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                return processResultSetToOptional(rs, this::mapFeeFromResultSet);
+            }
+        }
     }
 
     /**
-     * Builds a query for finding a fee by ID.
-     *
-     * @param id the fee ID
-     * @return the SQL query
+     * {@inheritDoc}
      */
     @Override
-    protected String buildFindByIdQuery(UUID id) {
-        return "SELECT * FROM " + TABLE_NAME + " WHERE fee_id = ?";
+    protected PaymentFee executeUpdate(Connection connection, PaymentFee fee) throws SQLException {
+        logger.debug("Updating fee: {}", fee);
+        
+        // Validate fee data
+        fee.validate();
+        
+        try (PreparedStatement stmt = prepareStatement(connection, SQL_UPDATE_FEE)) {
+            stmt.setString(1, fee.getFeeType().name());
+            stmt.setBigDecimal(2, fee.getAmount());
+            stmt.setString(3, fee.getCurrency());
+            stmt.setString(4, fee.getDescription());
+            stmt.setString(5, fee.getFeeReference());
+            stmt.setObject(6, fee.getFeeId());
+            
+            int rowsAffected = stmt.executeUpdate();
+            if (rowsAffected != 1) {
+                throw new SQLException("Failed to update fee, expected 1 row affected but got " + rowsAffected);
+            }
+            
+            return fee;
+        }
     }
 
     /**
-     * Builds a query for filtering fees based on filter parameters.
-     *
-     * @param filterParams the filter parameters
-     * @return the query builder
+     * {@inheritDoc}
      */
     @Override
-    protected PaymentQueryBuilder buildFilterQuery(PaymentFilterParams filterParams) {
-        PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder()
-                .select("f.*")
-                .from(TABLE_NAME + " f");
+    protected boolean executeDelete(Connection connection, UUID feeId) throws SQLException {
+        logger.debug("Deleting fee with ID: {}", feeId);
         
-        // Join with transaction table if organization or account filtering is needed
-        if (filterParams.getOrganizationId() != null || filterParams.getAccountId() != null) {
-            queryBuilder.innerJoin("payment_transaction t", "f.transaction_id = t.transaction_id");
+        try (PreparedStatement stmt = prepareStatement(connection, SQL_DELETE_FEE)) {
+            stmt.setObject(1, feeId);
             
-            if (filterParams.getOrganizationId() != null) {
-                queryBuilder.and("t.organization_id = ?").addParameter(filterParams.getOrganizationId());
-            }
+            int rowsAffected = stmt.executeUpdate();
+            return rowsAffected == 1;
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    protected List<PaymentFee> executeQuery(Connection connection, Object params) throws SQLException {
+        logger.debug("Querying fees with params: {}", params);
+        
+        if (params instanceof PaymentFilterParams) {
+            PaymentFilterParams filterParams = (PaymentFilterParams) params;
             
-            if (filterParams.getAccountId() != null) {
-                queryBuilder.and("t.account_id = ?").addParameter(filterParams.getAccountId());
-            }
-        }
-        
-        // Apply date range filter if present
-        if (filterParams.getDateRange() != null) {
-            DateRangeFilter dateRange = filterParams.getDateRange();
-            queryBuilder.dateRange("f.created_at", dateRange.getStartDate(), dateRange.getEndDate());
-        }
-        
-        // Apply amount range filter if present
-        if (filterParams.getAmountRange() != null) {
-            queryBuilder.amountRange("f.amount", 
-                    filterParams.getAmountRange().getMinAmount(), 
-                    filterParams.getAmountRange().getMaxAmount());
+            PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder()
+                    .select("f.*")
+                    .from("payment_fee f");
             
-            if (filterParams.getAmountRange().getCurrency() != null) {
-                queryBuilder.and("f.currency = ?")
-                           .addParameter(filterParams.getAmountRange().getCurrency());
-            }
-        }
-        
-        // Apply search term if present
-        if (filterParams.getSearchTerm() != null && !filterParams.getSearchTerm().isEmpty()) {
-            queryBuilder.and("(f.description LIKE ? OR f.fee_reference LIKE ?)")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%");
-        }
-        
-        // Apply sorting
-        if (filterParams.getSortCriteria() != null && !filterParams.getSortCriteria().isEmpty()) {
-            for (PaymentFilterParams.SortCriteria criteria : filterParams.getSortCriteria()) {
-                String column = criteria.getColumn();
-                // Prefix column with table alias if it's a transaction field
-                if (column.startsWith("transaction.")) {
-                    column = "t." + column.substring("transaction.".length());
-                } else if (!column.contains(".")) {
-                    column = "f." + column;
+            // Apply filters
+            queryBuilder.applyFilters(filterParams);
+            
+            try (PreparedStatement stmt = queryBuilder.buildPreparedStatement(connection)) {
+                try (ResultSet rs = stmt.executeQuery()) {
+                    return processResultSet(rs, this::mapFeeFromResultSet);
                 }
-                queryBuilder.orderBy(column + " " + criteria.getDirection());
             }
         } else {
-            // Default sorting by created_at descending
-            queryBuilder.orderBy("f.created_at DESC");
+            throw new IllegalArgumentException("Unsupported query parameters type: " + 
+                    (params != null ? params.getClass().getName() : "null"));
         }
-        
-        // Apply pagination
-        if (filterParams.getPagination() != null) {
-            queryBuilder.paginate(
-                    filterParams.getPagination().getLimit(),
-                    filterParams.getPagination().getOffset());
-        }
-        
-        return queryBuilder;
     }
 
     /**
-     * Builds a count query for fees based on filter parameters.
-     *
-     * @param filterParams the filter parameters
-     * @return the query builder
+     * {@inheritDoc}
      */
     @Override
-    protected PaymentQueryBuilder buildCountQuery(PaymentFilterParams filterParams) {
-        PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder()
-                .count("f.fee_id")
-                .from(TABLE_NAME + " f");
+    protected List<PaymentFee> executeBatchCreate(Connection connection, List<PaymentFee> fees) throws SQLException {
+        logger.debug("Batch creating {} fees", fees.size());
         
-        // Join with transaction table if organization or account filtering is needed
-        if (filterParams.getOrganizationId() != null || filterParams.getAccountId() != null) {
-            queryBuilder.innerJoin("payment_transaction t", "f.transaction_id = t.transaction_id");
-            
-            if (filterParams.getOrganizationId() != null) {
-                queryBuilder.and("t.organization_id = ?").addParameter(filterParams.getOrganizationId());
-            }
-            
-            if (filterParams.getAccountId() != null) {
-                queryBuilder.and("t.account_id = ?").addParameter(filterParams.getAccountId());
-            }
-        }
-        
-        // Apply date range filter if present
-        if (filterParams.getDateRange() != null) {
-            DateRangeFilter dateRange = filterParams.getDateRange();
-            queryBuilder.dateRange("f.created_at", dateRange.getStartDate(), dateRange.getEndDate());
-        }
-        
-        // Apply amount range filter if present
-        if (filterParams.getAmountRange() != null) {
-            queryBuilder.amountRange("f.amount", 
-                    filterParams.getAmountRange().getMinAmount(), 
-                    filterParams.getAmountRange().getMaxAmount());
-            
-            if (filterParams.getAmountRange().getCurrency() != null) {
-                queryBuilder.and("f.currency = ?")
-                           .addParameter(filterParams.getAmountRange().getCurrency());
-            }
-        }
-        
-        // Apply search term if present
-        if (filterParams.getSearchTerm() != null && !filterParams.getSearchTerm().isEmpty()) {
-            queryBuilder.and("(f.description LIKE ? OR f.fee_reference LIKE ?)")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%");
-        }
-        
-        return queryBuilder;
-    }
-
-    /**
-     * Builds an insert query for a fee.
-     *
-     * @param fee the fee to insert
-     * @return the SQL query
-     */
-    @Override
-    protected String buildInsertQuery(PaymentFee fee) {
-        return "INSERT INTO " + TABLE_NAME + 
-               " (fee_id, transaction_id, fee_type, amount, currency, description, fee_reference, created_at) " +
-               "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
-    }
-
-    /**
-     * Builds an update query for a fee.
-     *
-     * @param fee the fee to update
-     * @return the SQL query
-     */
-    @Override
-    protected String buildUpdateQuery(PaymentFee fee) {
-        return "UPDATE " + TABLE_NAME + 
-               " SET transaction_id = ?, fee_type = ?, amount = ?, currency = ?, " +
-               "description = ?, fee_reference = ? " +
-               "WHERE fee_id = ?";
-    }
-
-    /**
-     * Builds a delete query for a fee.
-     *
-     * @param id the fee ID
-     * @return the SQL query
-     */
-    @Override
-    protected String buildDeleteQuery(UUID id) {
-        return "DELETE FROM " + TABLE_NAME + " WHERE fee_id = ?";
-    }
-
-    /**
-     * Gets the parameters for an insert query.
-     *
-     * @param fee the fee to insert
-     * @return the query parameters
-     */
-    @Override
-    protected Object[] getInsertParameters(PaymentFee fee) {
-        return new Object[] {
-                fee.getFeeId() != null ? fee.getFeeId() : UUID.randomUUID(),
-                fee.getTransactionId(),
-                fee.getFeeType(),
-                fee.getAmount(),
-                fee.getCurrency(),
-                fee.getDescription(),
-                fee.getFeeReference(),
-                Timestamp.from(fee.getCreatedAt() != null ? fee.getCreatedAt() : Instant.now())
-        };
-    }
-
-    /**
-     * Gets the parameters for an update query.
-     *
-     * @param fee the fee to update
-     * @return the query parameters
-     */
-    @Override
-    protected Object[] getUpdateParameters(PaymentFee fee) {
-        return new Object[] {
-                fee.getTransactionId(),
-                fee.getFeeType(),
-                fee.getAmount(),
-                fee.getCurrency(),
-                fee.getDescription(),
-                fee.getFeeReference(),
-                fee.getFeeId()
-        };
-    }
-
-    /**
-     * Gets the parameters for a delete query.
-     *
-     * @param id the fee ID
-     * @return the query parameters
-     */
-    @Override
-    protected Object[] getDeleteParameters(UUID id) {
-        return new Object[] { id };
-    }
-
-    /**
-     * Finds all fees associated with a specific transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @return List of fees associated with the transaction
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentFee> findByTransactionId(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException {
-        logger.debug("Finding fees for transaction: {}", transactionId);
-        
-        return executeQuery(FIND_BY_TRANSACTION_ID_SQL, this::mapRows, transactionId);
-    }
-
-    /**
-     * Finds fees by fee type.
-     *
-     * @param feeType The fee type to filter by
-     * @param filterParams Additional filtering parameters
-     * @return List of fees of the specified type
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentFee> findByFeeType(String feeType, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        logger.debug("Finding fees by type: {}", feeType);
-        
-        PaymentQueryBuilder queryBuilder = buildFilterQuery(filterParams)
-                .and("f.fee_type = ?")
-                .addParameter(feeType);
-        
-        return executeQuery(queryBuilder, this::mapRows);
-    }
-
-    /**
-     * Finds fees by organization ID.
-     *
-     * @param organizationId The organization identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of fees for the specified organization
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentFee> findByOrganizationId(UUID organizationId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        logger.debug("Finding fees for organization: {}", organizationId);
-        
-        PaymentQueryBuilder queryBuilder = buildFilterQuery(filterParams)
-                .innerJoin("payment_transaction t", "f.transaction_id = t.transaction_id")
-                .and("t.organization_id = ?")
-                .addParameter(organizationId);
-        
-        return executeQuery(queryBuilder, this::mapRows);
-    }
-
-    /**
-     * Finds fees by organization ID and account ID.
-     *
-     * @param organizationId The organization identifier
-     * @param accountId The account identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of fees for the specified organization and account
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentFee> findByOrganizationIdAndAccountId(UUID organizationId, UUID accountId, 
-            PaymentFilterParams filterParams) throws ConnectionException, QueryExecutionException {
-        logger.debug("Finding fees for organization: {} and account: {}", organizationId, accountId);
-        
-        PaymentQueryBuilder queryBuilder = buildFilterQuery(filterParams)
-                .innerJoin("payment_transaction t", "f.transaction_id = t.transaction_id")
-                .and("t.organization_id = ?")
-                .addParameter(organizationId)
-                .and("t.account_id = ?")
-                .addParameter(accountId);
-        
-        return executeQuery(queryBuilder, this::mapRows);
-    }
-
-    /**
-     * Calculates the total fee amount for a specific transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @return The total fee amount
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public BigDecimal calculateTotalFeeAmountForTransaction(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException {
-        logger.debug("Calculating total fee amount for transaction: {}", transactionId);
-        
-        return executeQuery(CALCULATE_TOTAL_FEE_AMOUNT_SQL, rs -> {
-            if (rs.next()) {
-                BigDecimal total = rs.getBigDecimal(1);
-                return total != null ? total : BigDecimal.ZERO;
-            }
-            return BigDecimal.ZERO;
-        }, transactionId);
-    }
-
-    /**
-     * Calculates the total fee amount by fee type for a specific transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @return Map of fee type to total amount
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public Map<String, BigDecimal> calculateFeeAmountByTypeForTransaction(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException {
-        logger.debug("Calculating fee amounts by type for transaction: {}", transactionId);
-        
-        return executeQuery(CALCULATE_FEE_AMOUNT_BY_TYPE_SQL, rs -> {
-            Map<String, BigDecimal> result = new HashMap<>();
-            while (rs.next()) {
-                String feeType = rs.getString(1);
-                BigDecimal amount = rs.getBigDecimal(2);
-                result.put(feeType, amount);
-            }
-            return result;
-        }, transactionId);
-    }
-
-    /**
-     * Calculates the total fee amount for an organization within a date range.
-     *
-     * @param organizationId The organization identifier
-     * @param dateRange The date range filter
-     * @param currency The currency code (optional, if null will return totals for all currencies)
-     * @return The total fee amount
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public BigDecimal calculateTotalFeeAmountForOrganization(UUID organizationId, DateRangeFilter dateRange, 
-            String currency) throws ConnectionException, QueryExecutionException {
-        logger.debug("Calculating total fee amount for organization: {}", organizationId);
-        
-        StringBuilder sql = new StringBuilder(CALCULATE_TOTAL_FEE_AMOUNT_FOR_ORGANIZATION_SQL);
-        List<Object> params = new ArrayList<>();
-        params.add(organizationId);
-        
-        // Add date range conditions if present
-        if (dateRange != null && dateRange.hasConstraints()) {
-            if (dateRange.getStartDate() != null) {
-                sql.append(" AND f.created_at >= ?");
-                params.add(Timestamp.valueOf(dateRange.getStartDate()));
+        try (PreparedStatement stmt = prepareStatement(connection, SQL_INSERT_FEE)) {
+            for (PaymentFee fee : fees) {
+                // Validate fee data
+                fee.validate();
+                
+                // Ensure fee ID is set
+                if (fee.getFeeId() == null) {
+                    fee.setFeeId(UUID.randomUUID());
+                }
+                
+                // Ensure created timestamp is set
+                if (fee.getCreatedAt() == null) {
+                    fee.setCreatedAt(Instant.now());
+                }
+                
+                stmt.setObject(1, fee.getFeeId());
+                stmt.setObject(2, fee.getTransactionId());
+                stmt.setString(3, fee.getFeeType().name());
+                stmt.setBigDecimal(4, fee.getAmount());
+                stmt.setString(5, fee.getCurrency());
+                stmt.setString(6, fee.getDescription());
+                stmt.setString(7, fee.getFeeReference());
+                stmt.setTimestamp(8, Timestamp.from(fee.getCreatedAt()));
+                
+                stmt.addBatch();
             }
             
-            if (dateRange.getEndDate() != null) {
-                sql.append(" AND f.created_at <= ?");
-                params.add(Timestamp.valueOf(dateRange.getEndDate()));
-            }
-        }
-        
-        // Add currency filter if specified
-        if (currency != null && !currency.isEmpty()) {
-            sql.append(" AND f.currency = ?");
-            params.add(currency);
-        }
-        
-        return executeQuery(sql.toString(), rs -> {
-            if (rs.next()) {
-                BigDecimal total = rs.getBigDecimal(1);
-                return total != null ? total : BigDecimal.ZERO;
-            }
-            return BigDecimal.ZERO;
-        }, params.toArray());
-    }
-
-    /**
-     * Calculates the total fee amount by fee type for an organization within a date range.
-     *
-     * @param organizationId The organization identifier
-     * @param dateRange The date range filter
-     * @param currency The currency code (optional, if null will return totals for all currencies)
-     * @return Map of fee type to total amount
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public Map<String, BigDecimal> calculateFeeAmountByTypeForOrganization(UUID organizationId, 
-            DateRangeFilter dateRange, String currency) throws ConnectionException, QueryExecutionException {
-        logger.debug("Calculating fee amounts by type for organization: {}", organizationId);
-        
-        StringBuilder sql = new StringBuilder(CALCULATE_FEE_AMOUNT_BY_TYPE_FOR_ORGANIZATION_SQL);
-        List<Object> params = new ArrayList<>();
-        params.add(organizationId);
-        
-        // Add date range conditions if present
-        if (dateRange != null && dateRange.hasConstraints()) {
-            if (dateRange.getStartDate() != null) {
-                sql.append(" AND f.created_at >= ?");
-                params.add(Timestamp.valueOf(dateRange.getStartDate()));
+            int[] results = stmt.executeBatch();
+            
+            // Verify all inserts were successful
+            for (int i = 0; i < results.length; i++) {
+                if (results[i] != 1) {
+                    throw new SQLException("Failed to create fee at index " + i + 
+                            ", expected 1 row affected but got " + results[i]);
+                }
             }
             
-            if (dateRange.getEndDate() != null) {
-                sql.append(" AND f.created_at <= ?");
-                params.add(Timestamp.valueOf(dateRange.getEndDate()));
-            }
+            return fees;
         }
-        
-        // Add currency filter if specified
-        if (currency != null && !currency.isEmpty()) {
-            sql.append(" AND f.currency = ?");
-            params.add(currency);
-        }
-        
-        return executeQuery(sql.toString(), rs -> {
-            Map<String, BigDecimal> result = new HashMap<>();
-            while (rs.next()) {
-                String feeType = rs.getString(1);
-                BigDecimal amount = rs.getBigDecimal(2);
-                result.put(feeType, amount);
-            }
-            return result;
-        }, params.toArray());
     }
 
     /**
-     * Calculates the total fee amount by account for an organization within a date range.
-     *
-     * @param organizationId The organization identifier
-     * @param dateRange The date range filter
-     * @param currency The currency code (optional, if null will return totals for all currencies)
-     * @return Map of account ID to total fee amount
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
-    public Map<UUID, BigDecimal> calculateFeeAmountByAccountForOrganization(UUID organizationId, 
-            DateRangeFilter dateRange, String currency) throws ConnectionException, QueryExecutionException {
-        logger.debug("Calculating fee amounts by account for organization: {}", organizationId);
+    protected List<PaymentFee> executeBatchUpdate(Connection connection, List<PaymentFee> fees) throws SQLException {
+        logger.debug("Batch updating {} fees", fees.size());
         
-        StringBuilder sql = new StringBuilder(CALCULATE_FEE_AMOUNT_BY_ACCOUNT_SQL);
-        List<Object> params = new ArrayList<>();
-        params.add(organizationId);
-        
-        // Add date range conditions if present
-        if (dateRange != null && dateRange.hasConstraints()) {
-            if (dateRange.getStartDate() != null) {
-                sql.append(" AND f.created_at >= ?");
-                params.add(Timestamp.valueOf(dateRange.getStartDate()));
+        try (PreparedStatement stmt = prepareStatement(connection, SQL_UPDATE_FEE)) {
+            for (PaymentFee fee : fees) {
+                // Validate fee data
+                fee.validate();
+                
+                stmt.setString(1, fee.getFeeType().name());
+                stmt.setBigDecimal(2, fee.getAmount());
+                stmt.setString(3, fee.getCurrency());
+                stmt.setString(4, fee.getDescription());
+                stmt.setString(5, fee.getFeeReference());
+                stmt.setObject(6, fee.getFeeId());
+                
+                stmt.addBatch();
             }
             
-            if (dateRange.getEndDate() != null) {
-                sql.append(" AND f.created_at <= ?");
-                params.add(Timestamp.valueOf(dateRange.getEndDate()));
-            }
-        }
-        
-        // Add currency filter if specified
-        if (currency != null && !currency.isEmpty()) {
-            sql.append(" AND f.currency = ?");
-            params.add(currency);
-        }
-        
-        return executeQuery(sql.toString(), rs -> {
-            Map<UUID, BigDecimal> result = new HashMap<>();
-            while (rs.next()) {
-                UUID accountId = (UUID) rs.getObject(1);
-                BigDecimal amount = rs.getBigDecimal(2);
-                result.put(accountId, amount);
-            }
-            return result;
-        }, params.toArray());
-    }
-
-    /**
-     * Finds fees for a specific time period grouped by day.
-     *
-     * @param organizationId The organization identifier
-     * @param dateRange The date range filter
-     * @return Map of date to total fee amount
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public Map<LocalDate, BigDecimal> getFeeAmountByDay(UUID organizationId, DateRangeFilter dateRange) 
-            throws ConnectionException, QueryExecutionException {
-        logger.debug("Getting fee amounts by day for organization: {}", organizationId);
-        
-        StringBuilder sql = new StringBuilder(GET_FEE_AMOUNT_BY_DAY_SQL);
-        List<Object> params = new ArrayList<>();
-        params.add(organizationId);
-        
-        // Add date range conditions if present
-        if (dateRange != null && dateRange.hasConstraints()) {
-            if (dateRange.getStartDate() != null) {
-                sql.append(" AND f.created_at >= ?");
-                params.add(Timestamp.valueOf(dateRange.getStartDate()));
+            int[] results = stmt.executeBatch();
+            
+            // Verify all updates were successful
+            for (int i = 0; i < results.length; i++) {
+                if (results[i] != 1) {
+                    throw new SQLException("Failed to update fee at index " + i + 
+                            ", expected 1 row affected but got " + results[i]);
+                }
             }
             
-            if (dateRange.getEndDate() != null) {
-                sql.append(" AND f.created_at <= ?");
-                params.add(Timestamp.valueOf(dateRange.getEndDate()));
-            }
+            return fees;
         }
-        
-        return executeQuery(sql.toString(), rs -> {
-            Map<LocalDate, BigDecimal> result = new HashMap<>();
-            while (rs.next()) {
-                LocalDate date = rs.getDate(1).toLocalDate();
-                BigDecimal amount = rs.getBigDecimal(2);
-                result.put(date, amount);
-            }
-            return result;
-        }, params.toArray());
     }
 
     /**
-     * Finds fees for a specific time period grouped by fee type.
-     *
-     * @param organizationId The organization identifier
-     * @param dateRange The date range filter
-     * @return Map of fee type to total fee amount
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
-    public Map<String, BigDecimal> getFeeAmountByType(UUID organizationId, DateRangeFilter dateRange) 
-            throws ConnectionException, QueryExecutionException {
-        logger.debug("Getting fee amounts by type for organization: {}", organizationId);
+    protected long executeCount(Connection connection, Object params) throws SQLException {
+        logger.debug("Counting fees with params: {}", params);
         
-        StringBuilder sql = new StringBuilder(GET_FEE_AMOUNT_BY_TYPE_SQL);
-        List<Object> params = new ArrayList<>();
-        params.add(organizationId);
-        
-        // Add date range conditions if present
-        if (dateRange != null && dateRange.hasConstraints()) {
-            if (dateRange.getStartDate() != null) {
-                sql.append(" AND f.created_at >= ?");
-                params.add(Timestamp.valueOf(dateRange.getStartDate()));
-            }
+        if (params instanceof PaymentFilterParams) {
+            PaymentFilterParams filterParams = (PaymentFilterParams) params;
             
-            if (dateRange.getEndDate() != null) {
-                sql.append(" AND f.created_at <= ?");
-                params.add(Timestamp.valueOf(dateRange.getEndDate()));
+            PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder()
+                    .count("f.fee_id")
+                    .from("payment_fee f");
+            
+            // Apply filters (excluding pagination and sorting)
+            PaymentFilterParams countParams = filterParams.copy();
+            countParams.setPagination(null);
+            countParams.setSortCriteria(new ArrayList<>());
+            queryBuilder.applyFilters(countParams);
+            
+            try (PreparedStatement stmt = queryBuilder.buildPreparedStatement(connection)) {
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        return rs.getLong(1);
+                    }
+                    return 0;
+                }
             }
+        } else {
+            throw new IllegalArgumentException("Unsupported query parameters type: " + 
+                    (params != null ? params.getClass().getName() : "null"));
         }
-        
-        return executeQuery(sql.toString(), rs -> {
-            Map<String, BigDecimal> result = new HashMap<>();
-            while (rs.next()) {
-                String feeType = rs.getString(1);
-                BigDecimal amount = rs.getBigDecimal(2);
-                result.put(feeType, amount);
-            }
-            return result;
-        }, params.toArray());
     }
 
     /**
-     * Creates a new fee associated with a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @param fee The fee to create
-     * @return The created fee with any database-generated values
-     * @throws ValidationException if the fee fails validation
-     * @throws ResourceNotFoundException if the associated transaction is not found
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * {@inheritDoc}
      */
     @Override
-    public PaymentFee createFeeForTransaction(UUID transactionId, PaymentFee fee) 
-            throws ValidationException, ResourceNotFoundException, ConnectionException, 
-                   QueryExecutionException, TransactionException {
-        logger.debug("Creating fee for transaction: {}", transactionId);
+    protected boolean executeExists(Connection connection, UUID feeId) throws SQLException {
+        logger.debug("Checking if fee exists with ID: {}", feeId);
         
-        // Validate the fee
-        validateEntity(fee);
+        try (PreparedStatement stmt = prepareStatement(connection, "SELECT 1 FROM payment_fee WHERE fee_id = ?")) {
+            stmt.setObject(1, feeId);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    protected List<PaymentFee> executeFindByOrganizationId(Connection connection, UUID organizationId) throws SQLException {
+        logger.debug("Finding fees by organization ID: {}", organizationId);
         
-        // Ensure the transaction exists
-        if (!transactionExists(transactionId)) {
-            throw new ResourceNotFoundException("Transaction not found with ID: " + transactionId);
+        String sql = "SELECT f.* FROM payment_fee f " +
+                     "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
+                     "WHERE t.organization_id = ?";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            stmt.setObject(1, organizationId);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                return processResultSet(rs, this::mapFeeFromResultSet);
+            }
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    protected List<PaymentFee> executeFindByAccountId(Connection connection, UUID accountId) throws SQLException {
+        logger.debug("Finding fees by account ID: {}", accountId);
+        
+        String sql = "SELECT f.* FROM payment_fee f " +
+                     "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
+                     "WHERE t.account_id = ?";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            stmt.setObject(1, accountId);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                return processResultSet(rs, this::mapFeeFromResultSet);
+            }
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    protected List<PaymentFee> executeFindByOrganizationAndAccountId(Connection connection, UUID organizationId, UUID accountId) throws SQLException {
+        logger.debug("Finding fees by organization ID: {} and account ID: {}", organizationId, accountId);
+        
+        String sql = "SELECT f.* FROM payment_fee f " +
+                     "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
+                     "WHERE t.organization_id = ? AND t.account_id = ?";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            stmt.setObject(1, organizationId);
+            stmt.setObject(2, accountId);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                return processResultSet(rs, this::mapFeeFromResultSet);
+            }
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentFee> findByTransactionId(UUID transactionId) {
+        logger.debug("Finding fees by transaction ID: {}", transactionId);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                return executeFindByTransactionId(connection, transactionId);
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find fees by transaction ID: " + transactionId, e);
+        }
+    }
+    
+    /**
+     * Executes the find by transaction ID operation with the provided connection and transaction ID.
+     *
+     * @param connection the database connection
+     * @param transactionId the transaction ID to find fees for
+     * @return a list of fees associated with the transaction
+     * @throws SQLException if a database error occurs
+     */
+    private List<PaymentFee> executeFindByTransactionId(Connection connection, UUID transactionId) throws SQLException {
+        try (PreparedStatement stmt = prepareStatement(connection, SQL_FIND_FEES_BY_TRANSACTION_ID)) {
+            stmt.setObject(1, transactionId);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                return processResultSet(rs, this::mapFeeFromResultSet);
+            }
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentFee> findByFeeType(String feeType, PaymentFilterParams filterParams) {
+        logger.debug("Finding fees by fee type: {} with filters: {}", feeType, filterParams);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder()
+                        .select("f.*")
+                        .from("payment_fee f")
+                        .where("f.fee_type = ?")
+                        .addParameter(feeType);
+                
+                // Apply additional filters
+                if (filterParams != null) {
+                    queryBuilder.applyFilters(filterParams);
+                }
+                
+                try (PreparedStatement stmt = queryBuilder.buildPreparedStatement(connection)) {
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        return processResultSet(rs, this::mapFeeFromResultSet);
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find fees by fee type: " + feeType, e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentFee> findByOrganizationId(UUID organizationId, PaymentFilterParams filterParams) {
+        logger.debug("Finding fees by organization ID: {} with filters: {}", organizationId, filterParams);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder()
+                        .select("f.*")
+                        .from("payment_fee f")
+                        .innerJoin("payment_transaction t", "f.transaction_id = t.transaction_id")
+                        .where("t.organization_id = ?")
+                        .addParameter(organizationId);
+                
+                // Apply additional filters
+                if (filterParams != null) {
+                    queryBuilder.applyFilters(filterParams);
+                }
+                
+                try (PreparedStatement stmt = queryBuilder.buildPreparedStatement(connection)) {
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        return processResultSet(rs, this::mapFeeFromResultSet);
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find fees by organization ID: " + organizationId, e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentFee> findByOrganizationIdAndAccountId(UUID organizationId, UUID accountId, PaymentFilterParams filterParams) {
+        logger.debug("Finding fees by organization ID: {} and account ID: {} with filters: {}", 
+                organizationId, accountId, filterParams);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder()
+                        .select("f.*")
+                        .from("payment_fee f")
+                        .innerJoin("payment_transaction t", "f.transaction_id = t.transaction_id")
+                        .where("t.organization_id = ?")
+                        .addParameter(organizationId)
+                        .and("t.account_id = ?")
+                        .addParameter(accountId);
+                
+                // Apply additional filters
+                if (filterParams != null) {
+                    queryBuilder.applyFilters(filterParams);
+                }
+                
+                try (PreparedStatement stmt = queryBuilder.buildPreparedStatement(connection)) {
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        return processResultSet(rs, this::mapFeeFromResultSet);
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find fees by organization ID: " + organizationId + 
+                    " and account ID: " + accountId, e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public BigDecimal calculateTotalFeeAmountForTransaction(UUID transactionId) {
+        logger.debug("Calculating total fee amount for transaction ID: {}", transactionId);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                try (PreparedStatement stmt = prepareStatement(connection, SQL_CALCULATE_TOTAL_FEE_AMOUNT_FOR_TRANSACTION)) {
+                    stmt.setObject(1, transactionId);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (rs.next()) {
+                            return rs.getBigDecimal(1);
+                        }
+                        return BigDecimal.ZERO;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to calculate total fee amount for transaction ID: " + transactionId, e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Map<String, BigDecimal> calculateFeeAmountByTypeForTransaction(UUID transactionId) {
+        logger.debug("Calculating fee amount by type for transaction ID: {}", transactionId);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                Map<String, BigDecimal> result = new HashMap<>();
+                
+                try (PreparedStatement stmt = prepareStatement(connection, SQL_CALCULATE_FEE_AMOUNT_BY_TYPE_FOR_TRANSACTION)) {
+                    stmt.setObject(1, transactionId);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            String feeType = rs.getString(1);
+                            BigDecimal amount = rs.getBigDecimal(2);
+                            result.put(feeType, amount);
+                        }
+                    }
+                }
+                
+                return result;
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to calculate fee amount by type for transaction ID: " + transactionId, e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public BigDecimal calculateTotalFeeAmountForOrganization(UUID organizationId, DateRangeFilter dateRange, String currency) {
+        logger.debug("Calculating total fee amount for organization ID: {} with date range: {} and currency: {}", 
+                organizationId, dateRange, currency);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                StringBuilder sql = new StringBuilder(
+                        "SELECT SUM(f.amount) FROM payment_fee f " +
+                        "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
+                        "WHERE t.organization_id = ?");
+                
+                List<Object> params = new ArrayList<>();
+                params.add(organizationId);
+                
+                // Add date range filter if provided
+                if (dateRange != null && dateRange.hasConstraints()) {
+                    if (dateRange.getStartDate() != null) {
+                        sql.append(" AND t.created_at >= ?");
+                        params.add(Timestamp.from(dateRange.getStartDate().atZone(ZoneId.systemDefault()).toInstant()));
+                    }
+                    
+                    if (dateRange.getEndDate() != null) {
+                        sql.append(" AND t.created_at <= ?");
+                        params.add(Timestamp.from(dateRange.getEndDate().atZone(ZoneId.systemDefault()).toInstant()));
+                    }
+                }
+                
+                // Add currency filter if provided
+                if (currency != null && !currency.isEmpty()) {
+                    sql.append(" AND f.currency = ?");
+                    params.add(currency);
+                }
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql.toString())) {
+                    for (int i = 0; i < params.size(); i++) {
+                        stmt.setObject(i + 1, params.get(i));
+                    }
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (rs.next()) {
+                            return rs.getBigDecimal(1);
+                        }
+                        return BigDecimal.ZERO;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to calculate total fee amount for organization ID: " + organizationId, e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Map<String, BigDecimal> calculateFeeAmountByTypeForOrganization(UUID organizationId, DateRangeFilter dateRange, String currency) {
+        logger.debug("Calculating fee amount by type for organization ID: {} with date range: {} and currency: {}", 
+                organizationId, dateRange, currency);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                StringBuilder sql = new StringBuilder(
+                        "SELECT f.fee_type, SUM(f.amount) FROM payment_fee f " +
+                        "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
+                        "WHERE t.organization_id = ?");
+                
+                List<Object> params = new ArrayList<>();
+                params.add(organizationId);
+                
+                // Add date range filter if provided
+                if (dateRange != null && dateRange.hasConstraints()) {
+                    if (dateRange.getStartDate() != null) {
+                        sql.append(" AND t.created_at >= ?");
+                        params.add(Timestamp.from(dateRange.getStartDate().atZone(ZoneId.systemDefault()).toInstant()));
+                    }
+                    
+                    if (dateRange.getEndDate() != null) {
+                        sql.append(" AND t.created_at <= ?");
+                        params.add(Timestamp.from(dateRange.getEndDate().atZone(ZoneId.systemDefault()).toInstant()));
+                    }
+                }
+                
+                // Add currency filter if provided
+                if (currency != null && !currency.isEmpty()) {
+                    sql.append(" AND f.currency = ?");
+                    params.add(currency);
+                }
+                
+                sql.append(" GROUP BY f.fee_type");
+                
+                Map<String, BigDecimal> result = new HashMap<>();
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql.toString())) {
+                    for (int i = 0; i < params.size(); i++) {
+                        stmt.setObject(i + 1, params.get(i));
+                    }
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            String feeType = rs.getString(1);
+                            BigDecimal amount = rs.getBigDecimal(2);
+                            result.put(feeType, amount);
+                        }
+                    }
+                }
+                
+                return result;
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to calculate fee amount by type for organization ID: " + organizationId, e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Map<UUID, BigDecimal> calculateFeeAmountByAccountForOrganization(UUID organizationId, DateRangeFilter dateRange, String currency) {
+        logger.debug("Calculating fee amount by account for organization ID: {} with date range: {} and currency: {}", 
+                organizationId, dateRange, currency);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                StringBuilder sql = new StringBuilder(
+                        "SELECT t.account_id, SUM(f.amount) FROM payment_fee f " +
+                        "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
+                        "WHERE t.organization_id = ?");
+                
+                List<Object> params = new ArrayList<>();
+                params.add(organizationId);
+                
+                // Add date range filter if provided
+                if (dateRange != null && dateRange.hasConstraints()) {
+                    if (dateRange.getStartDate() != null) {
+                        sql.append(" AND t.created_at >= ?");
+                        params.add(Timestamp.from(dateRange.getStartDate().atZone(ZoneId.systemDefault()).toInstant()));
+                    }
+                    
+                    if (dateRange.getEndDate() != null) {
+                        sql.append(" AND t.created_at <= ?");
+                        params.add(Timestamp.from(dateRange.getEndDate().atZone(ZoneId.systemDefault()).toInstant()));
+                    }
+                }
+                
+                // Add currency filter if provided
+                if (currency != null && !currency.isEmpty()) {
+                    sql.append(" AND f.currency = ?");
+                    params.add(currency);
+                }
+                
+                sql.append(" GROUP BY t.account_id");
+                
+                Map<UUID, BigDecimal> result = new HashMap<>();
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql.toString())) {
+                    for (int i = 0; i < params.size(); i++) {
+                        stmt.setObject(i + 1, params.get(i));
+                    }
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            UUID accountId = rs.getObject(1, UUID.class);
+                            BigDecimal amount = rs.getBigDecimal(2);
+                            result.put(accountId, amount);
+                        }
+                    }
+                }
+                
+                return result;
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to calculate fee amount by account for organization ID: " + organizationId, e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Map<LocalDate, BigDecimal> getFeeAmountByDay(UUID organizationId, DateRangeFilter dateRange) {
+        logger.debug("Getting fee amount by day for organization ID: {} with date range: {}", 
+                organizationId, dateRange);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                StringBuilder sql = new StringBuilder(
+                        "SELECT DATE(t.created_at) as day, SUM(f.amount) FROM payment_fee f " +
+                        "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
+                        "WHERE t.organization_id = ?");
+                
+                List<Object> params = new ArrayList<>();
+                params.add(organizationId);
+                
+                // Add date range filter if provided
+                if (dateRange != null && dateRange.hasConstraints()) {
+                    if (dateRange.getStartDate() != null) {
+                        sql.append(" AND t.created_at >= ?");
+                        params.add(Timestamp.from(dateRange.getStartDate().atZone(ZoneId.systemDefault()).toInstant()));
+                    }
+                    
+                    if (dateRange.getEndDate() != null) {
+                        sql.append(" AND t.created_at <= ?");
+                        params.add(Timestamp.from(dateRange.getEndDate().atZone(ZoneId.systemDefault()).toInstant()));
+                    }
+                }
+                
+                sql.append(" GROUP BY DATE(t.created_at) ORDER BY DATE(t.created_at)");
+                
+                Map<LocalDate, BigDecimal> result = new HashMap<>();
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql.toString())) {
+                    for (int i = 0; i < params.size(); i++) {
+                        stmt.setObject(i + 1, params.get(i));
+                    }
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            LocalDate day = rs.getDate(1).toLocalDate();
+                            BigDecimal amount = rs.getBigDecimal(2);
+                            result.put(day, amount);
+                        }
+                    }
+                }
+                
+                return result;
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to get fee amount by day for organization ID: " + organizationId, e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Map<String, BigDecimal> getFeeAmountByType(UUID organizationId, DateRangeFilter dateRange) {
+        logger.debug("Getting fee amount by type for organization ID: {} with date range: {}", 
+                organizationId, dateRange);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                StringBuilder sql = new StringBuilder(
+                        "SELECT f.fee_type, SUM(f.amount) FROM payment_fee f " +
+                        "JOIN payment_transaction t ON f.transaction_id = t.transaction_id " +
+                        "WHERE t.organization_id = ?");
+                
+                List<Object> params = new ArrayList<>();
+                params.add(organizationId);
+                
+                // Add date range filter if provided
+                if (dateRange != null && dateRange.hasConstraints()) {
+                    if (dateRange.getStartDate() != null) {
+                        sql.append(" AND t.created_at >= ?");
+                        params.add(Timestamp.from(dateRange.getStartDate().atZone(ZoneId.systemDefault()).toInstant()));
+                    }
+                    
+                    if (dateRange.getEndDate() != null) {
+                        sql.append(" AND t.created_at <= ?");
+                        params.add(Timestamp.from(dateRange.getEndDate().atZone(ZoneId.systemDefault()).toInstant()));
+                    }
+                }
+                
+                sql.append(" GROUP BY f.fee_type");
+                
+                Map<String, BigDecimal> result = new HashMap<>();
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql.toString())) {
+                    for (int i = 0; i < params.size(); i++) {
+                        stmt.setObject(i + 1, params.get(i));
+                    }
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            String feeType = rs.getString(1);
+                            BigDecimal amount = rs.getBigDecimal(2);
+                            result.put(feeType, amount);
+                        }
+                    }
+                }
+                
+                return result;
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to get fee amount by type for organization ID: " + organizationId, e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public PaymentFee createFeeForTransaction(UUID transactionId, PaymentFee fee) {
+        logger.debug("Creating fee for transaction ID: {}", transactionId);
+        
+        if (fee == null) {
+            throw new IllegalArgumentException("Fee cannot be null");
         }
         
         // Set the transaction ID on the fee
         fee.setTransactionId(transactionId);
         
-        // Generate a fee ID if not provided
-        if (fee.getFeeId() == null) {
-            fee.setFeeId(UUID.randomUUID());
-        }
-        
-        // Set creation timestamp if not provided
-        if (fee.getCreatedAt() == null) {
-            fee.setCreatedAt(Instant.now());
-        }
-        
-        // Create the fee
         return create(fee);
     }
 
     /**
-     * Creates multiple fees for a transaction in a batch operation.
-     *
-     * @param transactionId The transaction identifier
-     * @param fees The list of fees to create
-     * @return The list of created fees with any database-generated values
-     * @throws ValidationException if any fee fails validation
-     * @throws ResourceNotFoundException if the associated transaction is not found
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * {@inheritDoc}
      */
     @Override
-    public List<PaymentFee> batchCreateFeesForTransaction(UUID transactionId, List<PaymentFee> fees) 
-            throws ValidationException, ResourceNotFoundException, ConnectionException, 
-                   QueryExecutionException, TransactionException {
-        logger.debug("Batch creating fees for transaction: {}", transactionId);
+    public List<PaymentFee> batchCreateFeesForTransaction(UUID transactionId, List<PaymentFee> fees) {
+        logger.debug("Batch creating fees for transaction ID: {}", transactionId);
         
         if (fees == null || fees.isEmpty()) {
             return new ArrayList<>();
         }
         
-        // Ensure the transaction exists
-        if (!transactionExists(transactionId)) {
-            throw new ResourceNotFoundException("Transaction not found with ID: " + transactionId);
-        }
-        
-        // Set the transaction ID on all fees and validate them
+        // Set the transaction ID on all fees
         for (PaymentFee fee : fees) {
             fee.setTransactionId(transactionId);
-            validateEntity(fee);
-            
-            // Generate a fee ID if not provided
-            if (fee.getFeeId() == null) {
-                fee.setFeeId(UUID.randomUUID());
-            }
-            
-            // Set creation timestamp if not provided
-            if (fee.getCreatedAt() == null) {
-                fee.setCreatedAt(Instant.now());
-            }
         }
         
-        // Create the fees in a batch
         return batchCreate(fees);
     }
 
     /**
-     * Updates a fee associated with a transaction.
-     *
-     * @param fee The fee to update
-     * @return The updated fee
-     * @throws ValidationException if the fee fails validation
-     * @throws ResourceNotFoundException if the fee or associated transaction is not found
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * {@inheritDoc}
      */
     @Override
-    public PaymentFee updateFee(PaymentFee fee) 
-            throws ValidationException, ResourceNotFoundException, ConnectionException, 
-                   QueryExecutionException, TransactionException {
-        logger.debug("Updating fee: {}", fee.getFeeId());
+    public PaymentFee updateFee(PaymentFee fee) {
+        logger.debug("Updating fee: {}", fee);
         
-        // Validate the fee
-        validateEntity(fee);
-        
-        // Ensure the fee exists
-        if (!exists(fee.getFeeId())) {
-            throw new ResourceNotFoundException("Fee not found with ID: " + fee.getFeeId());
+        if (fee == null) {
+            throw new IllegalArgumentException("Fee cannot be null");
         }
         
-        // Ensure the transaction exists
-        if (!transactionExists(fee.getTransactionId())) {
-            throw new ResourceNotFoundException("Transaction not found with ID: " + fee.getTransactionId());
-        }
-        
-        // Update the fee
         return update(fee);
     }
 
     /**
-     * Deletes all fees associated with a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @return The number of fees deleted
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * {@inheritDoc}
      */
     @Override
-    public int deleteAllFeesForTransaction(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException, TransactionException {
-        logger.debug("Deleting all fees for transaction: {}", transactionId);
-        
-        boolean localTransaction = !Boolean.TRUE.equals(inTransaction.get());
-        
-        if (localTransaction) {
-            beginTransaction();
-        }
+    public int deleteAllFeesForTransaction(UUID transactionId) {
+        logger.debug("Deleting all fees for transaction ID: {}", transactionId);
         
         try {
-            int rowsAffected = executeUpdate(DELETE_ALL_FEES_FOR_TRANSACTION_SQL, transactionId);
-            
-            if (localTransaction) {
-                commitTransaction();
-            }
-            
-            return rowsAffected;
-        } catch (ConnectionException | QueryExecutionException e) {
-            if (localTransaction) {
-                rollbackTransaction();
-            }
-            throw e;
+            return executeInTransaction(connection -> {
+                try (PreparedStatement stmt = prepareStatement(connection, SQL_DELETE_FEES_BY_TRANSACTION_ID)) {
+                    stmt.setObject(1, transactionId);
+                    return stmt.executeUpdate();
+                }
+            });
         } catch (Exception e) {
-            if (localTransaction) {
-                rollbackTransaction();
-            }
-            throw new QueryExecutionException("Failed to delete fees for transaction: " + e.getMessage(), e, 
-                    DELETE_ALL_FEES_FOR_TRANSACTION_SQL, "DELETE", new String[]{TABLE_NAME});
+            throw handleException("Failed to delete fees for transaction ID: " + transactionId, e);
         }
     }
 
     /**
-     * Finds fees with external reference matching the provided value.
-     *
-     * @param feeReference The external fee reference
-     * @return List of fees with the matching reference
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
-    public List<PaymentFee> findByFeeReference(String feeReference) 
-            throws ConnectionException, QueryExecutionException {
-        logger.debug("Finding fees by reference: {}", feeReference);
+    public List<PaymentFee> findByFeeReference(String feeReference) {
+        logger.debug("Finding fees by fee reference: {}", feeReference);
         
-        return executeQuery(FIND_BY_FEE_REFERENCE_SQL, this::mapRows, feeReference);
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                try (PreparedStatement stmt = prepareStatement(connection, SQL_FIND_FEES_BY_FEE_REFERENCE)) {
+                    stmt.setString(1, feeReference);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        return processResultSet(rs, this::mapFeeFromResultSet);
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find fees by fee reference: " + feeReference, e);
+        }
     }
 
     /**
-     * Finds fees for all accounts of an organization.
-     * This is a special case of the organization query that uses the "_all" placeholder.
-     *
-     * @param organizationId The organization identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of fees for all accounts of the specified organization
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
-    public List<PaymentFee> findByOrganizationIdForAllAccounts(UUID organizationId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        logger.debug("Finding fees for all accounts of organization: {}", organizationId);
+    public List<PaymentFee> findByOrganizationIdForAllAccounts(UUID organizationId, PaymentFilterParams filterParams) {
+        logger.debug("Finding fees for all accounts of organization ID: {} with filters: {}", 
+                organizationId, filterParams);
         
-        // This is the same as findByOrganizationId since we're not filtering by account
         return findByOrganizationId(organizationId, filterParams);
     }
 
     /**
-     * Finds fees for all organizations.
-     * This is a special case for administrative access that uses the "_all" placeholder.
-     *
-     * @param filterParams Additional filtering parameters
-     * @return List of fees across all organizations
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
-    public List<PaymentFee> findForAllOrganizations(PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        logger.debug("Finding fees for all organizations");
+    public List<PaymentFee> findForAllOrganizations(PaymentFilterParams filterParams) {
+        logger.debug("Finding fees for all organizations with filters: {}", filterParams);
         
-        // Use the filter query builder without organization filtering
-        PaymentQueryBuilder queryBuilder = buildFilterQuery(filterParams);
-        
-        return executeQuery(queryBuilder, this::mapRows);
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder()
+                        .select("f.*")
+                        .from("payment_fee f");
+                
+                // Apply filters
+                if (filterParams != null) {
+                    queryBuilder.applyFilters(filterParams);
+                }
+                
+                try (PreparedStatement stmt = queryBuilder.buildPreparedStatement(connection)) {
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        return processResultSet(rs, this::mapFeeFromResultSet);
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find fees for all organizations", e);
+        }
     }
-
+    
     /**
-     * Checks if a transaction exists.
+     * Maps a ResultSet row to a PaymentFee object.
      *
-     * @param transactionId The transaction identifier
-     * @return true if the transaction exists, false otherwise
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @param rs the ResultSet to map
+     * @return the mapped PaymentFee object
+     * @throws SQLException if a database error occurs
      */
-    private boolean transactionExists(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException {
-        return executeQuery(CHECK_TRANSACTION_EXISTS_SQL, rs -> rs.next(), transactionId);
+    private PaymentFee mapFeeFromResultSet(ResultSet rs) throws SQLException {
+        PaymentFee fee = new PaymentFee();
+        
+        fee.setFeeId(rs.getObject("fee_id", UUID.class));
+        fee.setTransactionId(rs.getObject("transaction_id", UUID.class));
+        
+        String feeTypeStr = rs.getString("fee_type");
+        try {
+            fee.setFeeType(FeeType.valueOf(feeTypeStr));
+        } catch (IllegalArgumentException e) {
+            logger.warn("Unknown fee type: {}, using OTHER", feeTypeStr);
+            fee.setFeeType(FeeType.OTHER);
+        }
+        
+        fee.setAmount(rs.getBigDecimal("amount"));
+        fee.setCurrency(rs.getString("currency"));
+        fee.setDescription(rs.getString("description"));
+        fee.setFeeReference(rs.getString("fee_reference"));
+        
+        Timestamp createdAt = rs.getTimestamp("created_at");
+        if (createdAt != null) {
+            fee.setCreatedAt(createdAt.toInstant());
+        }
+        
+        return fee;
     }
 }

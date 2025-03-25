@@ -4,9 +4,10 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
+import java.text.ParseException;
+import java.util.Locale;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,283 +18,107 @@ import org.slf4j.LoggerFactory;
  * with support for currency conversion, decimal precision handling, and range validation.
  * 
  * It ensures consistent handling of financial amounts across different currencies while
- * generating appropriate SQL conditions for amount-based filtering.
+ * generating appropriate SQL conditions for payment transaction filtering.
  */
 public class AmountRangeFilter {
     private static final Logger logger = LoggerFactory.getLogger(AmountRangeFilter.class);
     
     // Standard decimal scale for monetary amounts (4 decimal places)
-    private static final int AMOUNT_SCALE = 4;
+    private static final int DECIMAL_SCALE = 4;
     
     // Maximum precision for monetary amounts (19 digits total)
-    private static final int AMOUNT_PRECISION = 19;
+    private static final int DECIMAL_PRECISION = 19;
     
-    // The minimum amount (inclusive) for the range
+    // Minimum amount value allowed (can be negative for adjustments/refunds)
+    private static final BigDecimal MIN_ALLOWED_AMOUNT = new BigDecimal("-999999999999.9999");
+    
+    // Maximum amount value allowed
+    private static final BigDecimal MAX_ALLOWED_AMOUNT = new BigDecimal("999999999999.9999");
+    
+    // Decimal formatter for parsing string amounts with locale awareness
+    private static final ThreadLocal<DecimalFormat> DECIMAL_FORMATTER = ThreadLocal.withInitial(() -> {
+        DecimalFormatSymbols symbols = new DecimalFormatSymbols(Locale.US);
+        DecimalFormat format = new DecimalFormat("#,##0.####", symbols);
+        format.setParseBigDecimal(true);
+        return format;
+    });
+    
+    // Minimum and maximum amounts for the range
     private BigDecimal minAmount;
-    
-    // The maximum amount (inclusive) for the range
     private BigDecimal maxAmount;
     
-    // The currency code (ISO 4217) for the amounts
+    // Currency code (ISO 4217) for the amounts
     private String currency;
     
-    // Flag indicating whether currency conversion is required
-    private boolean requiresConversion;
-    
-    // Exchange rate for currency conversion (if applicable)
-    private BigDecimal exchangeRate;
-    
     /**
-     * Creates a new amount range filter with explicit minimum and maximum amounts.
-     * 
-     * @param minAmount The minimum amount (inclusive), can be null for open-ended ranges
-     * @param maxAmount The maximum amount (inclusive), can be null for open-ended ranges
-     * @param currency The currency code (ISO 4217), can be null
+     * Creates a new empty amount range filter.
      */
-    public AmountRangeFilter(BigDecimal minAmount, BigDecimal maxAmount, String currency) {
-        this.minAmount = minAmount != null ? normalizeAmount(minAmount) : null;
-        this.maxAmount = maxAmount != null ? normalizeAmount(maxAmount) : null;
-        this.currency = currency != null ? currency.toUpperCase() : null;
-        this.requiresConversion = false;
-        this.exchangeRate = BigDecimal.ONE;
+    public AmountRangeFilter() {
+        // Default constructor creates an empty filter
     }
     
     /**
-     * Creates a new amount range filter with string representations of amounts.
+     * Creates a new amount range filter with the specified minimum and maximum amounts.
      * 
-     * @param minAmountStr The minimum amount as string (inclusive), can be null for open-ended ranges
-     * @param maxAmountStr The maximum amount as string (inclusive), can be null for open-ended ranges
-     * @param currency The currency code (ISO 4217), can be null
-     * @throws NumberFormatException If the amount strings cannot be parsed as decimal numbers
+     * @param minAmount The minimum amount (inclusive)
+     * @param maxAmount The maximum amount (inclusive)
+     * @param currency The currency code (optional)
+     */
+    public AmountRangeFilter(BigDecimal minAmount, BigDecimal maxAmount, String currency) {
+        setMinAmount(minAmount);
+        setMaxAmount(maxAmount);
+        setCurrency(currency);
+    }
+    
+    /**
+     * Creates a new amount range filter with the specified minimum and maximum amounts as strings.
+     * The method will attempt to parse the amounts using various common formats.
+     * 
+     * @param minAmountStr The minimum amount string (inclusive)
+     * @param maxAmountStr The maximum amount string (inclusive)
+     * @param currency The currency code (optional)
+     * @throws IllegalArgumentException If the amount strings cannot be parsed
      */
     public AmountRangeFilter(String minAmountStr, String maxAmountStr, String currency) {
-        this.currency = currency != null ? currency.toUpperCase() : null;
-        this.requiresConversion = false;
-        this.exchangeRate = BigDecimal.ONE;
-        
         if (minAmountStr != null && !minAmountStr.isEmpty()) {
             try {
-                this.minAmount = normalizeAmount(new BigDecimal(minAmountStr));
-            } catch (NumberFormatException e) {
-                logger.warn("Invalid minimum amount format: {}", minAmountStr);
-                throw new IllegalArgumentException("Invalid minimum amount format. Expected decimal number.");
+                this.minAmount = parseAmount(minAmountStr);
+            } catch (ParseException e) {
+                throw new IllegalArgumentException("Invalid minimum amount format: " + minAmountStr, e);
             }
         }
         
         if (maxAmountStr != null && !maxAmountStr.isEmpty()) {
             try {
-                this.maxAmount = normalizeAmount(new BigDecimal(maxAmountStr));
-            } catch (NumberFormatException e) {
-                logger.warn("Invalid maximum amount format: {}", maxAmountStr);
-                throw new IllegalArgumentException("Invalid maximum amount format. Expected decimal number.");
+                this.maxAmount = parseAmount(maxAmountStr);
+            } catch (ParseException e) {
+                throw new IllegalArgumentException("Invalid maximum amount format: " + maxAmountStr, e);
             }
         }
+        
+        setCurrency(currency);
     }
     
     /**
-     * Creates a new amount range filter with currency conversion.
+     * Parses an amount string into a BigDecimal, handling various formats.
      * 
-     * @param minAmount The minimum amount (inclusive), can be null for open-ended ranges
-     * @param maxAmount The maximum amount (inclusive), can be null for open-ended ranges
-     * @param sourceCurrency The source currency code (ISO 4217)
-     * @param targetCurrency The target currency code (ISO 4217)
-     * @param exchangeRate The exchange rate from source to target currency
+     * @param amountStr The amount string to parse
+     * @return The parsed BigDecimal amount
+     * @throws ParseException If the string cannot be parsed as an amount
      */
-    public AmountRangeFilter(BigDecimal minAmount, BigDecimal maxAmount, 
-                             String sourceCurrency, String targetCurrency, 
-                             BigDecimal exchangeRate) {
-        this.minAmount = minAmount != null ? normalizeAmount(minAmount) : null;
-        this.maxAmount = maxAmount != null ? normalizeAmount(maxAmount) : null;
-        this.currency = sourceCurrency != null ? sourceCurrency.toUpperCase() : null;
-        this.requiresConversion = true;
-        this.exchangeRate = exchangeRate != null ? exchangeRate : BigDecimal.ONE;
-    }
-    
-    /**
-     * Normalizes an amount to the standard decimal scale and precision.
-     * 
-     * @param amount The amount to normalize
-     * @return The normalized amount
-     */
-    private BigDecimal normalizeAmount(BigDecimal amount) {
-        if (amount == null) {
+    private BigDecimal parseAmount(String amountStr) throws ParseException {
+        if (amountStr == null || amountStr.isEmpty()) {
             return null;
         }
         
-        // Check if the amount exceeds the maximum precision
-        if (amount.precision() > AMOUNT_PRECISION) {
-            logger.warn("Amount precision exceeds maximum allowed ({}): {}", AMOUNT_PRECISION, amount);
-            throw new IllegalArgumentException("Amount precision exceeds maximum allowed: " + AMOUNT_PRECISION);
-        }
+        // Remove currency symbols and other non-numeric characters except decimal and grouping separators
+        String cleanedAmount = amountStr.replaceAll("[^\\d.,\\-]", "");
         
-        // Scale the amount to the standard decimal places
-        return amount.setScale(AMOUNT_SCALE, RoundingMode.HALF_UP);
-    }
-    
-    /**
-     * Validates the amount range for consistency and correctness.
-     * 
-     * @throws IllegalArgumentException If the amount range is invalid
-     */
-    public void validate() {
-        // Validate minimum amount
-        if (minAmount != null && minAmount.compareTo(BigDecimal.ZERO) < 0) {
-            logger.warn("Negative minimum amount: {}", minAmount);
-            throw new IllegalArgumentException("Minimum amount cannot be negative");
-        }
+        // Try parsing with the decimal formatter
+        BigDecimal amount = (BigDecimal) DECIMAL_FORMATTER.get().parse(cleanedAmount);
         
-        // Validate maximum amount
-        if (maxAmount != null && maxAmount.compareTo(BigDecimal.ZERO) < 0) {
-            logger.warn("Negative maximum amount: {}", maxAmount);
-            throw new IllegalArgumentException("Maximum amount cannot be negative");
-        }
-        
-        // Validate range consistency
-        if (minAmount != null && maxAmount != null && minAmount.compareTo(maxAmount) > 0) {
-            logger.warn("Minimum amount greater than maximum amount: {} > {}", minAmount, maxAmount);
-            throw new IllegalArgumentException("Minimum amount cannot be greater than maximum amount");
-        }
-        
-        // Validate currency code format
-        if (currency != null && currency.length() != 3) {
-            logger.warn("Invalid currency code length: {}", currency);
-            throw new IllegalArgumentException("Currency code must be 3 characters (ISO 4217 format)");
-        }
-        
-        // Validate exchange rate if conversion is required
-        if (requiresConversion && (exchangeRate == null || exchangeRate.compareTo(BigDecimal.ZERO) <= 0)) {
-            logger.warn("Invalid exchange rate: {}", exchangeRate);
-            throw new IllegalArgumentException("Exchange rate must be positive");
-        }
-    }
-    
-    /**
-     * Applies this amount range filter to a query builder.
-     * 
-     * @param queryBuilder The query builder to apply the filter to
-     * @param columnName The database column name for the amount
-     * @param currencyColumnName The database column name for the currency (optional)
-     * @return The updated query builder
-     */
-    public PaymentQueryBuilder applyTo(PaymentQueryBuilder queryBuilder, 
-                                      String columnName, 
-                                      String currencyColumnName) {
-        // Apply amount range conditions
-        if (minAmount != null && maxAmount != null) {
-            queryBuilder.and(columnName + " BETWEEN ? AND ?")
-                       .addParameter(minAmount)
-                       .addParameter(maxAmount);
-        } else if (minAmount != null) {
-            queryBuilder.and(columnName + " >= ?")
-                       .addParameter(minAmount);
-        } else if (maxAmount != null) {
-            queryBuilder.and(columnName + " <= ?")
-                       .addParameter(maxAmount);
-        }
-        
-        // Apply currency condition if specified
-        if (currency != null && currencyColumnName != null) {
-            queryBuilder.and(currencyColumnName + " = ?")
-                       .addParameter(currency);
-        }
-        
-        return queryBuilder;
-    }
-    
-    /**
-     * Generates SQL conditions for this amount range filter.
-     * 
-     * @param columnName The database column name for the amount
-     * @param currencyColumnName The database column name for the currency (optional)
-     * @return A list of SQL conditions, or an empty list if no filter is applied
-     */
-    public List<String> toSqlConditions(String columnName, String currencyColumnName) {
-        List<String> conditions = new ArrayList<>();
-        
-        // Add amount range conditions
-        if (minAmount != null && maxAmount != null) {
-            conditions.add(columnName + " BETWEEN ? AND ?");
-        } else if (minAmount != null) {
-            conditions.add(columnName + " >= ?");
-        } else if (maxAmount != null) {
-            conditions.add(columnName + " <= ?");
-        }
-        
-        // Add currency condition if specified
-        if (currency != null && currencyColumnName != null) {
-            conditions.add(currencyColumnName + " = ?");
-        }
-        
-        return conditions;
-    }
-    
-    /**
-     * Gets the parameters for the SQL conditions.
-     * 
-     * @return A list of parameters, or an empty list if no filter is applied
-     */
-    public List<Object> getSqlParameters() {
-        List<Object> parameters = new ArrayList<>();
-        
-        // Add amount range parameters
-        if (minAmount != null && maxAmount != null) {
-            parameters.add(minAmount);
-            parameters.add(maxAmount);
-        } else if (minAmount != null) {
-            parameters.add(minAmount);
-        } else if (maxAmount != null) {
-            parameters.add(maxAmount);
-        }
-        
-        // Add currency parameter if specified
-        if (currency != null) {
-            parameters.add(currency);
-        }
-        
-        return parameters;
-    }
-    
-    /**
-     * Binds the parameters to a prepared statement.
-     * 
-     * @param statement The prepared statement
-     * @param startIndex The starting parameter index (1-based)
-     * @return The next parameter index
-     * @throws SQLException If a database access error occurs
-     */
-    public int bindParameters(PreparedStatement statement, int startIndex) throws SQLException {
-        int paramIndex = startIndex;
-        
-        // Bind amount range parameters
-        if (minAmount != null && maxAmount != null) {
-            statement.setBigDecimal(paramIndex++, minAmount);
-            statement.setBigDecimal(paramIndex++, maxAmount);
-        } else if (minAmount != null) {
-            statement.setBigDecimal(paramIndex++, minAmount);
-        } else if (maxAmount != null) {
-            statement.setBigDecimal(paramIndex++, maxAmount);
-        }
-        
-        // Bind currency parameter if specified
-        if (currency != null) {
-            statement.setString(paramIndex++, currency);
-        }
-        
-        return paramIndex;
-    }
-    
-    /**
-     * Converts an amount from the source currency to the target currency.
-     * 
-     * @param amount The amount to convert
-     * @return The converted amount
-     */
-    public BigDecimal convertAmount(BigDecimal amount) {
-        if (amount == null || !requiresConversion || exchangeRate == null) {
-            return amount;
-        }
-        
-        return normalizeAmount(amount.multiply(exchangeRate));
+        // Scale the amount to the standard decimal scale
+        return amount.setScale(DECIMAL_SCALE, RoundingMode.HALF_UP);
     }
     
     /**
@@ -309,10 +134,15 @@ public class AmountRangeFilter {
      * Sets the minimum amount of the range.
      * 
      * @param minAmount The minimum amount to set
-     * @return This filter for method chaining
+     * @return This object for method chaining
      */
     public AmountRangeFilter setMinAmount(BigDecimal minAmount) {
-        this.minAmount = normalizeAmount(minAmount);
+        if (minAmount != null) {
+            // Ensure proper scale for the amount
+            this.minAmount = minAmount.setScale(DECIMAL_SCALE, RoundingMode.HALF_UP);
+        } else {
+            this.minAmount = null;
+        }
         return this;
     }
     
@@ -329,15 +159,20 @@ public class AmountRangeFilter {
      * Sets the maximum amount of the range.
      * 
      * @param maxAmount The maximum amount to set
-     * @return This filter for method chaining
+     * @return This object for method chaining
      */
     public AmountRangeFilter setMaxAmount(BigDecimal maxAmount) {
-        this.maxAmount = normalizeAmount(maxAmount);
+        if (maxAmount != null) {
+            // Ensure proper scale for the amount
+            this.maxAmount = maxAmount.setScale(DECIMAL_SCALE, RoundingMode.HALF_UP);
+        } else {
+            this.maxAmount = null;
+        }
         return this;
     }
     
     /**
-     * Gets the currency code.
+     * Gets the currency code for the amounts.
      * 
      * @return The currency code, or null if not set
      */
@@ -346,137 +181,241 @@ public class AmountRangeFilter {
     }
     
     /**
-     * Sets the currency code.
+     * Sets the currency code for the amounts.
      * 
-     * @param currency The currency code to set
-     * @return This filter for method chaining
+     * @param currency The currency code to set (ISO 4217)
+     * @return This object for method chaining
      */
     public AmountRangeFilter setCurrency(String currency) {
-        this.currency = currency != null ? currency.toUpperCase() : null;
+        if (currency != null) {
+            // Normalize to uppercase and validate length
+            String normalizedCurrency = currency.trim().toUpperCase();
+            if (normalizedCurrency.length() > 3) {
+                throw new IllegalArgumentException("Currency code must be 3 characters or less: " + currency);
+            }
+            this.currency = normalizedCurrency;
+        } else {
+            this.currency = null;
+        }
         return this;
     }
     
     /**
-     * Checks if this filter requires currency conversion.
+     * Checks if this filter has any constraints.
      * 
-     * @return true if currency conversion is required, false otherwise
-     */
-    public boolean requiresConversion() {
-        return requiresConversion;
-    }
-    
-    /**
-     * Sets whether this filter requires currency conversion.
-     * 
-     * @param requiresConversion true if currency conversion is required, false otherwise
-     * @return This filter for method chaining
-     */
-    public AmountRangeFilter setRequiresConversion(boolean requiresConversion) {
-        this.requiresConversion = requiresConversion;
-        return this;
-    }
-    
-    /**
-     * Gets the exchange rate for currency conversion.
-     * 
-     * @return The exchange rate
-     */
-    public BigDecimal getExchangeRate() {
-        return exchangeRate;
-    }
-    
-    /**
-     * Sets the exchange rate for currency conversion.
-     * 
-     * @param exchangeRate The exchange rate to set
-     * @return This filter for method chaining
-     */
-    public AmountRangeFilter setExchangeRate(BigDecimal exchangeRate) {
-        this.exchangeRate = exchangeRate != null ? exchangeRate : BigDecimal.ONE;
-        return this;
-    }
-    
-    /**
-     * Checks if this amount range filter has any constraints.
-     * 
-     * @return true if either min amount, max amount, or currency is set, false otherwise
+     * @return true if either min or max amount is set, false otherwise
      */
     public boolean hasConstraints() {
-        return minAmount != null || maxAmount != null || currency != null;
+        return minAmount != null || maxAmount != null;
     }
     
     /**
-     * Gets the range width (difference between max and min amounts).
+     * Validates the amount range for consistency and correctness.
      * 
-     * @return The range width, or null if the range is open-ended
+     * @throws IllegalArgumentException If the amount range is invalid
      */
-    public BigDecimal getRangeWidth() {
-        if (minAmount != null && maxAmount != null) {
-            return maxAmount.subtract(minAmount);
-        }
-        return null;
-    }
-    
-    /**
-     * Returns a string representation of this amount range filter.
-     * 
-     * @return A string representation
-     */
-    @Override
-    public String toString() {
-        StringBuilder sb = new StringBuilder("AmountRangeFilter[");
+    public void validate() {
+        // Check if min amount is within allowed range
         if (minAmount != null) {
-            sb.append("min=").append(minAmount);
-        }
-        if (minAmount != null && maxAmount != null) {
-            sb.append(", ");
-        }
-        if (maxAmount != null) {
-            sb.append("max=").append(maxAmount);
-        }
-        if ((minAmount != null || maxAmount != null) && currency != null) {
-            sb.append(", ");
-        }
-        if (currency != null) {
-            sb.append("currency=").append(currency);
-        }
-        if (requiresConversion) {
-            sb.append(", exchangeRate=").append(exchangeRate);
-        }
-        sb.append("]");
-        return sb.toString();
-    }
-    
-    /**
-     * Checks if this filter is equal to another object.
-     * 
-     * @param obj The object to compare with
-     * @return true if the objects are equal, false otherwise
-     */
-    @Override
-    public boolean equals(Object obj) {
-        if (this == obj) {
-            return true;
-        }
-        if (obj == null || getClass() != obj.getClass()) {
-            return false;
+            if (minAmount.compareTo(MIN_ALLOWED_AMOUNT) < 0) {
+                throw new IllegalArgumentException("Minimum amount is below the allowed minimum: " + minAmount);
+            }
+            if (minAmount.compareTo(MAX_ALLOWED_AMOUNT) > 0) {
+                throw new IllegalArgumentException("Minimum amount is above the allowed maximum: " + minAmount);
+            }
         }
         
-        AmountRangeFilter other = (AmountRangeFilter) obj;
-        return Objects.equals(minAmount, other.minAmount) &&
-               Objects.equals(maxAmount, other.maxAmount) &&
-               Objects.equals(currency, other.currency) &&
-               requiresConversion == other.requiresConversion &&
-               Objects.equals(exchangeRate, other.exchangeRate);
+        // Check if max amount is within allowed range
+        if (maxAmount != null) {
+            if (maxAmount.compareTo(MIN_ALLOWED_AMOUNT) < 0) {
+                throw new IllegalArgumentException("Maximum amount is below the allowed minimum: " + maxAmount);
+            }
+            if (maxAmount.compareTo(MAX_ALLOWED_AMOUNT) > 0) {
+                throw new IllegalArgumentException("Maximum amount is above the allowed maximum: " + maxAmount);
+            }
+        }
+        
+        // Check if min amount is less than or equal to max amount
+        if (minAmount != null && maxAmount != null && minAmount.compareTo(maxAmount) > 0) {
+            throw new IllegalArgumentException("Minimum amount must be less than or equal to maximum amount");
+        }
     }
     
     /**
-     * Generates a hash code for this filter.
+     * Generates a SQL condition for this amount range filter.
      * 
-     * @return The hash code
+     * @param columnName The database column name to filter on
+     * @return A SQL condition string, or null if no constraints
      */
+    public String toSqlCondition(String columnName) {
+        if (!hasConstraints()) {
+            return null;
+        }
+        
+        StringBuilder condition = new StringBuilder();
+        
+        if (minAmount != null && maxAmount != null) {
+            // Both min and max amounts are specified
+            condition.append(columnName)
+                    .append(" BETWEEN ")
+                    .append(minAmount.toString())
+                    .append(" AND ")
+                    .append(maxAmount.toString());
+        } else if (minAmount != null) {
+            // Only min amount is specified
+            condition.append(columnName)
+                    .append(" >= ")
+                    .append(minAmount.toString());
+        } else if (maxAmount != null) {
+            // Only max amount is specified
+            condition.append(columnName)
+                    .append(" <= ")
+                    .append(maxAmount.toString());
+        }
+        
+        // Add currency condition if specified
+        if (currency != null) {
+            condition.append(" AND currency = '")
+                    .append(currency)
+                    .append("'");
+        }
+        
+        return condition.toString();
+    }
+    
+    /**
+     * Generates a parameterized SQL condition for this amount range filter.
+     * 
+     * @param columnName The database column name to filter on
+     * @return A SQL condition string with ? placeholders, or null if no constraints
+     */
+    public String toParameterizedSqlCondition(String columnName) {
+        if (!hasConstraints()) {
+            return null;
+        }
+        
+        StringBuilder condition = new StringBuilder();
+        
+        if (minAmount != null && maxAmount != null) {
+            // Both min and max amounts are specified
+            condition.append(columnName)
+                    .append(" BETWEEN ? AND ?");
+        } else if (minAmount != null) {
+            // Only min amount is specified
+            condition.append(columnName)
+                    .append(" >= ?");
+        } else if (maxAmount != null) {
+            // Only max amount is specified
+            condition.append(columnName)
+                    .append(" <= ?");
+        }
+        
+        // Add currency condition if specified
+        if (currency != null) {
+            condition.append(" AND currency = ?");
+        }
+        
+        return condition.toString();
+    }
+    
+    /**
+     * Adds this amount range filter's parameters to a prepared statement.
+     * 
+     * @param statement The prepared statement
+     * @param startIndex The parameter index to start with
+     * @return The next parameter index
+     * @throws SQLException If a database access error occurs
+     */
+    public int addParametersToStatement(PreparedStatement statement, int startIndex) 
+            throws SQLException {
+        int index = startIndex;
+        
+        if (minAmount != null && maxAmount != null) {
+            // Both min and max amounts are specified
+            statement.setBigDecimal(index++, minAmount);
+            statement.setBigDecimal(index++, maxAmount);
+        } else if (minAmount != null) {
+            // Only min amount is specified
+            statement.setBigDecimal(index++, minAmount);
+        } else if (maxAmount != null) {
+            // Only max amount is specified
+            statement.setBigDecimal(index++, maxAmount);
+        }
+        
+        // Add currency parameter if specified
+        if (currency != null) {
+            statement.setString(index++, currency);
+        }
+        
+        return index;
+    }
+    
+    /**
+     * Applies currency conversion to the amounts in this filter.
+     * 
+     * @param targetCurrency The target currency to convert to
+     * @param exchangeRate The exchange rate to apply
+     * @return A new amount range filter with converted amounts
+     */
+    public AmountRangeFilter convertCurrency(String targetCurrency, BigDecimal exchangeRate) {
+        if (targetCurrency == null || targetCurrency.isEmpty()) {
+            throw new IllegalArgumentException("Target currency cannot be null or empty");
+        }
+        
+        if (exchangeRate == null || exchangeRate.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("Exchange rate must be positive");
+        }
+        
+        AmountRangeFilter converted = new AmountRangeFilter();
+        converted.setCurrency(targetCurrency);
+        
+        if (minAmount != null) {
+            converted.setMinAmount(minAmount.multiply(exchangeRate).setScale(DECIMAL_SCALE, RoundingMode.HALF_UP));
+        }
+        
+        if (maxAmount != null) {
+            converted.setMaxAmount(maxAmount.multiply(exchangeRate).setScale(DECIMAL_SCALE, RoundingMode.HALF_UP));
+        }
+        
+        return converted;
+    }
+    
+    /**
+     * Creates a copy of this amount range filter.
+     * 
+     * @return A new amount range filter with the same values
+     */
+    public AmountRangeFilter copy() {
+        AmountRangeFilter copy = new AmountRangeFilter();
+        copy.minAmount = this.minAmount;
+        copy.maxAmount = this.maxAmount;
+        copy.currency = this.currency;
+        return copy;
+    }
+    
     @Override
-    public int hashCode() {
-        return Objects.hash(minAmount, maxAmount, currency, requiresConversion, exchangeRate);
+    public String toString() {
+        StringBuilder sb = new StringBuilder("AmountRangeFilter{");
+        
+        if (minAmount != null) {
+            sb.append("minAmount=").append(minAmount);
+        }
+        
+        if (maxAmount != null) {
+            if (minAmount != null) {
+                sb.append(", ");
+            }
+            sb.append("maxAmount=").append(maxAmount);
+        }
+        
+        if (currency != null) {
+            if (minAmount != null || maxAmount != null) {
+                sb.append(", ");
+            }
+            sb.append("currency=").append(currency);
+        }
+        
+        sb.append('}');
+        return sb.toString();
     }
 }

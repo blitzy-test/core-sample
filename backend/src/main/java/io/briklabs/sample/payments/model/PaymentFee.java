@@ -13,40 +13,86 @@ import java.util.UUID;
 public class PaymentFee {
 
     /**
+     * Enum representing the standardized fee types for payment transactions.
+     * These categories allow for consistent classification and reporting of fees.
+     */
+    public enum FeeType {
+        /**
+         * Processing fee charged by the payment processor.
+         */
+        PROCESSING,
+        
+        /**
+         * Fee for currency conversion when transaction currency differs from settlement currency.
+         */
+        CURRENCY_CONVERSION,
+        
+        /**
+         * Fee charged for international transactions.
+         */
+        INTERNATIONAL,
+        
+        /**
+         * Fee charged for specific payment methods (e.g., premium cards).
+         */
+        PAYMENT_METHOD,
+        
+        /**
+         * Service fee charged by the platform.
+         */
+        SERVICE,
+        
+        /**
+         * Fee for additional services or features.
+         */
+        ADDITIONAL_SERVICE,
+        
+        /**
+         * Tax applied to the transaction or other fees.
+         */
+        TAX,
+        
+        /**
+         * Miscellaneous fees that don't fit other categories.
+         */
+        OTHER
+    }
+
+    /**
      * Unique identifier for the fee.
      */
     private UUID feeId;
-
+    
     /**
      * Identifier of the transaction this fee is associated with.
      */
     private UUID transactionId;
-
+    
     /**
-     * Classification of the fee (e.g., PROCESSING, INTERCHANGE, SERVICE).
+     * Type of fee for classification and reporting.
      */
-    private String feeType;
-
+    private FeeType feeType;
+    
     /**
-     * Fee amount with precision of 4 decimal places.
+     * Amount of the fee.
      */
     private BigDecimal amount;
-
+    
     /**
      * ISO 4217 currency code (3 characters).
      */
     private String currency;
-
+    
     /**
      * Human-readable description of the fee.
      */
     private String description;
-
+    
     /**
      * External reference identifier for the fee.
      */
     private String feeReference;
-
+    
     /**
      * Timestamp when the fee was created.
      */
@@ -60,44 +106,98 @@ public class PaymentFee {
     }
 
     /**
-     * Creates a new fee with required fields.
+     * Creates a new payment fee with required fields.
      *
-     * @param transactionId The associated transaction identifier
-     * @param feeType The fee classification
+     * @param transactionId The transaction identifier
+     * @param feeType The type of fee
      * @param amount The fee amount
-     * @param currency The currency code (ISO 4217)
+     * @param currency The ISO 4217 currency code
      */
-    public PaymentFee(UUID transactionId, String feeType, BigDecimal amount, String currency) {
+    public PaymentFee(UUID transactionId, FeeType feeType, BigDecimal amount, String currency) {
         this.feeId = UUID.randomUUID();
         this.transactionId = transactionId;
         this.feeType = feeType;
         this.amount = amount;
-        this.currency = currency;
+        this.currency = validateCurrency(currency);
         this.createdAt = Instant.now();
     }
 
     /**
-     * Creates a new fee with all fields.
+     * Creates a new payment fee with all fields.
      *
      * @param feeId The fee identifier
-     * @param transactionId The associated transaction identifier
-     * @param feeType The fee classification
+     * @param transactionId The transaction identifier
+     * @param feeType The type of fee
      * @param amount The fee amount
-     * @param currency The currency code (ISO 4217)
+     * @param currency The ISO 4217 currency code
      * @param description The fee description
      * @param feeReference The external fee reference
      * @param createdAt The creation timestamp
      */
-    public PaymentFee(UUID feeId, UUID transactionId, String feeType, BigDecimal amount,
+    public PaymentFee(UUID feeId, UUID transactionId, FeeType feeType, BigDecimal amount,
                      String currency, String description, String feeReference, Instant createdAt) {
         this.feeId = feeId;
         this.transactionId = transactionId;
         this.feeType = feeType;
         this.amount = amount;
-        this.currency = currency;
+        this.currency = validateCurrency(currency);
         this.description = description;
         this.feeReference = feeReference;
         this.createdAt = createdAt;
+    }
+
+    /**
+     * Validates that the currency code is a valid 3-character ISO 4217 code.
+     *
+     * @param currency The currency code to validate
+     * @return The validated currency code
+     * @throws IllegalArgumentException if the currency code is invalid
+     */
+    private String validateCurrency(String currency) {
+        if (currency == null || currency.length() != 3) {
+            throw new IllegalArgumentException("Currency must be a valid 3-character ISO 4217 code");
+        }
+        return currency.toUpperCase();
+    }
+
+    /**
+     * Creates a processing fee for a transaction.
+     *
+     * @param transaction The transaction to associate the fee with
+     * @param amount The fee amount
+     * @param description The fee description
+     * @return A new PaymentFee representing the processing fee
+     */
+    public static PaymentFee createProcessingFee(PaymentTransaction transaction, BigDecimal amount, String description) {
+        PaymentFee fee = new PaymentFee();
+        fee.setFeeId(UUID.randomUUID());
+        fee.setTransactionId(transaction.getTransactionId());
+        fee.setFeeType(FeeType.PROCESSING);
+        fee.setAmount(amount);
+        fee.setCurrency(transaction.getCurrency());
+        fee.setDescription(description);
+        fee.setCreatedAt(Instant.now());
+        return fee;
+    }
+
+    /**
+     * Creates a service fee for a transaction.
+     *
+     * @param transaction The transaction to associate the fee with
+     * @param amount The fee amount
+     * @param description The fee description
+     * @return A new PaymentFee representing the service fee
+     */
+    public static PaymentFee createServiceFee(PaymentTransaction transaction, BigDecimal amount, String description) {
+        PaymentFee fee = new PaymentFee();
+        fee.setFeeId(UUID.randomUUID());
+        fee.setTransactionId(transaction.getTransactionId());
+        fee.setFeeType(FeeType.SERVICE);
+        fee.setAmount(amount);
+        fee.setCurrency(transaction.getCurrency());
+        fee.setDescription(description);
+        fee.setCreatedAt(Instant.now());
+        return fee;
     }
 
     /**
@@ -110,34 +210,24 @@ public class PaymentFee {
             throw new IllegalArgumentException("Transaction ID is required");
         }
         
-        if (feeType == null || feeType.isEmpty()) {
+        if (feeType == null) {
             throw new IllegalArgumentException("Fee type is required");
         }
         
-        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new IllegalArgumentException("Amount must be greater than zero");
+        if (amount == null) {
+            throw new IllegalArgumentException("Amount is required");
+        }
+        
+        if (amount.compareTo(BigDecimal.ZERO) < 0) {
+            throw new IllegalArgumentException("Amount must be non-negative");
         }
         
         if (currency == null || currency.length() != 3) {
             throw new IllegalArgumentException("Currency must be a valid 3-character ISO 4217 code");
         }
-    }
-
-    /**
-     * Common fee types used in the system.
-     */
-    public static final class FeeTypes {
-        public static final String PROCESSING = "PROCESSING";
-        public static final String INTERCHANGE = "INTERCHANGE";
-        public static final String SERVICE = "SERVICE";
-        public static final String GATEWAY = "GATEWAY";
-        public static final String ASSESSMENT = "ASSESSMENT";
-        public static final String FOREIGN_EXCHANGE = "FOREIGN_EXCHANGE";
-        public static final String CHARGEBACK = "CHARGEBACK";
-        public static final String OTHER = "OTHER";
         
-        private FeeTypes() {
-            // Private constructor to prevent instantiation
+        if (createdAt == null) {
+            throw new IllegalArgumentException("Created at timestamp is required");
         }
     }
 
@@ -159,11 +249,11 @@ public class PaymentFee {
         this.transactionId = transactionId;
     }
 
-    public String getFeeType() {
+    public FeeType getFeeType() {
         return feeType;
     }
 
-    public void setFeeType(String feeType) {
+    public void setFeeType(FeeType feeType) {
         this.feeType = feeType;
     }
 
@@ -180,7 +270,7 @@ public class PaymentFee {
     }
 
     public void setCurrency(String currency) {
-        this.currency = currency;
+        this.currency = validateCurrency(currency);
     }
 
     public String getDescription() {
@@ -225,9 +315,10 @@ public class PaymentFee {
         return "PaymentFee{" +
                 "feeId=" + feeId +
                 ", transactionId=" + transactionId +
-                ", feeType='" + feeType + '\'' +
+                ", feeType=" + feeType +
                 ", amount=" + amount +
                 ", currency='" + currency + '\'' +
+                ", description='" + description + '\'' +
                 ", feeReference='" + feeReference + '\'' +
                 ", createdAt=" + createdAt +
                 '}';

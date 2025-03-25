@@ -1,29 +1,61 @@
 brik:
-  database:
-    sample:
-      url: jdbc:postgresql://localhost:5432/sample?currentSchema=sample
-      user: briklabs
-      password: briklabs
-      schema: sample,payment
-      version: 17.4
-      hikaricp:
-        configurationFile: ${HIKARI_CONFIG:hikari-config.properties}
-  
-  payment:
-    enabled: true
-    configFile: ${PAYMENT_CONFIG:payment-config.yaml}
-    accessRights:
-      enabled: true
-      integration:
-        endpoint: /api/access-rights
-        timeout: 5000
-        retryAttempts: 3
-  
-  logging:
-    root:
-      level: ${log.root.level:-INFO}
-    briklabs:
-      level: ${log.briklabs.level:-INFO}
-    payment:
-      level: ${log.payment.level:-INFO}
-      configFile: payment-logging.xml
+   database:
+      sample:
+         url: jdbc:postgresql://localhost:5432/sample
+         user: briklabs
+         password: briklabs
+         schema: sample
+      payment:
+         url: jdbc:postgresql://localhost:5432/sample
+         user: briklabs
+         password: briklabs
+         schema: payment
+   connection_pool:
+      maximumPoolSize: 30
+      minimumIdle: 10
+      connectionTimeout: 30000
+      idleTimeout: 600000
+      maxLifetime: 1200000
+      leakDetectionThreshold: 60000
+      autoCommit: false
+      poolName: HikariPool
+      registerMbeans: true
+      payment:
+         maximumPoolSize: 30
+         minimumIdle: 10
+         connectionTimeout: 20000
+         idleTimeout: 300000
+         maxLifetime: 1200000
+         leakDetectionThreshold: 60000
+         autoCommit: false
+         poolName: PaymentHikariPool
+         registerMbeans: true
+   payment:
+      api:
+         basePath: /organizations/{org_id}/accounts/{account_id}/transactions
+         defaultPageSize: 20
+         maxPageSize: 100
+         enableFacetedSearch: true
+         supportPartialCapture: true
+         supportPartialRefund: true
+      processing:
+         asyncCaptureEnabled: true
+         asyncRefundEnabled: true
+         retryAttempts: 3
+         retryDelayMs: 1000
+         maxProcessingTimeMs: 30000
+      security:
+         requireTls: true
+         maskSensitiveData: true
+         accessControlEnabled: true
+   logging:
+      level:
+         root: INFO
+         io.briklabs.sample: INFO
+         io.briklabs.sample.payments: INFO
+         com.zaxxer.hikari: INFO
+      payment:
+         transactionAudit: true
+         queryPerformance: true
+         connectionPoolMetrics: true
+         sensitiveDataMasking: true

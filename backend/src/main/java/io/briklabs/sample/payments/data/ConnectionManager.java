@@ -2,645 +2,478 @@ package io.briklabs.sample.payments.data;
 
 import com.zaxxer.hikari.HikariDataSource;
 import io.briklabs.sample.config.ConfigSource;
+import io.briklabs.sample.config.DatabaseConfig;
+import io.briklabs.sample.config.PaymentDatabaseConfig;
+import io.briklabs.sample.payments.data.exception.ConnectionException;
+import io.briklabs.sample.payments.data.exception.TransactionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages database connections for payment transaction processing, providing centralized
  * access to the HikariCP connection pool. This class handles connection acquisition, release,
  * and transaction management with proper error handling and resource cleanup.
+ * <p>
+ * Key responsibilities include:
+ * <ul>
+ *   <li>Connection acquisition from HikariCP with proper timeout handling</li>
+ *   <li>Transaction management support with explicit commit/rollback</li>
+ *   <li>Connection release patterns with proper resource cleanup</li>
+ *   <li>Connection state validation and health checking</li>
+ *   <li>Monitoring hooks for connection usage metrics</li>
+ * </ul>
+ * </p>
  */
 public class ConnectionManager {
     private static final Logger logger = LoggerFactory.getLogger(ConnectionManager.class);
     
-    // Connection acquisition timeout in milliseconds
-    private static final long DEFAULT_ACQUISITION_TIMEOUT_MS = 10000; // 10 seconds
+    /**
+     * Thread-local storage for the current database connection.
+     * This allows transaction management across multiple operations.
+     */
+    private static final ThreadLocal<Connection> currentConnection = new ThreadLocal<>();
     
-    // Thread-local storage for transaction connections to ensure consistent connection usage within a thread
-    private static final ThreadLocal<Connection> transactionConnections = new ThreadLocal<>();
+    /**
+     * Thread-local flag indicating if the current connection is in a transaction.
+     */
+    private static final ThreadLocal<Boolean> inTransaction = ThreadLocal.withInitial(() -> false);
     
-    // Connection pool configuration and data source
-    private final HikariCPConfig hikariCPConfig;
+    /**
+     * Thread-local storage for transaction isolation level.
+     */
+    private static final ThreadLocal<Integer> transactionIsolationLevel = new ThreadLocal<>();
+    
+    /**
+     * Metrics for connection usage monitoring.
+     */
+    private static final AtomicLong connectionsAcquired = new AtomicLong(0);
+    private static final AtomicLong connectionsReleased = new AtomicLong(0);
+    private static final AtomicLong transactionsStarted = new AtomicLong(0);
+    private static final AtomicLong transactionsCommitted = new AtomicLong(0);
+    private static final AtomicLong transactionsRolledBack = new AtomicLong(0);
+    private static final ConcurrentHashMap<String, AtomicLong> operationCounts = new ConcurrentHashMap<>();
+    
+    /**
+     * The HikariCP data source for connection pooling.
+     */
     private final HikariDataSource dataSource;
     
-    // Metrics for monitoring connection usage
-    private final AtomicInteger activeConnections = new AtomicInteger(0);
-    private final AtomicInteger totalConnectionsAcquired = new AtomicInteger(0);
-    private final AtomicLong totalConnectionWaitTimeMs = new AtomicLong(0);
-    private final AtomicLong totalTransactionTimeMs = new AtomicLong(0);
-    private final AtomicInteger totalTransactions = new AtomicInteger(0);
-    private final AtomicInteger failedTransactions = new AtomicInteger(0);
-    
-    // Track connection usage by operation type for monitoring
-    private final Map<String, AtomicInteger> connectionsByOperation = new ConcurrentHashMap<>();
-    
-    // Singleton instance
-    private static ConnectionManager instance;
-    
     /**
-     * Gets the singleton instance of ConnectionManager.
-     * 
-     * @param configSource The configuration source
-     * @return The ConnectionManager instance
+     * Creates a new ConnectionManager with the specified database configuration.
+     *
+     * @param databaseConfig the database configuration
+     * @param configSource the configuration source
      */
-    public static synchronized ConnectionManager getInstance(ConfigSource configSource) {
-        if (instance == null) {
-            instance = new ConnectionManager(configSource);
-        }
-        return instance;
+    public ConnectionManager(DatabaseConfig databaseConfig, ConfigSource configSource) {
+        logger.info("Initializing ConnectionManager for payment database");
+        this.dataSource = HikariCPConfig.getDataSource(databaseConfig, configSource);
+        logger.info("ConnectionManager initialized successfully");
     }
     
     /**
-     * Private constructor to enforce singleton pattern.
-     * 
-     * @param configSource The configuration source
+     * Creates a new ConnectionManager with a payment-specific database configuration.
+     *
+     * @param paymentDbConfig the payment database configuration
+     * @param configSource the configuration source
      */
-    private ConnectionManager(ConfigSource configSource) {
-        logger.info("Initializing Payment ConnectionManager");
-        this.hikariCPConfig = new HikariCPConfig(configSource);
-        this.dataSource = hikariCPConfig.getDataSource();
-        
-        // Register shutdown hook to ensure proper resource cleanup
-        Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown));
-        
-        logger.info("Payment ConnectionManager initialized with pool size: {}", hikariCPConfig.getMaximumPoolSize());
+    public ConnectionManager(PaymentDatabaseConfig paymentDbConfig, ConfigSource configSource) {
+        logger.info("Initializing ConnectionManager with payment-specific database configuration");
+        this.dataSource = HikariCPConfig.getDataSource(paymentDbConfig, configSource);
+        logger.info("ConnectionManager initialized successfully");
     }
     
     /**
-     * Gets a database connection from the pool.
-     * Uses the default acquisition timeout.
-     * 
-     * @return A database connection
-     * @throws SQLException if a connection cannot be acquired
+     * Gets a database connection from the connection pool.
+     * If a transaction is active, returns the current connection.
+     *
+     * @return a database connection
+     * @throws ConnectionException if a connection cannot be obtained
      */
-    public Connection getConnection() throws SQLException {
-        return getConnection(DEFAULT_ACQUISITION_TIMEOUT_MS, null);
-    }
-    
-    /**
-     * Gets a database connection from the pool with operation tracking.
-     * Uses the default acquisition timeout.
-     * 
-     * @param operationType The type of operation requiring the connection (for monitoring)
-     * @return A database connection
-     * @throws SQLException if a connection cannot be acquired
-     */
-    public Connection getConnection(String operationType) throws SQLException {
-        return getConnection(DEFAULT_ACQUISITION_TIMEOUT_MS, operationType);
-    }
-    
-    /**
-     * Gets a database connection from the pool with a custom timeout.
-     * 
-     * @param timeoutMs The maximum time to wait for a connection in milliseconds
-     * @param operationType The type of operation requiring the connection (for monitoring)
-     * @return A database connection
-     * @throws SQLException if a connection cannot be acquired within the timeout
-     */
-    public Connection getConnection(long timeoutMs, String operationType) throws SQLException {
-        // Check if we're in a transaction context and return the existing connection if so
-        Connection existingConnection = transactionConnections.get();
-        if (existingConnection != null && !existingConnection.isClosed()) {
-            logger.debug("Reusing existing transaction connection");
-            return existingConnection;
+    public Connection getConnection() throws ConnectionException {
+        // Check if we're in a transaction and have an active connection
+        Connection conn = currentConnection.get();
+        if (conn != null) {
+            try {
+                if (!conn.isClosed()) {
+                    // Track operation for metrics
+                    incrementOperationCount("getConnection.reuse");
+                    return conn;
+                }
+            } catch (SQLException e) {
+                logger.warn("Error checking connection state: {}", e.getMessage());
+                // Connection is invalid, clear it and get a new one
+                currentConnection.remove();
+                inTransaction.set(false);
+                transactionIsolationLevel.remove();
+            }
         }
         
-        // Track connection acquisition metrics
-        long startTime = System.currentTimeMillis();
-        Connection connection = null;
+        // Get a new connection from the pool
+        try {
+            long startTime = System.currentTimeMillis();
+            conn = dataSource.getConnection();
+            long elapsedTime = System.currentTimeMillis() - startTime;
+            
+            // Track metrics
+            connectionsAcquired.incrementAndGet();
+            incrementOperationCount("getConnection.new");
+            
+            // Log acquisition time if it took longer than expected
+            if (elapsedTime > 100) {
+                logger.warn("Connection acquisition took {} ms", elapsedTime);
+            }
+            
+            // If not in a transaction, set auto-commit to true
+            if (!Boolean.TRUE.equals(inTransaction.get())) {
+                conn.setAutoCommit(true);
+            }
+            
+            return conn;
+        } catch (SQLException e) {
+            incrementOperationCount("getConnection.error");
+            throw ConnectionException.fromSQLException(e);
+        } catch (Exception e) {
+            incrementOperationCount("getConnection.error");
+            throw new ConnectionException("Failed to acquire database connection: " + e.getMessage(), 
+                    ConnectionException.CONN_ACQUISITION_FAILED, e);
+        }
+    }
+    
+    /**
+     * Begins a database transaction with the default isolation level.
+     *
+     * @throws ConnectionException if a connection cannot be established
+     * @throws TransactionException if the transaction cannot be started
+     */
+    public void beginTransaction() throws ConnectionException, TransactionException {
+        beginTransaction(Connection.TRANSACTION_READ_COMMITTED);
+    }
+    
+    /**
+     * Begins a database transaction with the specified isolation level.
+     *
+     * @param isolationLevel the transaction isolation level
+     * @throws ConnectionException if a connection cannot be established
+     * @throws TransactionException if the transaction cannot be started
+     */
+    public void beginTransaction(int isolationLevel) throws ConnectionException, TransactionException {
+        // Check if we're already in a transaction
+        if (Boolean.TRUE.equals(inTransaction.get())) {
+            incrementOperationCount("beginTransaction.alreadyStarted");
+            throw TransactionException.beginFailed(
+                    "Transaction already started", null, "beginTransaction");
+        }
+        
+        Connection conn = null;
+        try {
+            conn = getConnection();
+            
+            // Set isolation level
+            int originalIsolation = conn.getTransactionIsolation();
+            if (originalIsolation != isolationLevel) {
+                conn.setTransactionIsolation(isolationLevel);
+            }
+            
+            // Disable auto-commit
+            conn.setAutoCommit(false);
+            
+            // Store the connection and transaction state
+            currentConnection.set(conn);
+            inTransaction.set(true);
+            transactionIsolationLevel.set(isolationLevel);
+            
+            // Track metrics
+            transactionsStarted.incrementAndGet();
+            incrementOperationCount("beginTransaction");
+            
+            logger.debug("Transaction started with isolation level: {}", getIsolationLevelName(isolationLevel));
+        } catch (SQLException e) {
+            incrementOperationCount("beginTransaction.error");
+            closeQuietly(conn);
+            throw TransactionException.beginFailed(
+                    "Failed to start transaction: " + e.getMessage(), e, "beginTransaction");
+        } catch (ConnectionException e) {
+            incrementOperationCount("beginTransaction.error");
+            closeQuietly(conn);
+            throw e;
+        } catch (Exception e) {
+            incrementOperationCount("beginTransaction.error");
+            closeQuietly(conn);
+            throw TransactionException.beginFailed(
+                    "Unexpected error starting transaction: " + e.getMessage(), e, "beginTransaction");
+        }
+    }
+    
+    /**
+     * Commits the current database transaction.
+     *
+     * @throws TransactionException if the transaction cannot be committed
+     */
+    public void commitTransaction() throws TransactionException {
+        // Check if we're in a transaction
+        if (!Boolean.TRUE.equals(inTransaction.get())) {
+            incrementOperationCount("commitTransaction.noTransaction");
+            throw TransactionException.commitFailed(
+                    "No active transaction to commit", null, "commitTransaction");
+        }
+        
+        Connection conn = currentConnection.get();
+        if (conn == null) {
+            incrementOperationCount("commitTransaction.noConnection");
+            throw TransactionException.commitFailed(
+                    "No active connection for transaction", null, "commitTransaction");
+        }
         
         try {
-            // Attempt to acquire a connection from the pool
-            connection = dataSource.getConnection();
+            long startTime = System.currentTimeMillis();
+            conn.commit();
+            long elapsedTime = System.currentTimeMillis() - startTime;
             
-            // Update metrics
-            long waitTime = System.currentTimeMillis() - startTime;
-            activeConnections.incrementAndGet();
-            totalConnectionsAcquired.incrementAndGet();
-            totalConnectionWaitTimeMs.addAndGet(waitTime);
+            // Track metrics
+            transactionsCommitted.incrementAndGet();
+            incrementOperationCount("commitTransaction");
             
-            // Track connection by operation type if provided
-            if (operationType != null) {
-                connectionsByOperation.computeIfAbsent(operationType, k -> new AtomicInteger(0))
-                        .incrementAndGet();
+            // Log commit time if it took longer than expected
+            if (elapsedTime > 100) {
+                logger.warn("Transaction commit took {} ms", elapsedTime);
             }
             
-            logger.debug("Acquired database connection after {}ms [active: {}, operation: {}]", 
-                    waitTime, activeConnections.get(), operationType);
-            
-            return connection;
+            logger.debug("Transaction committed successfully");
         } catch (SQLException e) {
-            // Log detailed error information
-            logger.error("Failed to acquire database connection after {}ms [active: {}, operation: {}]", 
-                    System.currentTimeMillis() - startTime, activeConnections.get(), operationType, e);
-            
-            // Increment failed transaction count if this was for a transaction
-            if (operationType != null && operationType.startsWith("transaction.")) {
-                failedTransactions.incrementAndGet();
+            incrementOperationCount("commitTransaction.error");
+            throw TransactionException.commitFailed(
+                    "Failed to commit transaction: " + e.getMessage(), e, "commitTransaction");
+        } finally {
+            try {
+                // Reset auto-commit
+                conn.setAutoCommit(true);
+                
+                // Reset isolation level if it was changed
+                Integer isolationLevel = transactionIsolationLevel.get();
+                if (isolationLevel != null && isolationLevel != Connection.TRANSACTION_READ_COMMITTED) {
+                    try {
+                        conn.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                    } catch (SQLException e) {
+                        logger.warn("Failed to reset transaction isolation level", e);
+                    }
+                }
+            } catch (SQLException e) {
+                logger.warn("Failed to reset auto-commit after transaction", e);
             }
             
-            throw new SQLException("Failed to acquire payment database connection: " + e.getMessage(), e);
+            releaseConnection(conn);
+            
+            // Clear thread-local storage
+            currentConnection.remove();
+            inTransaction.set(false);
+            transactionIsolationLevel.remove();
+        }
+    }
+    
+    /**
+     * Rolls back the current database transaction.
+     *
+     * @throws TransactionException if the transaction cannot be rolled back
+     */
+    public void rollbackTransaction() throws TransactionException {
+        // Check if we're in a transaction
+        if (!Boolean.TRUE.equals(inTransaction.get())) {
+            logger.debug("No active transaction to roll back");
+            incrementOperationCount("rollbackTransaction.noTransaction");
+            return;
+        }
+        
+        Connection conn = currentConnection.get();
+        if (conn == null) {
+            logger.debug("No active connection for transaction rollback");
+            incrementOperationCount("rollbackTransaction.noConnection");
+            inTransaction.set(false);
+            return;
+        }
+        
+        try {
+            long startTime = System.currentTimeMillis();
+            conn.rollback();
+            long elapsedTime = System.currentTimeMillis() - startTime;
+            
+            // Track metrics
+            transactionsRolledBack.incrementAndGet();
+            incrementOperationCount("rollbackTransaction");
+            
+            // Log rollback time if it took longer than expected
+            if (elapsedTime > 100) {
+                logger.warn("Transaction rollback took {} ms", elapsedTime);
+            }
+            
+            logger.debug("Transaction rolled back successfully");
+        } catch (SQLException e) {
+            incrementOperationCount("rollbackTransaction.error");
+            throw TransactionException.rollbackFailed(
+                    "Failed to roll back transaction: " + e.getMessage(), e, "rollbackTransaction");
+        } finally {
+            try {
+                // Reset auto-commit
+                conn.setAutoCommit(true);
+                
+                // Reset isolation level if it was changed
+                Integer isolationLevel = transactionIsolationLevel.get();
+                if (isolationLevel != null && isolationLevel != Connection.TRANSACTION_READ_COMMITTED) {
+                    try {
+                        conn.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                    } catch (SQLException e) {
+                        logger.warn("Failed to reset transaction isolation level", e);
+                    }
+                }
+            } catch (SQLException e) {
+                logger.warn("Failed to reset auto-commit after rollback", e);
+            }
+            
+            releaseConnection(conn);
+            
+            // Clear thread-local storage
+            currentConnection.remove();
+            inTransaction.set(false);
+            transactionIsolationLevel.remove();
         }
     }
     
     /**
      * Releases a database connection back to the pool.
-     * 
-     * @param connection The connection to release
-     * @param operationType The type of operation that was using the connection (for monitoring)
+     * If the connection is part of a transaction, it is not released.
+     *
+     * @param conn the connection to release
      */
-    public void releaseConnection(Connection connection, String operationType) {
-        if (connection == null) {
+    public void releaseConnection(Connection conn) {
+        if (conn == null) {
             return;
         }
         
-        // Don't release connections that are part of an active transaction
-        if (connection == transactionConnections.get()) {
-            logger.debug("Not releasing connection as it's part of an active transaction");
+        // Don't close the connection if it's part of a transaction
+        if (conn == currentConnection.get() && Boolean.TRUE.equals(inTransaction.get())) {
+            incrementOperationCount("releaseConnection.inTransaction");
             return;
         }
         
-        try {
-            // Ensure the connection is in a clean state before returning to the pool
-            if (!connection.getAutoCommit()) {
-                connection.setAutoCommit(true);
-            }
-            
-            connection.close();
-            
-            // Update metrics
-            activeConnections.decrementAndGet();
-            
-            // Update operation-specific metrics
-            if (operationType != null) {
-                AtomicInteger count = connectionsByOperation.get(operationType);
-                if (count != null) {
-                    count.decrementAndGet();
+        closeQuietly(conn);
+        connectionsReleased.incrementAndGet();
+        incrementOperationCount("releaseConnection");
+    }
+    
+    /**
+     * Quietly closes a database connection, ignoring any exceptions.
+     *
+     * @param conn the connection to close
+     */
+    public void closeQuietly(Connection conn) {
+        if (conn != null) {
+            try {
+                if (!conn.isClosed()) {
+                    conn.close();
                 }
-            }
-            
-            logger.debug("Released database connection [active: {}, operation: {}]", 
-                    activeConnections.get(), operationType);
-        } catch (SQLException e) {
-            logger.warn("Error releasing database connection [operation: {}]", operationType, e);
-        }
-    }
-    
-    /**
-     * Releases a database connection back to the pool.
-     * 
-     * @param connection The connection to release
-     */
-    public void releaseConnection(Connection connection) {
-        releaseConnection(connection, null);
-    }
-    
-    /**
-     * Begins a database transaction.
-     * The connection is stored in ThreadLocal to ensure consistent usage within the transaction.
-     * 
-     * @return A connection with a transaction started
-     * @throws SQLException if the transaction cannot be started
-     */
-    public Connection beginTransaction() throws SQLException {
-        return beginTransaction(Connection.TRANSACTION_READ_COMMITTED);
-    }
-    
-    /**
-     * Begins a database transaction with a specific isolation level.
-     * The connection is stored in ThreadLocal to ensure consistent usage within the transaction.
-     * 
-     * @param isolationLevel The transaction isolation level (from java.sql.Connection constants)
-     * @return A connection with a transaction started
-     * @throws SQLException if the transaction cannot be started
-     */
-    public Connection beginTransaction(int isolationLevel) throws SQLException {
-        // Check if a transaction is already in progress
-        Connection existingConnection = transactionConnections.get();
-        if (existingConnection != null && !existingConnection.isClosed() && !existingConnection.getAutoCommit()) {
-            logger.debug("Reusing existing transaction connection");
-            return existingConnection;
-        }
-        
-        // Start a new transaction
-        long startTime = System.currentTimeMillis();
-        Connection connection = getConnection("transaction.begin");
-        
-        try {
-            // Configure the transaction
-            connection.setAutoCommit(false);
-            connection.setTransactionIsolation(isolationLevel);
-            
-            // Store in ThreadLocal for consistent access
-            transactionConnections.set(connection);
-            
-            logger.debug("Transaction started with isolation level: {}", isolationLevelToString(isolationLevel));
-            return connection;
-        } catch (SQLException e) {
-            // Clean up on failure
-            releaseConnection(connection, "transaction.begin.failed");
-            transactionConnections.remove();
-            
-            logger.error("Failed to start transaction: {}", e.getMessage(), e);
-            throw new SQLException("Failed to start payment transaction: " + e.getMessage(), e);
-        }
-    }
-    
-    /**
-     * Commits the current transaction and releases the connection.
-     * 
-     * @throws SQLException if the transaction cannot be committed
-     */
-    public void commitTransaction() throws SQLException {
-        Connection connection = transactionConnections.get();
-        if (connection == null || connection.isClosed()) {
-            logger.warn("No active transaction to commit");
-            return;
-        }
-        
-        long startTime = System.currentTimeMillis();
-        
-        try {
-            connection.commit();
-            logger.debug("Transaction committed successfully in {}ms", System.currentTimeMillis() - startTime);
-            
-            // Update metrics
-            totalTransactions.incrementAndGet();
-            totalTransactionTimeMs.addAndGet(System.currentTimeMillis() - startTime);
-        } catch (SQLException e) {
-            logger.error("Failed to commit transaction: {}", e.getMessage(), e);
-            failedTransactions.incrementAndGet();
-            throw new SQLException("Failed to commit payment transaction: " + e.getMessage(), e);
-        } finally {
-            try {
-                connection.setAutoCommit(true);
-                connection.close();
             } catch (SQLException e) {
-                logger.warn("Error resetting connection state after transaction", e);
-            }
-            
-            // Clear the ThreadLocal reference
-            transactionConnections.remove();
-            activeConnections.decrementAndGet();
-        }
-    }
-    
-    /**
-     * Rolls back the current transaction and releases the connection.
-     * 
-     * @throws SQLException if the transaction cannot be rolled back
-     */
-    public void rollbackTransaction() throws SQLException {
-        Connection connection = transactionConnections.get();
-        if (connection == null || connection.isClosed()) {
-            logger.warn("No active transaction to roll back");
-            return;
-        }
-        
-        long startTime = System.currentTimeMillis();
-        
-        try {
-            connection.rollback();
-            logger.debug("Transaction rolled back successfully in {}ms", System.currentTimeMillis() - startTime);
-            
-            // Update metrics
-            failedTransactions.incrementAndGet();
-        } catch (SQLException e) {
-            logger.error("Failed to roll back transaction: {}", e.getMessage(), e);
-            throw new SQLException("Failed to roll back payment transaction: " + e.getMessage(), e);
-        } finally {
-            try {
-                connection.setAutoCommit(true);
-                connection.close();
-            } catch (SQLException e) {
-                logger.warn("Error resetting connection state after transaction rollback", e);
-            }
-            
-            // Clear the ThreadLocal reference
-            transactionConnections.remove();
-            activeConnections.decrementAndGet();
-        }
-    }
-    
-    /**
-     * Executes a database operation within a transaction.
-     * Automatically handles transaction management, including commit and rollback.
-     * 
-     * @param operation The database operation to execute
-     * @param <T> The return type of the operation
-     * @return The result of the operation
-     * @throws SQLException if the operation fails
-     */
-    public <T> T executeInTransaction(TransactionOperation<T> operation) throws SQLException {
-        Connection connection = null;
-        boolean success = false;
-        
-        try {
-            // Begin a transaction
-            connection = beginTransaction();
-            
-            // Execute the operation
-            T result = operation.execute(connection);
-            
-            // Commit the transaction
-            commitTransaction();
-            success = true;
-            
-            return result;
-        } catch (SQLException e) {
-            // Roll back on failure
-            if (connection != null) {
-                rollbackTransaction();
-            }
-            throw e;
-        } finally {
-            // Ensure transaction is cleaned up if not already done
-            if (!success && connection != null) {
-                try {
-                    if (!connection.isClosed() && !connection.getAutoCommit()) {
-                        connection.rollback();
-                        connection.setAutoCommit(true);
-                        connection.close();
-                        transactionConnections.remove();
-                        activeConnections.decrementAndGet();
-                    }
-                } catch (SQLException e) {
-                    logger.warn("Error cleaning up transaction resources", e);
-                }
+                logger.warn("Error closing connection: {}", e.getMessage());
             }
         }
     }
     
     /**
-     * Executes a database operation within a transaction with a specific isolation level.
-     * Automatically handles transaction management, including commit and rollback.
-     * 
-     * @param isolationLevel The transaction isolation level
-     * @param operation The database operation to execute
-     * @param <T> The return type of the operation
-     * @return The result of the operation
-     * @throws SQLException if the operation fails
+     * Checks if the current thread is in a transaction.
+     *
+     * @return true if in a transaction, false otherwise
      */
-    public <T> T executeInTransaction(int isolationLevel, TransactionOperation<T> operation) throws SQLException {
-        Connection connection = null;
-        boolean success = false;
-        
-        try {
-            // Begin a transaction with the specified isolation level
-            connection = beginTransaction(isolationLevel);
-            
-            // Execute the operation
-            T result = operation.execute(connection);
-            
-            // Commit the transaction
-            commitTransaction();
-            success = true;
-            
-            return result;
-        } catch (SQLException e) {
-            // Roll back on failure
-            if (connection != null) {
-                rollbackTransaction();
-            }
-            throw e;
-        } finally {
-            // Ensure transaction is cleaned up if not already done
-            if (!success && connection != null) {
-                try {
-                    if (!connection.isClosed() && !connection.getAutoCommit()) {
-                        connection.rollback();
-                        connection.setAutoCommit(true);
-                        connection.close();
-                        transactionConnections.remove();
-                        activeConnections.decrementAndGet();
-                    }
-                } catch (SQLException e) {
-                    logger.warn("Error cleaning up transaction resources", e);
-                }
-            }
-        }
+    public boolean isInTransaction() {
+        return Boolean.TRUE.equals(inTransaction.get());
     }
     
     /**
-     * Safely closes a PreparedStatement, handling any exceptions.
-     * 
-     * @param statement The PreparedStatement to close
+     * Gets the current transaction isolation level.
+     *
+     * @return the current transaction isolation level, or null if not in a transaction
      */
-    public void closeStatement(PreparedStatement statement) {
-        if (statement != null) {
-            try {
-                statement.close();
-            } catch (SQLException e) {
-                logger.warn("Error closing prepared statement", e);
-            }
-        }
+    public Integer getCurrentTransactionIsolationLevel() {
+        return transactionIsolationLevel.get();
     }
     
     /**
-     * Safely closes a ResultSet, handling any exceptions.
-     * 
-     * @param resultSet The ResultSet to close
-     */
-    public void closeResultSet(ResultSet resultSet) {
-        if (resultSet != null) {
-            try {
-                resultSet.close();
-            } catch (SQLException e) {
-                logger.warn("Error closing result set", e);
-            }
-        }
-    }
-    
-    /**
-     * Safely closes a Connection, handling any exceptions.
-     * This method should only be used for connections that are not part of a transaction.
-     * For transaction connections, use commitTransaction() or rollbackTransaction().
-     * 
-     * @param connection The Connection to close
-     */
-    public void closeConnection(Connection connection) {
-        releaseConnection(connection);
-    }
-    
-    /**
-     * Safely closes all resources (ResultSet, PreparedStatement, and Connection).
-     * This method should only be used for connections that are not part of a transaction.
-     * 
-     * @param resultSet The ResultSet to close
-     * @param statement The PreparedStatement to close
-     * @param connection The Connection to close
-     */
-    public void closeResources(ResultSet resultSet, PreparedStatement statement, Connection connection) {
-        closeResultSet(resultSet);
-        closeStatement(statement);
-        releaseConnection(connection);
-    }
-    
-    /**
-     * Safely closes ResultSet and PreparedStatement resources.
-     * Does not close the connection, which is useful for transaction contexts.
-     * 
-     * @param resultSet The ResultSet to close
-     * @param statement The PreparedStatement to close
-     */
-    public void closeResources(ResultSet resultSet, PreparedStatement statement) {
-        closeResultSet(resultSet);
-        closeStatement(statement);
-    }
-    
-    /**
-     * Checks if a connection is valid and can be used for database operations.
-     * 
-     * @param connection The connection to validate
-     * @param timeoutSeconds The timeout in seconds for validation
+     * Validates a connection to ensure it is still valid.
+     *
+     * @param conn the connection to validate
+     * @param timeoutSeconds the timeout in seconds
      * @return true if the connection is valid, false otherwise
      */
-    public boolean isConnectionValid(Connection connection, int timeoutSeconds) {
-        if (connection == null) {
+    public boolean validateConnection(Connection conn, int timeoutSeconds) {
+        if (conn == null) {
             return false;
         }
         
         try {
-            return !connection.isClosed() && connection.isValid(timeoutSeconds);
+            return conn.isValid(timeoutSeconds);
         } catch (SQLException e) {
-            logger.warn("Error validating connection", e);
+            logger.warn("Error validating connection: {}", e.getMessage());
             return false;
         }
     }
     
     /**
-     * Gets the current health status of the connection pool.
-     * 
-     * @return A string representation of the pool health
+     * Gets the connection pool metrics.
+     *
+     * @return a map of connection pool metrics
      */
-    public String getHealthStatus() {
-        return hikariCPConfig.getHealthStatus();
+    public Map<String, Object> getConnectionPoolMetrics() {
+        return HikariCPConfig.getPoolMetrics();
     }
     
     /**
-     * Gets the current number of active connections.
-     * 
-     * @return The number of active connections
+     * Gets the connection manager metrics.
+     *
+     * @return a map of connection manager metrics
      */
-    public int getActiveConnectionCount() {
-        return activeConnections.get();
-    }
-    
-    /**
-     * Gets the total number of connections acquired since startup.
-     * 
-     * @return The total number of connections acquired
-     */
-    public int getTotalConnectionsAcquired() {
-        return totalConnectionsAcquired.get();
-    }
-    
-    /**
-     * Gets the average connection wait time in milliseconds.
-     * 
-     * @return The average connection wait time
-     */
-    public double getAverageConnectionWaitTimeMs() {
-        int total = totalConnectionsAcquired.get();
-        return total > 0 ? (double) totalConnectionWaitTimeMs.get() / total : 0;
-    }
-    
-    /**
-     * Gets the average transaction time in milliseconds.
-     * 
-     * @return The average transaction time
-     */
-    public double getAverageTransactionTimeMs() {
-        int total = totalTransactions.get();
-        return total > 0 ? (double) totalTransactionTimeMs.get() / total : 0;
-    }
-    
-    /**
-     * Gets the total number of transactions processed.
-     * 
-     * @return The total number of transactions
-     */
-    public int getTotalTransactions() {
-        return totalTransactions.get();
-    }
-    
-    /**
-     * Gets the total number of failed transactions.
-     * 
-     * @return The total number of failed transactions
-     */
-    public int getFailedTransactions() {
-        return failedTransactions.get();
-    }
-    
-    /**
-     * Gets the transaction success rate as a percentage.
-     * 
-     * @return The transaction success rate (0-100)
-     */
-    public double getTransactionSuccessRate() {
-        int total = totalTransactions.get();
-        int failed = failedTransactions.get();
-        return total > 0 ? 100.0 * (total - failed) / total : 0;
-    }
-    
-    /**
-     * Gets the number of connections currently in use for a specific operation type.
-     * 
-     * @param operationType The operation type
-     * @return The number of connections in use for the operation
-     */
-    public int getConnectionsForOperation(String operationType) {
-        AtomicInteger count = connectionsByOperation.get(operationType);
-        return count != null ? count.get() : 0;
-    }
-    
-    /**
-     * Shuts down the connection manager and releases all resources.
-     */
-    public void shutdown() {
-        logger.info("Shutting down Payment ConnectionManager");
+    public Map<String, Object> getConnectionManagerMetrics() {
+        Map<String, Object> metrics = new HashMap<>();
         
-        // Close any active transaction connections
-        Connection connection = transactionConnections.get();
-        if (connection != null) {
-            try {
-                if (!connection.getAutoCommit()) {
-                    logger.warn("Rolling back uncommitted transaction during shutdown");
-                    connection.rollback();
-                }
-                connection.close();
-            } catch (SQLException e) {
-                logger.warn("Error closing transaction connection during shutdown", e);
-            } finally {
-                transactionConnections.remove();
-            }
-        }
+        metrics.put("connectionsAcquired", connectionsAcquired.get());
+        metrics.put("connectionsReleased", connectionsReleased.get());
+        metrics.put("transactionsStarted", transactionsStarted.get());
+        metrics.put("transactionsCommitted", transactionsCommitted.get());
+        metrics.put("transactionsRolledBack", transactionsRolledBack.get());
+        metrics.put("activeTransactions", getActiveTransactionCount());
+        metrics.put("operationCounts", new HashMap<>(operationCounts));
         
-        // Close the connection pool
-        if (hikariCPConfig != null) {
-            hikariCPConfig.close();
-        }
-        
-        logger.info("Payment ConnectionManager shutdown complete");
+        return metrics;
     }
     
     /**
-     * Converts a transaction isolation level constant to a human-readable string.
-     * 
-     * @param isolationLevel The isolation level constant from java.sql.Connection
-     * @return A human-readable string representation of the isolation level
+     * Gets the number of active transactions.
+     *
+     * @return the number of active transactions
      */
-    private String isolationLevelToString(int isolationLevel) {
+    private long getActiveTransactionCount() {
+        return transactionsStarted.get() - transactionsCommitted.get() - transactionsRolledBack.get();
+    }
+    
+    /**
+     * Increments the count for a specific operation.
+     *
+     * @param operation the operation name
+     */
+    private void incrementOperationCount(String operation) {
+        operationCounts.computeIfAbsent(operation, k -> new AtomicLong(0)).incrementAndGet();
+    }
+    
+    /**
+     * Gets a human-readable name for a transaction isolation level.
+     *
+     * @param isolationLevel the transaction isolation level
+     * @return the isolation level name
+     */
+    private String getIsolationLevelName(int isolationLevel) {
         switch (isolationLevel) {
             case Connection.TRANSACTION_NONE:
                 return "NONE";
@@ -658,19 +491,118 @@ public class ConnectionManager {
     }
     
     /**
-     * Functional interface for operations that execute within a transaction.
-     * 
-     * @param <T> The return type of the operation
+     * Checks if the connection pool is healthy.
+     *
+     * @return true if the connection pool is healthy, false otherwise
+     */
+    public boolean isHealthy() {
+        return HikariCPConfig.isHealthy();
+    }
+    
+    /**
+     * Performs a health check by acquiring and releasing a connection.
+     *
+     * @return true if the health check succeeds, false otherwise
+     */
+    public boolean performHealthCheck() {
+        Connection conn = null;
+        try {
+            conn = getConnection();
+            return validateConnection(conn, 5);
+        } catch (Exception e) {
+            logger.warn("Health check failed: {}", e.getMessage());
+            return false;
+        } finally {
+            releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * Shuts down the connection manager and releases all resources.
+     * This method should be called during application shutdown.
+     */
+    public void shutdown() {
+        logger.info("Shutting down ConnectionManager for payment database");
+        HikariCPConfig.shutdown();
+    }
+    
+    /**
+     * Executes a database operation with transaction management.
+     *
+     * @param <T> the result type
+     * @param operation the operation to execute
+     * @return the result of the operation
+     * @throws Exception if the operation fails
+     */
+    public <T> T executeWithTransaction(TransactionOperation<T> operation) throws Exception {
+        boolean localTransaction = !isInTransaction();
+        
+        if (localTransaction) {
+            beginTransaction();
+        }
+        
+        try {
+            T result = operation.execute(this);
+            
+            if (localTransaction) {
+                commitTransaction();
+            }
+            
+            return result;
+        } catch (Exception e) {
+            if (localTransaction) {
+                rollbackTransaction();
+            }
+            throw e;
+        }
+    }
+    
+    /**
+     * Executes a database operation with transaction management and a specific isolation level.
+     *
+     * @param <T> the result type
+     * @param operation the operation to execute
+     * @param isolationLevel the transaction isolation level
+     * @return the result of the operation
+     * @throws Exception if the operation fails
+     */
+    public <T> T executeWithTransaction(TransactionOperation<T> operation, int isolationLevel) throws Exception {
+        boolean localTransaction = !isInTransaction();
+        
+        if (localTransaction) {
+            beginTransaction(isolationLevel);
+        }
+        
+        try {
+            T result = operation.execute(this);
+            
+            if (localTransaction) {
+                commitTransaction();
+            }
+            
+            return result;
+        } catch (Exception e) {
+            if (localTransaction) {
+                rollbackTransaction();
+            }
+            throw e;
+        }
+    }
+    
+    /**
+     * Functional interface for operations that require transaction management.
+     *
+     * @param <T> the result type
      */
     @FunctionalInterface
     public interface TransactionOperation<T> {
         /**
-         * Executes a database operation using the provided connection.
-         * 
-         * @param connection The database connection
-         * @return The result of the operation
-         * @throws SQLException if the operation fails
+         * Executes an operation within a transaction.
+         *
+         * @param connectionManager the connection manager
+         * @return the result of the operation
+         * @throws Exception if the operation fails
          */
-        T execute(Connection connection) throws SQLException;
+        T execute(ConnectionManager connectionManager) throws Exception;
     }
 }

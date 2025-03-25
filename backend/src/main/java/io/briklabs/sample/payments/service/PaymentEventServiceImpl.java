@@ -1,10 +1,16 @@
 package io.briklabs.sample.payments.service;
 
-import io.briklabs.sample.payments.data.dao.PaymentEventDAO;
 import io.briklabs.sample.payments.data.dao.PaymentDAOFactory;
+import io.briklabs.sample.payments.data.dao.PaymentEventDAO;
+import io.briklabs.sample.payments.data.exception.ConnectionException;
+import io.briklabs.sample.payments.data.exception.QueryExecutionException;
+import io.briklabs.sample.payments.data.exception.ResourceNotFoundException;
+import io.briklabs.sample.payments.data.exception.ValidationException;
+import io.briklabs.sample.payments.data.query.PaymentFilterParams;
 import io.briklabs.sample.payments.model.PaymentEvent;
-import io.briklabs.sample.payments.model.PaymentStatus;
 import io.briklabs.sample.payments.model.PaymentTransaction;
+import io.briklabs.sample.payments.model.PaymentTransaction.PaymentStatus;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,8 +20,11 @@ import java.util.stream.Collectors;
 
 /**
  * Implementation of the PaymentEventService interface that manages payment lifecycle event tracking.
- * This class handles the recording of events at each transaction lifecycle stage, constructs event
- * timelines, and provides comprehensive event history for audit and reporting purposes.
+ * <p>
+ * This class handles the recording of events at each transaction lifecycle stage, constructs
+ * event timelines, and provides comprehensive event history for audit and reporting purposes.
+ * It's essential for maintaining a complete audit trail of payment operations.
+ * </p>
  */
 public class PaymentEventServiceImpl implements PaymentEventService {
 
@@ -24,476 +33,757 @@ public class PaymentEventServiceImpl implements PaymentEventService {
     private final PaymentEventDAO eventDAO;
     
     /**
-     * Constructs a new PaymentEventServiceImpl with the specified DAO factory.
+     * Creates a new PaymentEventServiceImpl with the provided DAO factory.
      *
      * @param daoFactory The factory for creating data access objects
      */
     public PaymentEventServiceImpl(PaymentDAOFactory daoFactory) {
         this.eventDAO = daoFactory.getPaymentEventDAO();
-        logger.info("PaymentEventServiceImpl initialized");
-    }
-    
-    /**
-     * Constructs a new PaymentEventServiceImpl with the specified event DAO.
-     * This constructor is primarily used for testing with mock DAOs.
-     *
-     * @param eventDAO The payment event DAO implementation
-     */
-    public PaymentEventServiceImpl(PaymentEventDAO eventDAO) {
-        this.eventDAO = eventDAO;
-        logger.info("PaymentEventServiceImpl initialized with provided DAO");
     }
 
     @Override
-    public PaymentEvent recordEvent(PaymentEvent event) {
-        logger.debug("Recording payment event: {}", event);
+    public PaymentEvent recordEvent(UUID transactionId, String eventType, String eventData, String createdBy) {
+        return recordEvent(transactionId, eventType, eventData, createdBy, null);
+    }
+
+    @Override
+    public PaymentEvent recordEvent(UUID transactionId, String eventType, String eventData, 
+                                   String createdBy, UUID correlationId) {
+        validateRequiredParameters(transactionId, eventType, createdBy);
         
-        // Validate the event data
         try {
-            event.validate();
-        } catch (IllegalArgumentException e) {
-            logger.error("Invalid event data: {}", e.getMessage());
-            throw e;
-        }
-        
-        // Ensure event ID is set
-        if (event.getEventId() == null) {
-            event.setEventId(UUID.randomUUID());
-        }
-        
-        // Ensure timestamp is set
-        if (event.getCreatedAt() == null) {
-            event.setCreatedAt(Instant.now());
-        }
-        
-        // Persist the event
-        try {
-            PaymentEvent savedEvent = eventDAO.create(event);
-            logger.info("Recorded payment event: {} for transaction: {}", 
-                    savedEvent.getEventType(), savedEvent.getTransactionId());
-            return savedEvent;
-        } catch (Exception e) {
+            PaymentEvent event = PaymentEvent.createEvent(
+                transactionId,
+                eventType,
+                eventData != null ? eventData : "{}",
+                createdBy,
+                correlationId
+            );
+            
+            logger.debug("Recording payment event: type={}, transactionId={}, correlationId={}", 
+                        eventType, transactionId, correlationId);
+            
+            return eventDAO.create(event);
+        } catch (ValidationException | ConnectionException | QueryExecutionException e) {
             logger.error("Failed to record payment event: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to record payment event", e);
         }
     }
 
     @Override
-    public PaymentEvent recordStatusChangeEvent(PaymentTransaction transaction, PaymentStatus newStatus, String userId) {
-        logger.debug("Recording status change event for transaction {}: {} -> {}", 
-                transaction.getTransactionId(), transaction.getStatus(), newStatus);
-        
-        // Create a status change event
-        PaymentEvent event = PaymentEvent.createStatusChangeEvent(transaction, newStatus, userId);
-        
-        return recordEvent(event);
+    public PaymentEvent recordStatusChangeEvent(UUID transactionId, PaymentStatus previousStatus, 
+                                              PaymentStatus newStatus, String eventData, String createdBy) {
+        return recordStatusChangeEvent(transactionId, previousStatus, newStatus, eventData, createdBy, null);
     }
 
     @Override
-    public PaymentEvent recordTransactionCreatedEvent(PaymentTransaction transaction, String userId) {
-        logger.debug("Recording transaction created event for transaction {}", transaction.getTransactionId());
+    public PaymentEvent recordStatusChangeEvent(UUID transactionId, PaymentStatus previousStatus, 
+                                              PaymentStatus newStatus, String eventData, 
+                                              String createdBy, UUID correlationId) {
+        validateRequiredParameters(transactionId, createdBy);
         
-        // Create a transaction created event
-        PaymentEvent event = PaymentEvent.createTransactionCreatedEvent(transaction, userId);
+        if (newStatus == null) {
+            throw new IllegalArgumentException("New status cannot be null");
+        }
         
-        return recordEvent(event);
+        try {
+            PaymentEvent event = PaymentEvent.createStatusChangeEvent(
+                transactionId,
+                previousStatus != null ? previousStatus.name() : null,
+                newStatus.name(),
+                eventData != null ? eventData : "{}",
+                createdBy,
+                correlationId
+            );
+            
+            logger.debug("Recording status change event: {} -> {}, transactionId={}", 
+                        previousStatus, newStatus, transactionId);
+            
+            return eventDAO.create(event);
+        } catch (ValidationException | ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to record status change event: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to record status change event", e);
+        }
     }
 
     @Override
-    public PaymentEvent recordProcessingEvent(PaymentTransaction transaction, String userId, Map<String, String> metadata) {
-        logger.debug("Recording processing event for transaction {}", transaction.getTransactionId());
-        
-        // Convert metadata to JSON string
-        String eventData = convertMetadataToJson(metadata);
-        
-        // Create a processing event
-        PaymentEvent event = PaymentEvent.createProcessingEvent(transaction, userId, eventData);
-        
-        return recordEvent(event);
+    public PaymentEvent recordErrorEvent(UUID transactionId, String errorMessage, 
+                                       String errorDetails, String createdBy) {
+        return recordErrorEvent(transactionId, errorMessage, errorDetails, createdBy, null);
     }
 
     @Override
-    public PaymentEvent recordCaptureEvent(PaymentTransaction transaction, String userId, String amount, boolean isPartial) {
-        logger.debug("Recording {} capture event for transaction {}: amount={}", 
-                isPartial ? "partial" : "full", transaction.getTransactionId(), amount);
+    public PaymentEvent recordErrorEvent(UUID transactionId, String errorMessage, 
+                                       String errorDetails, String createdBy, UUID correlationId) {
+        validateRequiredParameters(transactionId, createdBy);
         
-        // Create a capture event
-        PaymentEvent event = PaymentEvent.createCaptureEvent(transaction, userId, amount);
+        if (errorMessage == null || errorMessage.trim().isEmpty()) {
+            throw new IllegalArgumentException("Error message cannot be null or empty");
+        }
         
-        // Set event type based on partial flag
-        event.setEventType(isPartial ? "PARTIAL_CAPTURE_INITIATED" : "CAPTURE_INITIATED");
-        
-        return recordEvent(event);
+        try {
+            PaymentEvent event = PaymentEvent.createErrorEvent(
+                transactionId,
+                errorMessage,
+                errorDetails != null ? errorDetails : "{}",
+                createdBy,
+                correlationId
+            );
+            
+            logger.debug("Recording error event: {}, transactionId={}", errorMessage, transactionId);
+            
+            return eventDAO.create(event);
+        } catch (ValidationException | ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to record error event: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to record error event", e);
+        }
     }
 
     @Override
-    public PaymentEvent recordRefundEvent(PaymentTransaction transaction, String userId, String amount, String reason, boolean isPartial) {
-        logger.debug("Recording {} refund event for transaction {}: amount={}, reason='{}'", 
-                isPartial ? "partial" : "full", transaction.getTransactionId(), amount, reason);
+    public PaymentEvent recordTransactionCreatedEvent(PaymentTransaction transaction, String createdBy) {
+        if (transaction == null) {
+            throw new IllegalArgumentException("Transaction cannot be null");
+        }
         
-        // Create a refund event
-        PaymentEvent event = PaymentEvent.createRefundEvent(transaction, userId, amount, reason);
+        UUID transactionId = transaction.getTransactionId();
+        validateRequiredParameters(transactionId, createdBy);
         
-        // Set event type based on partial flag
-        event.setEventType(isPartial ? "PARTIAL_REFUND_INITIATED" : "REFUND_INITIATED");
+        // Create JSON representation of transaction details
+        String eventData = String.format(
+            "{\"amount\":\"%s\",\"currency\":\"%s\",\"merchantId\":\"%s\",\"paymentType\":\"%s\"}",
+            transaction.getAmount(),
+            transaction.getCurrency(),
+            transaction.getMerchantId(),
+            transaction.getPaymentType()
+        );
         
-        return recordEvent(event);
+        return recordEvent(transactionId, "TRANSACTION_CREATED", eventData, createdBy);
     }
 
     @Override
-    public PaymentEvent recordVoidEvent(PaymentTransaction transaction, String userId, String reason) {
-        logger.debug("Recording void event for transaction {}: reason='{}'", 
-                transaction.getTransactionId(), reason);
+    public PaymentEvent recordCaptureEvent(UUID transactionId, String captureAmount, 
+                                         String captureReference, boolean isPartialCapture, String createdBy) {
+        validateRequiredParameters(transactionId, createdBy);
         
-        // Create a void event
-        PaymentEvent event = new PaymentEvent(transaction.getTransactionId(), "VOID_INITIATED", userId);
-        event.setPreviousStatus(transaction.getStatus().name());
-        event.setEventData("{\"reason\":\"" + escapeJsonString(reason) + "\"}");
+        if (captureAmount == null || captureAmount.trim().isEmpty()) {
+            throw new IllegalArgumentException("Capture amount cannot be null or empty");
+        }
         
-        return recordEvent(event);
+        // Create JSON representation of capture details
+        String eventData = String.format(
+            "{\"amount\":\"%s\",\"reference\":\"%s\",\"isPartial\":%b}",
+            captureAmount,
+            captureReference != null ? captureReference : "",
+            isPartialCapture
+        );
+        
+        String eventType = isPartialCapture ? "PARTIAL_CAPTURE" : "CAPTURE";
+        
+        logger.debug("Recording capture event: amount={}, isPartial={}, transactionId={}", 
+                    captureAmount, isPartialCapture, transactionId);
+        
+        return recordEvent(transactionId, eventType, eventData, createdBy);
     }
 
     @Override
-    public PaymentEvent recordErrorEvent(PaymentTransaction transaction, String userId, String errorCode, String errorMessage) {
-        logger.debug("Recording error event for transaction {}: code={}, message='{}'", 
-                transaction.getTransactionId(), errorCode, errorMessage);
+    public PaymentEvent recordRefundEvent(UUID transactionId, String refundAmount, String refundReason,
+                                        String refundReference, boolean isPartialRefund, String createdBy) {
+        validateRequiredParameters(transactionId, createdBy);
         
-        // Create an error event
-        PaymentEvent event = PaymentEvent.createErrorEvent(transaction, userId, errorCode, errorMessage);
+        if (refundAmount == null || refundAmount.trim().isEmpty()) {
+            throw new IllegalArgumentException("Refund amount cannot be null or empty");
+        }
         
-        return recordEvent(event);
+        // Create JSON representation of refund details
+        String eventData = String.format(
+            "{\"amount\":\"%s\",\"reason\":\"%s\",\"reference\":\"%s\",\"isPartial\":%b}",
+            refundAmount,
+            refundReason != null ? refundReason : "",
+            refundReference != null ? refundReference : "",
+            isPartialRefund
+        );
+        
+        String eventType = isPartialRefund ? "PARTIAL_REFUND" : "REFUND";
+        
+        logger.debug("Recording refund event: amount={}, isPartial={}, transactionId={}", 
+                    refundAmount, isPartialRefund, transactionId);
+        
+        return recordEvent(transactionId, eventType, eventData, createdBy);
     }
 
     @Override
-    public PaymentEvent recordCustomEvent(PaymentTransaction transaction, String eventType, String userId, Map<String, String> metadata) {
-        logger.debug("Recording custom event '{}' for transaction {}", eventType, transaction.getTransactionId());
+    public PaymentEvent recordVoidEvent(UUID transactionId, String voidReason, String createdBy) {
+        validateRequiredParameters(transactionId, createdBy);
         
-        // Convert metadata to JSON string
-        String eventData = convertMetadataToJson(metadata);
+        // Create JSON representation of void details
+        String eventData = String.format(
+            "{\"reason\":\"%s\"}",
+            voidReason != null ? voidReason : ""
+        );
         
-        // Create a custom event
-        PaymentEvent event = new PaymentEvent(transaction.getTransactionId(), eventType, userId);
-        event.setPreviousStatus(transaction.getStatus().name());
-        event.setEventData(eventData);
+        logger.debug("Recording void event: transactionId={}", transactionId);
         
-        return recordEvent(event);
+        return recordEvent(transactionId, "VOID", eventData, createdBy);
     }
 
     @Override
     public List<PaymentEvent> getEventsByTransactionId(UUID transactionId) {
-        logger.debug("Retrieving events for transaction {}", transactionId);
+        validateRequiredParameters(transactionId);
         
         try {
-            List<PaymentEvent> events = eventDAO.findByTransactionId(transactionId);
-            logger.debug("Retrieved {} events for transaction {}", events.size(), transactionId);
-            return events;
-        } catch (Exception e) {
-            logger.error("Failed to retrieve events for transaction {}: {}", 
-                    transactionId, e.getMessage(), e);
-            throw new RuntimeException("Failed to retrieve transaction events", e);
+            return eventDAO.findByTransactionId(transactionId);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve events by transaction ID: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve events by transaction ID", e);
         }
     }
 
     @Override
-    public List<PaymentEvent> getEventsByTransactionIdAndTimeRange(UUID transactionId, Instant startTime, Instant endTime) {
-        logger.debug("Retrieving events for transaction {} between {} and {}", 
-                transactionId, startTime, endTime);
+    public List<PaymentEvent> getEventsByType(UUID transactionId, String eventType) {
+        validateRequiredParameters(transactionId, eventType);
         
         try {
-            List<PaymentEvent> events = eventDAO.findByTransactionIdAndTimeRange(transactionId, startTime, endTime);
-            logger.debug("Retrieved {} events for transaction {} in time range", events.size(), transactionId);
-            return events;
-        } catch (Exception e) {
-            logger.error("Failed to retrieve events for transaction {} in time range: {}", 
-                    transactionId, e.getMessage(), e);
-            throw new RuntimeException("Failed to retrieve transaction events by time range", e);
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            return eventDAO.findByEventType(eventType, filterParams)
+                .stream()
+                .filter(event -> event.getTransactionId().equals(transactionId))
+                .collect(Collectors.toList());
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve events by type: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve events by type", e);
         }
     }
 
     @Override
-    public List<PaymentEvent> getEventsByTransactionIdAndType(UUID transactionId, String eventType) {
-        logger.debug("Retrieving events of type '{}' for transaction {}", eventType, transactionId);
+    public List<PaymentEvent> getEventsByTypes(UUID transactionId, List<String> eventTypes) {
+        validateRequiredParameters(transactionId);
+        
+        if (eventTypes == null || eventTypes.isEmpty()) {
+            throw new IllegalArgumentException("Event types list cannot be null or empty");
+        }
         
         try {
-            List<PaymentEvent> events = eventDAO.findByTransactionIdAndType(transactionId, eventType);
-            logger.debug("Retrieved {} events of type '{}' for transaction {}", 
-                    events.size(), eventType, transactionId);
-            return events;
-        } catch (Exception e) {
-            logger.error("Failed to retrieve events of type '{}' for transaction {}: {}", 
-                    eventType, transactionId, e.getMessage(), e);
-            throw new RuntimeException("Failed to retrieve transaction events by type", e);
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            return eventDAO.findByEventTypeIn(eventTypes, filterParams)
+                .stream()
+                .filter(event -> event.getTransactionId().equals(transactionId))
+                .collect(Collectors.toList());
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve events by types: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve events by types", e);
         }
     }
 
     @Override
-    public List<PaymentEvent> buildTransactionTimeline(UUID transactionId) {
-        logger.debug("Building timeline for transaction {}", transactionId);
+    public List<PaymentEvent> getStatusChangeEvents(UUID transactionId) {
+        validateRequiredParameters(transactionId);
         
         try {
-            // Retrieve all events for the transaction
-            List<PaymentEvent> events = getEventsByTransactionId(transactionId);
-            
-            // Sort events chronologically (oldest first)
-            List<PaymentEvent> timeline = events.stream()
-                    .sorted(Comparator.comparing(PaymentEvent::getCreatedAt))
-                    .collect(Collectors.toList());
-            
-            logger.debug("Built timeline with {} events for transaction {}", timeline.size(), transactionId);
-            return timeline;
-        } catch (Exception e) {
-            logger.error("Failed to build timeline for transaction {}: {}", 
-                    transactionId, e.getMessage(), e);
-            throw new RuntimeException("Failed to build transaction timeline", e);
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            return eventDAO.findStatusChangeEvents(transactionId, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve status change events: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve status change events", e);
         }
     }
 
     @Override
-    public List<PaymentEvent> buildFilteredTransactionTimeline(UUID transactionId, List<String> eventTypes, 
-                                                             Instant startTime, Instant endTime) {
-        logger.debug("Building filtered timeline for transaction {}", transactionId);
+    public List<PaymentEvent> getErrorEvents(UUID transactionId) {
+        validateRequiredParameters(transactionId);
         
         try {
-            // Retrieve all events for the transaction
-            List<PaymentEvent> allEvents = getEventsByTransactionId(transactionId);
-            
-            // Apply filters
-            List<PaymentEvent> filteredEvents = allEvents.stream()
-                    .filter(event -> eventTypes == null || eventTypes.isEmpty() || 
-                            eventTypes.contains(event.getEventType()))
-                    .filter(event -> startTime == null || !event.getCreatedAt().isBefore(startTime))
-                    .filter(event -> endTime == null || !event.getCreatedAt().isAfter(endTime))
-                    .sorted(Comparator.comparing(PaymentEvent::getCreatedAt))
-                    .collect(Collectors.toList());
-            
-            logger.debug("Built filtered timeline with {} events for transaction {}", 
-                    filteredEvents.size(), transactionId);
-            return filteredEvents;
-        } catch (Exception e) {
-            logger.error("Failed to build filtered timeline for transaction {}: {}", 
-                    transactionId, e.getMessage(), e);
-            throw new RuntimeException("Failed to build filtered transaction timeline", e);
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            return eventDAO.findErrorEvents(transactionId, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve error events: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve error events", e);
         }
     }
 
     @Override
     public PaymentEvent getMostRecentEvent(UUID transactionId) {
-        logger.debug("Retrieving most recent event for transaction {}", transactionId);
+        validateRequiredParameters(transactionId);
         
         try {
-            PaymentEvent event = eventDAO.findMostRecentByTransactionId(transactionId);
-            if (event != null) {
-                logger.debug("Retrieved most recent event of type '{}' for transaction {}", 
-                        event.getEventType(), transactionId);
-            } else {
-                logger.debug("No events found for transaction {}", transactionId);
-            }
-            return event;
-        } catch (Exception e) {
-            logger.error("Failed to retrieve most recent event for transaction {}: {}", 
-                    transactionId, e.getMessage(), e);
-            throw new RuntimeException("Failed to retrieve most recent transaction event", e);
+            return eventDAO.findMostRecentEvent(transactionId);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve most recent event: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve most recent event", e);
         }
     }
 
     @Override
     public PaymentEvent getMostRecentEventByType(UUID transactionId, String eventType) {
-        logger.debug("Retrieving most recent event of type '{}' for transaction {}", 
-                eventType, transactionId);
+        validateRequiredParameters(transactionId, eventType);
         
         try {
-            PaymentEvent event = eventDAO.findMostRecentByTransactionIdAndType(transactionId, eventType);
-            if (event != null) {
-                logger.debug("Retrieved most recent event of type '{}' for transaction {}", 
-                        eventType, transactionId);
-            } else {
-                logger.debug("No events of type '{}' found for transaction {}", 
-                        eventType, transactionId);
-            }
-            return event;
-        } catch (Exception e) {
-            logger.error("Failed to retrieve most recent event of type '{}' for transaction {}: {}", 
-                    eventType, transactionId, e.getMessage(), e);
-            throw new RuntimeException("Failed to retrieve most recent transaction event by type", e);
+            return eventDAO.findMostRecentEventByType(transactionId, eventType);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve most recent event by type: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve most recent event by type", e);
         }
     }
 
     @Override
-    public int countEventsByTransactionId(UUID transactionId) {
-        logger.debug("Counting events for transaction {}", transactionId);
+    public List<PaymentEvent> getEventsByTimeRange(Instant startTime, Instant endTime, int offset, int limit) {
+        if (startTime == null && endTime == null) {
+            throw new IllegalArgumentException("At least one of startTime or endTime must be provided");
+        }
+        
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Limit must be greater than zero");
+        }
+        
+        if (offset < 0) {
+            throw new IllegalArgumentException("Offset cannot be negative");
+        }
         
         try {
-            int count = eventDAO.countByTransactionId(transactionId);
-            logger.debug("Counted {} events for transaction {}", count, transactionId);
-            return count;
-        } catch (Exception e) {
-            logger.error("Failed to count events for transaction {}: {}", 
-                    transactionId, e.getMessage(), e);
-            throw new RuntimeException("Failed to count transaction events", e);
+            PaymentFilterParams filterParams = new PaymentFilterParams()
+                .withLimitOffset(limit, offset);
+            
+            return eventDAO.findByCreatedAtBetween(startTime, endTime, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve events by time range: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve events by time range", e);
         }
     }
 
     @Override
-    public int countEventsByTransactionIdAndType(UUID transactionId, String eventType) {
-        logger.debug("Counting events of type '{}' for transaction {}", eventType, transactionId);
+    public List<PaymentEvent> getEventsByCreator(String createdBy, int offset, int limit) {
+        validateRequiredParameters(createdBy);
         
-        try {
-            int count = eventDAO.countByTransactionIdAndType(transactionId, eventType);
-            logger.debug("Counted {} events of type '{}' for transaction {}", 
-                    count, eventType, transactionId);
-            return count;
-        } catch (Exception e) {
-            logger.error("Failed to count events of type '{}' for transaction {}: {}", 
-                    eventType, transactionId, e.getMessage(), e);
-            throw new RuntimeException("Failed to count transaction events by type", e);
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Limit must be greater than zero");
         }
-    }
-
-    @Override
-    public boolean hasEventType(UUID transactionId, String eventType) {
-        logger.debug("Checking if transaction {} has events of type '{}'", transactionId, eventType);
+        
+        if (offset < 0) {
+            throw new IllegalArgumentException("Offset cannot be negative");
+        }
         
         try {
-            boolean hasEvents = eventDAO.existsByTransactionIdAndType(transactionId, eventType);
-            logger.debug("Transaction {} {} events of type '{}'", 
-                    transactionId, hasEvents ? "has" : "does not have", eventType);
-            return hasEvents;
-        } catch (Exception e) {
-            logger.error("Failed to check if transaction {} has events of type '{}': {}", 
-                    transactionId, eventType, e.getMessage(), e);
-            throw new RuntimeException("Failed to check transaction events by type", e);
+            PaymentFilterParams filterParams = new PaymentFilterParams()
+                .withLimitOffset(limit, offset);
+            
+            return eventDAO.findByCreatedBy(createdBy, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve events by creator: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve events by creator", e);
         }
     }
 
     @Override
     public List<PaymentEvent> getEventsByCorrelationId(UUID correlationId) {
-        logger.debug("Retrieving events with correlation ID {}", correlationId);
+        if (correlationId == null) {
+            throw new IllegalArgumentException("Correlation ID cannot be null");
+        }
         
         try {
-            List<PaymentEvent> events = eventDAO.findByCorrelationId(correlationId);
-            logger.debug("Retrieved {} events with correlation ID {}", events.size(), correlationId);
-            return events;
-        } catch (Exception e) {
-            logger.error("Failed to retrieve events with correlation ID {}: {}", 
-                    correlationId, e.getMessage(), e);
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            return eventDAO.findByCorrelationId(correlationId, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve events by correlation ID: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to retrieve events by correlation ID", e);
         }
     }
 
     @Override
-    public List<PaymentEvent> getEventsByUserId(String userId, int limit, int offset) {
-        logger.debug("Retrieving events created by user '{}' (limit={}, offset={})", 
-                userId, limit, offset);
+    public List<Map<String, Object>> getTransactionTimeline(UUID transactionId) {
+        validateRequiredParameters(transactionId);
         
         try {
-            List<PaymentEvent> events = eventDAO.findByCreatedBy(userId, limit, offset);
-            logger.debug("Retrieved {} events created by user '{}'", events.size(), userId);
-            return events;
-        } catch (Exception e) {
-            logger.error("Failed to retrieve events created by user '{}': {}", 
-                    userId, e.getMessage(), e);
-            throw new RuntimeException("Failed to retrieve events by user ID", e);
+            List<PaymentEvent> events = eventDAO.getTransactionTimeline(transactionId);
+            return buildTimelineFromEvents(events);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve transaction timeline: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve transaction timeline", e);
         }
     }
 
     @Override
-    public int purgeOldEvents(UUID transactionId, int retentionPeriod) {
-        logger.warn("Purging events older than {} days for transaction {}", 
-                retentionPeriod, transactionId);
+    public List<Map<String, Object>> getFilteredTimeline(UUID transactionId, List<String> eventTypes,
+                                                      Instant startTime, Instant endTime) {
+        validateRequiredParameters(transactionId);
         
-        if (retentionPeriod <= 0) {
-            throw new IllegalArgumentException("Retention period must be positive");
+        try {
+            List<PaymentEvent> allEvents = eventDAO.getTransactionTimeline(transactionId);
+            List<PaymentEvent> filteredEvents = allEvents.stream()
+                .filter(event -> {
+                    boolean matchesType = eventTypes == null || eventTypes.isEmpty() || 
+                                         eventTypes.contains(event.getEventType());
+                    boolean afterStart = startTime == null || 
+                                        !event.getCreatedAt().isBefore(startTime);
+                    boolean beforeEnd = endTime == null || 
+                                       !event.getCreatedAt().isAfter(endTime);
+                    
+                    return matchesType && afterStart && beforeEnd;
+                })
+                .collect(Collectors.toList());
+            
+            return buildTimelineFromEvents(filteredEvents);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve filtered timeline: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve filtered timeline", e);
+        }
+    }
+
+    @Override
+    public Map<String, Long> getEventCountByType(UUID transactionId) {
+        validateRequiredParameters(transactionId);
+        
+        try {
+            return eventDAO.countEventsByType(transactionId);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve event count by type: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve event count by type", e);
+        }
+    }
+
+    @Override
+    public List<PaymentEvent> getEventsByOrganization(UUID organizationId, int offset, int limit) {
+        if (organizationId == null) {
+            throw new IllegalArgumentException("Organization ID cannot be null");
+        }
+        
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Limit must be greater than zero");
+        }
+        
+        if (offset < 0) {
+            throw new IllegalArgumentException("Offset cannot be negative");
         }
         
         try {
-            // Calculate cutoff date
-            Instant cutoffDate = Instant.now().minusSeconds(retentionPeriod * 86400L);
+            PaymentFilterParams filterParams = new PaymentFilterParams()
+                .withOrganizationId(organizationId)
+                .withLimitOffset(limit, offset);
             
-            // Purge events
-            int purgedCount = eventDAO.deleteByTransactionIdAndCreatedBefore(transactionId, cutoffDate);
-            
-            logger.info("Purged {} events older than {} days for transaction {}", 
-                    purgedCount, retentionPeriod, transactionId);
-            
-            return purgedCount;
-        } catch (Exception e) {
-            logger.error("Failed to purge old events for transaction {}: {}", 
-                    transactionId, e.getMessage(), e);
-            throw new RuntimeException("Failed to purge old transaction events", e);
+            return eventDAO.findByOrganizationId(organizationId, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve events by organization: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve events by organization", e);
         }
     }
-    
-    /**
-     * Converts a map of metadata to a JSON string.
-     *
-     * @param metadata The metadata map
-     * @return JSON string representation of the metadata
-     */
-    private String convertMetadataToJson(Map<String, String> metadata) {
-        if (metadata == null || metadata.isEmpty()) {
-            return "{}";
+
+    @Override
+    public List<PaymentEvent> getEventsByAccount(UUID organizationId, UUID accountId, int offset, int limit) {
+        if (organizationId == null) {
+            throw new IllegalArgumentException("Organization ID cannot be null");
         }
         
-        StringBuilder json = new StringBuilder("{");
-        boolean first = true;
-        
-        for (Map.Entry<String, String> entry : metadata.entrySet()) {
-            if (!first) {
-                json.append(",");
-            }
-            json.append("\"").append(escapeJsonString(entry.getKey())).append("\":");
-            json.append("\"").append(escapeJsonString(entry.getValue())).append("\"");
-            first = false;
+        if (accountId == null) {
+            throw new IllegalArgumentException("Account ID cannot be null");
         }
         
-        json.append("}");
-        return json.toString();
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Limit must be greater than zero");
+        }
+        
+        if (offset < 0) {
+            throw new IllegalArgumentException("Offset cannot be negative");
+        }
+        
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams()
+                .withOrganizationId(organizationId)
+                .withAccountId(accountId)
+                .withLimitOffset(limit, offset);
+            
+            return eventDAO.findByOrganizationIdAndAccountId(organizationId, accountId, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve events by account: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve events by account", e);
+        }
     }
-    
-    /**
-     * Escapes special characters in a string for JSON encoding.
-     *
-     * @param input The input string
-     * @return The escaped string
-     */
-    private String escapeJsonString(String input) {
-        if (input == null) {
-            return "";
+
+    @Override
+    public List<PaymentEvent> getEventsByNewStatus(PaymentStatus status, int offset, int limit) {
+        if (status == null) {
+            throw new IllegalArgumentException("Status cannot be null");
         }
         
-        StringBuilder escaped = new StringBuilder();
-        for (int i = 0; i < input.length(); i++) {
-            char c = input.charAt(i);
-            switch (c) {
-                case '"':
-                    escaped.append("\\\"");
-                    break;
-                case '\\':
-                    escaped.append("\\\\");
-                    break;
-                case '/':
-                    escaped.append("\\/");
-                    break;
-                case '\b':
-                    escaped.append("\\b");
-                    break;
-                case '\f':
-                    escaped.append("\\f");
-                    break;
-                case '\n':
-                    escaped.append("\\n");
-                    break;
-                case '\r':
-                    escaped.append("\\r");
-                    break;
-                case '\t':
-                    escaped.append("\\t");
-                    break;
-                default:
-                    escaped.append(c);
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Limit must be greater than zero");
+        }
+        
+        if (offset < 0) {
+            throw new IllegalArgumentException("Offset cannot be negative");
+        }
+        
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams()
+                .withLimitOffset(limit, offset);
+            
+            return eventDAO.findByNewStatus(status.name(), filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve events by new status: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve events by new status", e);
+        }
+    }
+
+    @Override
+    public List<PaymentEvent> getEventsByPreviousStatus(PaymentStatus status, int offset, int limit) {
+        if (status == null) {
+            throw new IllegalArgumentException("Status cannot be null");
+        }
+        
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Limit must be greater than zero");
+        }
+        
+        if (offset < 0) {
+            throw new IllegalArgumentException("Offset cannot be negative");
+        }
+        
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams()
+                .withLimitOffset(limit, offset);
+            
+            return eventDAO.findByPreviousStatus(status.name(), filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve events by previous status: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve events by previous status", e);
+        }
+    }
+
+    @Override
+    public List<PaymentEvent> getAuditTrail(Instant startTime, Instant endTime, int offset, int limit) {
+        if (startTime == null && endTime == null) {
+            throw new IllegalArgumentException("At least one of startTime or endTime must be provided");
+        }
+        
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Limit must be greater than zero");
+        }
+        
+        if (offset < 0) {
+            throw new IllegalArgumentException("Offset cannot be negative");
+        }
+        
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams()
+                .withLimitOffset(limit, offset);
+            
+            return eventDAO.getAuditTrail(startTime, endTime, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve audit trail: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve audit trail", e);
+        }
+    }
+
+    @Override
+    public List<PaymentEvent> getUserActivityLog(String userId, Instant startTime, Instant endTime, 
+                                               int offset, int limit) {
+        validateRequiredParameters(userId);
+        
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Limit must be greater than zero");
+        }
+        
+        if (offset < 0) {
+            throw new IllegalArgumentException("Offset cannot be negative");
+        }
+        
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams()
+                .withLimitOffset(limit, offset);
+            
+            return eventDAO.getUserActivityLog(userId, startTime, endTime, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve user activity log: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to retrieve user activity log", e);
+        }
+    }
+
+    @Override
+    public Map<String, Object> buildEventTimeline(UUID transactionId) {
+        validateRequiredParameters(transactionId);
+        
+        try {
+            List<PaymentEvent> events = eventDAO.getTransactionTimeline(transactionId);
+            
+            if (events.isEmpty()) {
+                return Collections.emptyMap();
+            }
+            
+            // Group events by type
+            Map<String, List<PaymentEvent>> eventsByType = events.stream()
+                .collect(Collectors.groupingBy(PaymentEvent::getEventType));
+            
+            // Build timeline data
+            Map<String, Object> timeline = new HashMap<>();
+            timeline.put("transactionId", transactionId.toString());
+            timeline.put("eventCount", events.size());
+            timeline.put("firstEventTime", events.get(0).getCreatedAt());
+            timeline.put("lastEventTime", events.get(events.size() - 1).getCreatedAt());
+            timeline.put("events", buildTimelineFromEvents(events));
+            
+            // Add status transitions if available
+            List<PaymentEvent> statusChanges = eventsByType.getOrDefault("STATUS_CHANGE", Collections.emptyList());
+            if (!statusChanges.isEmpty()) {
+                List<Map<String, Object>> transitions = statusChanges.stream()
+                    .map(event -> {
+                        Map<String, Object> transition = new HashMap<>();
+                        transition.put("timestamp", event.getCreatedAt());
+                        transition.put("from", event.getPreviousStatus());
+                        transition.put("to", event.getNewStatus());
+                        transition.put("by", event.getCreatedBy());
+                        return transition;
+                    })
+                    .collect(Collectors.toList());
+                
+                timeline.put("statusTransitions", transitions);
+            }
+            
+            // Add error events if available
+            List<PaymentEvent> errors = eventsByType.getOrDefault("ERROR", Collections.emptyList());
+            if (!errors.isEmpty()) {
+                timeline.put("hasErrors", true);
+                timeline.put("errorCount", errors.size());
+            } else {
+                timeline.put("hasErrors", false);
+                timeline.put("errorCount", 0);
+            }
+            
+            return timeline;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to build event timeline: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to build event timeline", e);
+        }
+    }
+
+    @Override
+    public List<PaymentEvent> searchEventData(String jsonPath, String value, int offset, int limit) {
+        if (jsonPath == null || jsonPath.trim().isEmpty()) {
+            throw new IllegalArgumentException("JSON path cannot be null or empty");
+        }
+        
+        if (value == null) {
+            throw new IllegalArgumentException("Search value cannot be null");
+        }
+        
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Limit must be greater than zero");
+        }
+        
+        if (offset < 0) {
+            throw new IllegalArgumentException("Offset cannot be negative");
+        }
+        
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams()
+                .withLimitOffset(limit, offset);
+            
+            return eventDAO.findByEventDataContains(jsonPath, value, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to search event data: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to search event data", e);
+        }
+    }
+
+    @Override
+    public long countEventsByTransaction(UUID transactionId) {
+        validateRequiredParameters(transactionId);
+        
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            List<PaymentEvent> events = eventDAO.findByTransactionId(transactionId, filterParams);
+            return events.size();
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to count events by transaction: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to count events by transaction", e);
+        }
+    }
+
+    @Override
+    public long countEvents(String eventType, Instant startTime, Instant endTime, String createdBy) {
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            
+            // Apply filters based on provided parameters
+            List<PaymentEvent> events;
+            
+            if (eventType != null && !eventType.isEmpty()) {
+                events = eventDAO.findByEventType(eventType, filterParams);
+            } else if (startTime != null || endTime != null) {
+                events = eventDAO.findByCreatedAtBetween(startTime, endTime, filterParams);
+            } else if (createdBy != null && !createdBy.isEmpty()) {
+                events = eventDAO.findByCreatedBy(createdBy, filterParams);
+            } else {
+                // No filters provided, return 0 to avoid retrieving all events
+                return 0;
+            }
+            
+            // Apply additional filtering in memory
+            return events.stream()
+                .filter(event -> {
+                    boolean matchesType = eventType == null || eventType.isEmpty() || 
+                                         event.getEventType().equals(eventType);
+                    boolean afterStart = startTime == null || 
+                                        !event.getCreatedAt().isBefore(startTime);
+                    boolean beforeEnd = endTime == null || 
+                                       !event.getCreatedAt().isAfter(endTime);
+                    boolean matchesCreator = createdBy == null || createdBy.isEmpty() || 
+                                            event.getCreatedBy().equals(createdBy);
+                    
+                    return matchesType && afterStart && beforeEnd && matchesCreator;
+                })
+                .count();
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to count events: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to count events", e);
+        }
+    }
+
+    /**
+     * Builds a timeline representation from a list of events.
+     *
+     * @param events The list of events to include in the timeline
+     * @return A list of timeline entries with event details
+     */
+    private List<Map<String, Object>> buildTimelineFromEvents(List<PaymentEvent> events) {
+        return events.stream()
+            .sorted(Comparator.comparing(PaymentEvent::getCreatedAt))
+            .map(event -> {
+                Map<String, Object> entry = new HashMap<>();
+                entry.put("eventId", event.getEventId().toString());
+                entry.put("timestamp", event.getCreatedAt());
+                entry.put("type", event.getEventType());
+                entry.put("actor", event.getCreatedBy());
+                
+                if (event.getEventType().equals("STATUS_CHANGE")) {
+                    entry.put("previousStatus", event.getPreviousStatus());
+                    entry.put("newStatus", event.getNewStatus());
+                }
+                
+                if (event.getEventData() != null && !event.getEventData().isEmpty()) {
+                    entry.put("data", event.getEventData());
+                }
+                
+                if (event.getCorrelationId() != null) {
+                    entry.put("correlationId", event.getCorrelationId().toString());
+                }
+                
+                return entry;
+            })
+            .collect(Collectors.toList());
+    }
+
+    /**
+     * Validates that required parameters are not null.
+     *
+     * @param params The parameters to validate
+     * @throws IllegalArgumentException if any parameter is null
+     */
+    private void validateRequiredParameters(Object... params) {
+        for (int i = 0; i < params.length; i++) {
+            if (params[i] == null) {
+                throw new IllegalArgumentException("Required parameter at position " + i + " cannot be null");
+            }
+            
+            if (params[i] instanceof String && ((String) params[i]).trim().isEmpty()) {
+                throw new IllegalArgumentException("Required string parameter at position " + i + " cannot be empty");
             }
         }
-        
-        return escaped.toString();
     }
 }

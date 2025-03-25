@@ -1,13 +1,12 @@
 package io.briklabs.sample.payments.data.query;
 
-import java.sql.Timestamp;
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAdjusters;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -20,460 +19,466 @@ import org.slf4j.LoggerFactory;
  * This class provides structured representation and validation of date-based filtering
  * with support for various date formats, open-ended ranges, and relative date expressions.
  * 
- * It contains logic for converting between different date formats and generating
- * appropriate SQL conditions for date comparisons.
+ * It handles conversion between different date formats and generates appropriate SQL
+ * conditions for date comparisons in payment transaction queries.
  */
 public class DateRangeFilter {
     private static final Logger logger = LoggerFactory.getLogger(DateRangeFilter.class);
     
-    // Standard date format patterns
-    private static final DateTimeFormatter ISO_DATE_TIME_FORMATTER = DateTimeFormatter.ISO_DATE_TIME;
-    private static final DateTimeFormatter ISO_DATE_FORMATTER = DateTimeFormatter.ISO_DATE;
-    private static final DateTimeFormatter CUSTOM_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    // Common date formats supported for input parsing
+    private static final DateTimeFormatter[] DATE_FORMATTERS = {
+        DateTimeFormatter.ISO_DATE_TIME,
+        DateTimeFormatter.ISO_DATE,
+        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
+        DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"),
+        DateTimeFormatter.ofPattern("MM/dd/yyyy"),
+        DateTimeFormatter.ofPattern("MM/dd/yyyy HH:mm:ss"),
+        DateTimeFormatter.ofPattern("dd-MM-yyyy"),
+        DateTimeFormatter.ofPattern("dd-MM-yyyy HH:mm:ss")
+    };
+    
+    // Standard format for SQL timestamp parameters
+    private static final DateTimeFormatter SQL_TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     
     // Pattern for relative date expressions like "last 30 days", "this month", etc.
-    private static final Pattern RELATIVE_DATE_PATTERN = 
-            Pattern.compile("(last|this|next)\\s+(\\d+)\\s+(day|days|week|weeks|month|months|year|years)");
+    private static final Pattern RELATIVE_DATE_PATTERN = Pattern.compile(
+            "(?i)(last|this|next)\\s+(\\d+)?\\s*(day|days|week|weeks|month|months|year|years)");
     
-    // The start date (inclusive) for the range
+    // Default timezone for date operations if not specified
+    private static final ZoneId DEFAULT_TIMEZONE = ZoneId.systemDefault();
+    
+    // Start and end dates for the range
     private LocalDateTime startDate;
-    
-    // The end date (inclusive) for the range
     private LocalDateTime endDate;
     
-    // The original expression used to create this filter (for debugging)
-    private String originalExpression;
+    // Original expression for relative date ranges
+    private String relativeDateExpression;
     
-    // The timezone ID to use for date calculations
-    private ZoneId zoneId;
+    // Timezone for date operations
+    private ZoneId timezone;
     
     /**
-     * Creates a new date range filter with explicit start and end dates.
+     * Creates a new empty date range filter with the system default timezone.
+     */
+    public DateRangeFilter() {
+        this.timezone = DEFAULT_TIMEZONE;
+    }
+    
+    /**
+     * Creates a new date range filter with the specified start and end dates.
      * 
-     * @param startDate The start date (inclusive), can be null for open-ended ranges
-     * @param endDate The end date (inclusive), can be null for open-ended ranges
+     * @param startDate The start date (inclusive)
+     * @param endDate The end date (inclusive)
      */
     public DateRangeFilter(LocalDateTime startDate, LocalDateTime endDate) {
+        this();
         this.startDate = startDate;
         this.endDate = endDate;
-        this.zoneId = ZoneId.systemDefault();
     }
     
     /**
-     * Creates a new date range filter with explicit start and end dates and timezone.
+     * Creates a new date range filter with the specified start and end dates as strings.
+     * The method will attempt to parse the dates using various common formats.
      * 
-     * @param startDate The start date (inclusive), can be null for open-ended ranges
-     * @param endDate The end date (inclusive), can be null for open-ended ranges
-     * @param zoneId The timezone ID to use for date calculations
-     */
-    public DateRangeFilter(LocalDateTime startDate, LocalDateTime endDate, ZoneId zoneId) {
-        this.startDate = startDate;
-        this.endDate = endDate;
-        this.zoneId = zoneId != null ? zoneId : ZoneId.systemDefault();
-    }
-    
-    /**
-     * Creates a new date range filter from string representations of dates.
-     * 
-     * @param startDateStr The start date as string (inclusive), can be null for open-ended ranges
-     * @param endDateStr The end date as string (inclusive), can be null for open-ended ranges
-     * @throws DateTimeParseException If the date strings cannot be parsed
+     * @param startDateStr The start date string (inclusive)
+     * @param endDateStr The end date string (inclusive)
+     * @throws IllegalArgumentException If the date strings cannot be parsed
      */
     public DateRangeFilter(String startDateStr, String endDateStr) {
-        this.zoneId = ZoneId.systemDefault();
+        this();
         
         if (startDateStr != null && !startDateStr.isEmpty()) {
             this.startDate = parseDateTime(startDateStr);
-            this.originalExpression = startDateStr;
         }
         
         if (endDateStr != null && !endDateStr.isEmpty()) {
             this.endDate = parseDateTime(endDateStr);
-            this.originalExpression = (this.originalExpression != null ? 
-                    this.originalExpression + " to " : "") + endDateStr;
+            // If only date was provided (no time), set the time to end of day
+            if (endDateStr.length() <= 10) {
+                this.endDate = this.endDate.with(LocalTime.MAX);
+            }
         }
     }
     
     /**
-     * Creates a new date range filter from a relative date expression.
+     * Creates a new date range filter using a relative date expression.
+     * Supported expressions include:
+     * - "last X days/weeks/months/years"
+     * - "this day/week/month/year"
+     * - "next X days/weeks/months/years"
      * 
-     * @param expression The relative date expression (e.g., "last 30 days", "this month")
+     * @param expression The relative date expression
      * @throws IllegalArgumentException If the expression cannot be parsed
      */
     public DateRangeFilter(String expression) {
-        this.zoneId = ZoneId.systemDefault();
-        this.originalExpression = expression;
+        this();
         
         if (expression == null || expression.isEmpty()) {
             return;
         }
         
+        this.relativeDateExpression = expression.trim();
+        
         // Try to parse as a relative date expression
-        Matcher matcher = RELATIVE_DATE_PATTERN.matcher(expression.toLowerCase().trim());
+        Matcher matcher = RELATIVE_DATE_PATTERN.matcher(expression);
         if (matcher.matches()) {
-            String relation = matcher.group(1); // "last", "this", or "next"
-            int amount = Integer.parseInt(matcher.group(2)); // numeric value
-            String unit = matcher.group(3); // "day", "days", "week", etc.
+            String direction = matcher.group(1).toLowerCase(); // "last", "this", or "next"
+            String countStr = matcher.group(2);               // numeric value or null
+            String unit = matcher.group(3).toLowerCase();     // "day", "days", "week", etc.
             
-            calculateRelativeDateRange(relation, amount, unit);
+            int count = 1;
+            if (countStr != null && !countStr.isEmpty()) {
+                try {
+                    count = Integer.parseInt(countStr);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("Invalid count in relative date expression: " + expression);
+                }
+            }
+            
+            calculateRelativeDateRange(direction, count, unit);
         } else {
-            // Try some predefined expressions
-            switch (expression.toLowerCase().trim()) {
+            // Handle special predefined ranges
+            switch (expression.toLowerCase()) {
                 case "today":
-                    setTodayRange();
+                    setToday();
                     break;
                 case "yesterday":
-                    setYesterdayRange();
+                    setYesterday();
                     break;
                 case "this week":
-                    setThisWeekRange();
-                    break;
-                case "this month":
-                    setThisMonthRange();
-                    break;
-                case "this year":
-                    setThisYearRange();
+                    setThisWeek();
                     break;
                 case "last week":
-                    setLastWeekRange();
+                    setLastWeek();
+                    break;
+                case "this month":
+                    setThisMonth();
                     break;
                 case "last month":
-                    setLastMonthRange();
+                    setLastMonth();
+                    break;
+                case "this year":
+                    setThisYear();
                     break;
                 case "last year":
-                    setLastYearRange();
+                    setLastYear();
+                    break;
+                case "last 7 days":
+                    setLastNDays(7);
+                    break;
+                case "last 30 days":
+                    setLastNDays(30);
+                    break;
+                case "last 90 days":
+                    setLastNDays(90);
+                    break;
+                case "last 365 days":
+                    setLastNDays(365);
                     break;
                 default:
-                    // Try to parse as a single date (will set both start and end to the same day)
-                    try {
-                        LocalDateTime date = parseDateTime(expression);
-                        setDayRange(date.toLocalDate());
-                    } catch (DateTimeParseException e) {
-                        logger.warn("Unable to parse date expression: {}", expression);
-                        throw new IllegalArgumentException("Invalid date expression: " + expression);
-                    }
+                    throw new IllegalArgumentException("Unsupported date range expression: " + expression);
             }
         }
     }
     
     /**
-     * Parses a date-time string using multiple formats.
+     * Sets the date range to today.
      * 
-     * @param dateTimeStr The date-time string to parse
-     * @return The parsed LocalDateTime
-     * @throws DateTimeParseException If the string cannot be parsed with any supported format
+     * @return This object for method chaining
      */
-    private LocalDateTime parseDateTime(String dateTimeStr) {
-        // Try ISO date-time format first
-        try {
-            return LocalDateTime.parse(dateTimeStr, ISO_DATE_TIME_FORMATTER);
-        } catch (DateTimeParseException e) {
-            // Try ISO date format (will set time to start of day)
-            try {
-                return LocalDate.parse(dateTimeStr, ISO_DATE_FORMATTER).atStartOfDay();
-            } catch (DateTimeParseException e2) {
-                // Try custom format
-                try {
-                    return LocalDateTime.parse(dateTimeStr, CUSTOM_DATE_FORMATTER);
-                } catch (DateTimeParseException e3) {
-                    // If all parsing attempts fail, throw the original exception
-                    logger.warn("Failed to parse date string: {}", dateTimeStr);
-                    throw new DateTimeParseException(
-                            "Unable to parse date-time string with any supported format", 
-                            dateTimeStr, 
-                            e.getErrorIndex());
-                }
-            }
+    public DateRangeFilter setToday() {
+        LocalDate today = LocalDate.now(timezone);
+        this.startDate = today.atStartOfDay();
+        this.endDate = today.atTime(LocalTime.MAX);
+        return this;
+    }
+    
+    /**
+     * Sets the date range to yesterday.
+     * 
+     * @return This object for method chaining
+     */
+    public DateRangeFilter setYesterday() {
+        LocalDate yesterday = LocalDate.now(timezone).minusDays(1);
+        this.startDate = yesterday.atStartOfDay();
+        this.endDate = yesterday.atTime(LocalTime.MAX);
+        return this;
+    }
+    
+    /**
+     * Sets the date range to this week (Monday to Sunday).
+     * 
+     * @return This object for method chaining
+     */
+    public DateRangeFilter setThisWeek() {
+        LocalDate today = LocalDate.now(timezone);
+        this.startDate = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)).atStartOfDay();
+        this.endDate = today.with(TemporalAdjusters.nextOrSame(DayOfWeek.SUNDAY)).atTime(LocalTime.MAX);
+        return this;
+    }
+    
+    /**
+     * Sets the date range to last week (previous Monday to Sunday).
+     * 
+     * @return This object for method chaining
+     */
+    public DateRangeFilter setLastWeek() {
+        LocalDate today = LocalDate.now(timezone);
+        LocalDate previousMonday = today.with(TemporalAdjusters.previous(DayOfWeek.MONDAY));
+        this.startDate = previousMonday.atStartOfDay();
+        this.endDate = previousMonday.plusDays(6).atTime(LocalTime.MAX);
+        return this;
+    }
+    
+    /**
+     * Sets the date range to this month (1st to last day of current month).
+     * 
+     * @return This object for method chaining
+     */
+    public DateRangeFilter setThisMonth() {
+        LocalDate today = LocalDate.now(timezone);
+        this.startDate = today.withDayOfMonth(1).atStartOfDay();
+        this.endDate = today.with(TemporalAdjusters.lastDayOfMonth()).atTime(LocalTime.MAX);
+        return this;
+    }
+    
+    /**
+     * Sets the date range to last month (1st to last day of previous month).
+     * 
+     * @return This object for method chaining
+     */
+    public DateRangeFilter setLastMonth() {
+        LocalDate today = LocalDate.now(timezone);
+        LocalDate firstDayOfLastMonth = today.minusMonths(1).withDayOfMonth(1);
+        this.startDate = firstDayOfLastMonth.atStartOfDay();
+        this.endDate = firstDayOfLastMonth.with(TemporalAdjusters.lastDayOfMonth()).atTime(LocalTime.MAX);
+        return this;
+    }
+    
+    /**
+     * Sets the date range to this year (January 1st to December 31st of current year).
+     * 
+     * @return This object for method chaining
+     */
+    public DateRangeFilter setThisYear() {
+        LocalDate today = LocalDate.now(timezone);
+        this.startDate = today.withDayOfYear(1).atStartOfDay();
+        this.endDate = today.withMonth(12).withDayOfMonth(31).atTime(LocalTime.MAX);
+        return this;
+    }
+    
+    /**
+     * Sets the date range to last year (January 1st to December 31st of previous year).
+     * 
+     * @return This object for method chaining
+     */
+    public DateRangeFilter setLastYear() {
+        LocalDate today = LocalDate.now(timezone);
+        LocalDate lastYear = today.minusYears(1);
+        this.startDate = lastYear.withDayOfYear(1).atStartOfDay();
+        this.endDate = lastYear.withMonth(12).withDayOfMonth(31).atTime(LocalTime.MAX);
+        return this;
+    }
+    
+    /**
+     * Sets the date range to the last N days (including today).
+     * 
+     * @param days The number of days to include
+     * @return This object for method chaining
+     */
+    public DateRangeFilter setLastNDays(int days) {
+        if (days <= 0) {
+            throw new IllegalArgumentException("Number of days must be positive");
         }
+        
+        LocalDate today = LocalDate.now(timezone);
+        this.startDate = today.minusDays(days - 1).atStartOfDay();
+        this.endDate = today.atTime(LocalTime.MAX);
+        return this;
     }
     
     /**
      * Calculates a date range based on a relative expression.
      * 
-     * @param relation The relation ("last", "this", or "next")
-     * @param amount The numeric amount
-     * @param unit The time unit ("day", "days", "week", etc.)
+     * @param direction "last", "this", or "next"
+     * @param count The number of units
+     * @param unit "day", "days", "week", "weeks", etc.
      */
-    private void calculateRelativeDateRange(String relation, int amount, String unit) {
-        LocalDateTime now = LocalDateTime.now(zoneId);
+    private void calculateRelativeDateRange(String direction, int count, String unit) {
+        LocalDate today = LocalDate.now(timezone);
+        LocalDate start = today;
+        LocalDate end = today;
         
-        // Normalize the unit to singular form
+        // Normalize unit to singular form
         String normalizedUnit = unit.endsWith("s") ? unit.substring(0, unit.length() - 1) : unit;
         
-        switch (relation) {
+        switch (direction) {
             case "last":
-                calculatePastRange(now, amount, normalizedUnit);
+                switch (normalizedUnit) {
+                    case "day":
+                        if (count == 1) {
+                            // Special case for "last day" (yesterday)
+                            start = today.minusDays(1);
+                            end = start;
+                        } else {
+                            // "last N days" includes today
+                            start = today.minusDays(count - 1);
+                            end = today;
+                        }
+                        break;
+                    case "week":
+                        if (count == 1) {
+                            // Special case for "last week" (previous Monday-Sunday)
+                            start = today.with(TemporalAdjusters.previous(DayOfWeek.MONDAY));
+                            end = start.plusDays(6);
+                        } else {
+                            // "last N weeks" starts N weeks ago on Monday
+                            start = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)).minusWeeks(count - 1);
+                            end = today;
+                        }
+                        break;
+                    case "month":
+                        if (count == 1) {
+                            // Special case for "last month" (previous month)
+                            start = today.minusMonths(1).withDayOfMonth(1);
+                            end = start.with(TemporalAdjusters.lastDayOfMonth());
+                        } else {
+                            // "last N months" starts N months ago on the 1st
+                            start = today.minusMonths(count - 1).withDayOfMonth(1);
+                            end = today;
+                        }
+                        break;
+                    case "year":
+                        if (count == 1) {
+                            // Special case for "last year" (previous year)
+                            start = today.minusYears(1).withDayOfYear(1);
+                            end = start.withMonth(12).withDayOfMonth(31);
+                        } else {
+                            // "last N years" starts N years ago on January 1st
+                            start = today.minusYears(count - 1).withDayOfYear(1);
+                            end = today;
+                        }
+                        break;
+                    default:
+                        throw new IllegalArgumentException("Unsupported time unit: " + unit);
+                }
                 break;
+                
             case "this":
-                calculateCurrentRange(now, normalizedUnit);
+                switch (normalizedUnit) {
+                    case "day":
+                        // "this day" is today
+                        start = today;
+                        end = today;
+                        break;
+                    case "week":
+                        // "this week" is current Monday-Sunday
+                        start = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+                        end = start.plusDays(6);
+                        break;
+                    case "month":
+                        // "this month" is current month
+                        start = today.withDayOfMonth(1);
+                        end = today.with(TemporalAdjusters.lastDayOfMonth());
+                        break;
+                    case "year":
+                        // "this year" is current year
+                        start = today.withDayOfYear(1);
+                        end = today.withMonth(12).withDayOfMonth(31);
+                        break;
+                    default:
+                        throw new IllegalArgumentException("Unsupported time unit: " + unit);
+                }
                 break;
+                
             case "next":
-                calculateFutureRange(now, amount, normalizedUnit);
+                switch (normalizedUnit) {
+                    case "day":
+                        if (count == 1) {
+                            // Special case for "next day" (tomorrow)
+                            start = today.plusDays(1);
+                            end = start;
+                        } else {
+                            // "next N days" starts tomorrow and goes forward N days
+                            start = today.plusDays(1);
+                            end = today.plusDays(count);
+                        }
+                        break;
+                    case "week":
+                        if (count == 1) {
+                            // Special case for "next week" (next Monday-Sunday)
+                            start = today.with(TemporalAdjusters.next(DayOfWeek.MONDAY));
+                            end = start.plusDays(6);
+                        } else {
+                            // "next N weeks" starts next Monday and goes forward N weeks
+                            start = today.with(TemporalAdjusters.next(DayOfWeek.MONDAY));
+                            end = start.plusWeeks(count - 1).plusDays(6);
+                        }
+                        break;
+                    case "month":
+                        if (count == 1) {
+                            // Special case for "next month" (next month)
+                            start = today.plusMonths(1).withDayOfMonth(1);
+                            end = start.with(TemporalAdjusters.lastDayOfMonth());
+                        } else {
+                            // "next N months" starts next month and goes forward N months
+                            start = today.plusMonths(1).withDayOfMonth(1);
+                            end = today.plusMonths(count).with(TemporalAdjusters.lastDayOfMonth());
+                        }
+                        break;
+                    case "year":
+                        if (count == 1) {
+                            // Special case for "next year" (next year)
+                            start = today.plusYears(1).withDayOfYear(1);
+                            end = start.withMonth(12).withDayOfMonth(31);
+                        } else {
+                            // "next N years" starts next year and goes forward N years
+                            start = today.plusYears(1).withDayOfYear(1);
+                            end = today.plusYears(count).withMonth(12).withDayOfMonth(31);
+                        }
+                        break;
+                    default:
+                        throw new IllegalArgumentException("Unsupported time unit: " + unit);
+                }
                 break;
+                
             default:
-                throw new IllegalArgumentException("Unsupported relation: " + relation);
-        }
-    }
-    
-    /**
-     * Calculates a date range for a past period.
-     * 
-     * @param now The current date-time
-     * @param amount The amount to go back
-     * @param unit The time unit
-     */
-    private void calculatePastRange(LocalDateTime now, int amount, String unit) {
-        switch (unit) {
-            case "day":
-                endDate = now;
-                startDate = now.minusDays(amount);
-                break;
-            case "week":
-                endDate = now;
-                startDate = now.minusWeeks(amount);
-                break;
-            case "month":
-                endDate = now;
-                startDate = now.minusMonths(amount);
-                break;
-            case "year":
-                endDate = now;
-                startDate = now.minusYears(amount);
-                break;
-            default:
-                throw new IllegalArgumentException("Unsupported time unit: " + unit);
-        }
-    }
-    
-    /**
-     * Calculates a date range for the current period.
-     * 
-     * @param now The current date-time
-     * @param unit The time unit
-     */
-    private void calculateCurrentRange(LocalDateTime now, String unit) {
-        switch (unit) {
-            case "day":
-                setDayRange(now.toLocalDate());
-                break;
-            case "week":
-                setWeekRange(now.toLocalDate());
-                break;
-            case "month":
-                setMonthRange(now.toLocalDate());
-                break;
-            case "year":
-                setYearRange(now.toLocalDate());
-                break;
-            default:
-                throw new IllegalArgumentException("Unsupported time unit: " + unit);
-        }
-    }
-    
-    /**
-     * Calculates a date range for a future period.
-     * 
-     * @param now The current date-time
-     * @param amount The amount to go forward
-     * @param unit The time unit
-     */
-    private void calculateFutureRange(LocalDateTime now, int amount, String unit) {
-        switch (unit) {
-            case "day":
-                startDate = now;
-                endDate = now.plusDays(amount);
-                break;
-            case "week":
-                startDate = now;
-                endDate = now.plusWeeks(amount);
-                break;
-            case "month":
-                startDate = now;
-                endDate = now.plusMonths(amount);
-                break;
-            case "year":
-                startDate = now;
-                endDate = now.plusYears(amount);
-                break;
-            default:
-                throw new IllegalArgumentException("Unsupported time unit: " + unit);
-        }
-    }
-    
-    /**
-     * Sets the date range to cover a single day.
-     * 
-     * @param date The date to cover
-     */
-    private void setDayRange(LocalDate date) {
-        startDate = date.atStartOfDay();
-        endDate = date.atTime(LocalTime.MAX);
-    }
-    
-    /**
-     * Sets the date range to cover a week containing the specified date.
-     * 
-     * @param date A date within the week
-     */
-    private void setWeekRange(LocalDate date) {
-        // Assuming weeks start on Monday
-        LocalDate startOfWeek = date.with(TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY));
-        LocalDate endOfWeek = startOfWeek.plusDays(6); // Sunday
-        
-        startDate = startOfWeek.atStartOfDay();
-        endDate = endOfWeek.atTime(LocalTime.MAX);
-    }
-    
-    /**
-     * Sets the date range to cover a month containing the specified date.
-     * 
-     * @param date A date within the month
-     */
-    private void setMonthRange(LocalDate date) {
-        LocalDate startOfMonth = date.withDayOfMonth(1);
-        LocalDate endOfMonth = date.with(TemporalAdjusters.lastDayOfMonth());
-        
-        startDate = startOfMonth.atStartOfDay();
-        endDate = endOfMonth.atTime(LocalTime.MAX);
-    }
-    
-    /**
-     * Sets the date range to cover a year containing the specified date.
-     * 
-     * @param date A date within the year
-     */
-    private void setYearRange(LocalDate date) {
-        LocalDate startOfYear = date.withDayOfYear(1);
-        LocalDate endOfYear = date.withMonth(12).with(TemporalAdjusters.lastDayOfMonth());
-        
-        startDate = startOfYear.atStartOfDay();
-        endDate = endOfYear.atTime(LocalTime.MAX);
-    }
-    
-    /**
-     * Sets the date range to cover today.
-     */
-    private void setTodayRange() {
-        setDayRange(LocalDate.now(zoneId));
-    }
-    
-    /**
-     * Sets the date range to cover yesterday.
-     */
-    private void setYesterdayRange() {
-        setDayRange(LocalDate.now(zoneId).minusDays(1));
-    }
-    
-    /**
-     * Sets the date range to cover the current week.
-     */
-    private void setThisWeekRange() {
-        setWeekRange(LocalDate.now(zoneId));
-    }
-    
-    /**
-     * Sets the date range to cover the current month.
-     */
-    private void setThisMonthRange() {
-        setMonthRange(LocalDate.now(zoneId));
-    }
-    
-    /**
-     * Sets the date range to cover the current year.
-     */
-    private void setThisYearRange() {
-        setYearRange(LocalDate.now(zoneId));
-    }
-    
-    /**
-     * Sets the date range to cover the previous week.
-     */
-    private void setLastWeekRange() {
-        setWeekRange(LocalDate.now(zoneId).minusWeeks(1));
-    }
-    
-    /**
-     * Sets the date range to cover the previous month.
-     */
-    private void setLastMonthRange() {
-        setMonthRange(LocalDate.now(zoneId).minusMonths(1));
-    }
-    
-    /**
-     * Sets the date range to cover the previous year.
-     */
-    private void setLastYearRange() {
-        setYearRange(LocalDate.now(zoneId).minusYears(1));
-    }
-    
-    /**
-     * Validates the date range for consistency.
-     * 
-     * @throws IllegalArgumentException If the date range is invalid
-     */
-    public void validate() {
-        if (startDate != null && endDate != null && startDate.isAfter(endDate)) {
-            logger.warn("Invalid date range: start date {} is after end date {}", startDate, endDate);
-            throw new IllegalArgumentException("Start date cannot be after end date");
-        }
-    }
-    
-    /**
-     * Applies this date range filter to a query builder.
-     * 
-     * @param queryBuilder The query builder to apply the filter to
-     * @param columnName The database column name to filter on
-     * @return The updated query builder
-     */
-    public PaymentQueryBuilder applyTo(PaymentQueryBuilder queryBuilder, String columnName) {
-        if (startDate != null && endDate != null) {
-            queryBuilder.and(columnName + " BETWEEN ? AND ?")
-                       .addParameter(Timestamp.valueOf(startDate))
-                       .addParameter(Timestamp.valueOf(endDate));
-        } else if (startDate != null) {
-            queryBuilder.and(columnName + " >= ?")
-                       .addParameter(Timestamp.valueOf(startDate));
-        } else if (endDate != null) {
-            queryBuilder.and(columnName + " <= ?")
-                       .addParameter(Timestamp.valueOf(endDate));
+                throw new IllegalArgumentException("Unsupported direction: " + direction);
         }
         
-        return queryBuilder;
+        this.startDate = start.atStartOfDay();
+        this.endDate = end.atTime(LocalTime.MAX);
     }
     
     /**
-     * Generates an SQL condition for this date range filter.
+     * Attempts to parse a date/time string using various common formats.
      * 
-     * @param columnName The database column name to filter on
-     * @return The SQL condition string, or null if no filter is applied
+     * @param dateStr The date string to parse
+     * @return The parsed LocalDateTime
+     * @throws IllegalArgumentException If the string cannot be parsed as a date
      */
-    public String toSqlCondition(String columnName) {
-        if (startDate != null && endDate != null) {
-            return columnName + " BETWEEN ? AND ?";
-        } else if (startDate != null) {
-            return columnName + " >= ?";
-        } else if (endDate != null) {
-            return columnName + " <= ?";
+    private LocalDateTime parseDateTime(String dateStr) {
+        if (dateStr == null || dateStr.isEmpty()) {
+            return null;
         }
         
-        return null;
-    }
-    
-    /**
-     * Gets the parameters for the SQL condition.
-     * 
-     * @return An array of parameters, or an empty array if no filter is applied
-     */
-    public Object[] getSqlParameters() {
-        if (startDate != null && endDate != null) {
-            return new Object[] { Timestamp.valueOf(startDate), Timestamp.valueOf(endDate) };
-        } else if (startDate != null) {
-            return new Object[] { Timestamp.valueOf(startDate) };
-        } else if (endDate != null) {
-            return new Object[] { Timestamp.valueOf(endDate) };
+        // Try each formatter in sequence
+        for (DateTimeFormatter formatter : DATE_FORMATTERS) {
+            try {
+                // If the string contains only a date (no time), append the start/end of day
+                if (dateStr.length() <= 10) {
+                    return LocalDate.parse(dateStr, formatter).atStartOfDay();
+                } else {
+                    return LocalDateTime.parse(dateStr, formatter);
+                }
+            } catch (DateTimeParseException e) {
+                // Try the next formatter
+                continue;
+            }
         }
         
-        return new Object[0];
+        // If we get here, none of the formatters worked
+        throw new IllegalArgumentException("Unable to parse date string: " + dateStr);
     }
     
     /**
@@ -489,7 +494,7 @@ public class DateRangeFilter {
      * Sets the start date of the range.
      * 
      * @param startDate The start date to set
-     * @return This filter for method chaining
+     * @return This object for method chaining
      */
     public DateRangeFilter setStartDate(LocalDateTime startDate) {
         this.startDate = startDate;
@@ -509,7 +514,7 @@ public class DateRangeFilter {
      * Sets the end date of the range.
      * 
      * @param endDate The end date to set
-     * @return This filter for method chaining
+     * @return This object for method chaining
      */
     public DateRangeFilter setEndDate(LocalDateTime endDate) {
         this.endDate = endDate;
@@ -517,77 +522,168 @@ public class DateRangeFilter {
     }
     
     /**
-     * Gets the timezone ID used for date calculations.
+     * Gets the timezone used for date operations.
      * 
-     * @return The timezone ID
+     * @return The timezone
      */
-    public ZoneId getZoneId() {
-        return zoneId;
+    public ZoneId getTimezone() {
+        return timezone;
     }
     
     /**
-     * Sets the timezone ID to use for date calculations.
+     * Sets the timezone for date operations.
      * 
-     * @param zoneId The timezone ID to set
-     * @return This filter for method chaining
+     * @param timezone The timezone to set
+     * @return This object for method chaining
      */
-    public DateRangeFilter setZoneId(ZoneId zoneId) {
-        this.zoneId = zoneId != null ? zoneId : ZoneId.systemDefault();
+    public DateRangeFilter setTimezone(ZoneId timezone) {
+        this.timezone = timezone != null ? timezone : DEFAULT_TIMEZONE;
         return this;
     }
     
     /**
-     * Gets the original expression used to create this filter.
+     * Gets the relative date expression if one was used.
      * 
-     * @return The original expression, or null if not created from an expression
+     * @return The relative date expression, or null if not set
      */
-    public String getOriginalExpression() {
-        return originalExpression;
+    public String getRelativeDateExpression() {
+        return relativeDateExpression;
     }
     
     /**
-     * Checks if this date range filter has any constraints.
+     * Checks if this filter has any constraints.
      * 
-     * @return true if either start date or end date is set, false otherwise
+     * @return true if either start or end date is set, false otherwise
      */
     public boolean hasConstraints() {
         return startDate != null || endDate != null;
     }
     
     /**
-     * Calculates the duration of this date range in days.
+     * Validates the date range for consistency.
      * 
-     * @return The duration in days, or -1 if the range is open-ended
+     * @throws IllegalArgumentException If the date range is invalid
      */
-    public long getDurationInDays() {
-        if (startDate != null && endDate != null) {
-            return ChronoUnit.DAYS.between(startDate.toLocalDate(), endDate.toLocalDate()) + 1;
+    public void validate() {
+        if (startDate != null && endDate != null && startDate.isAfter(endDate)) {
+            throw new IllegalArgumentException("Start date must be before or equal to end date");
         }
-        return -1;
     }
     
     /**
-     * Returns a string representation of this date range filter.
+     * Generates a SQL condition for this date range filter.
      * 
-     * @return A string representation
+     * @param columnName The database column name to filter on
+     * @return A SQL condition string, or null if no constraints
      */
-    @Override
-    public String toString() {
-        if (originalExpression != null) {
-            return "DateRangeFilter[" + originalExpression + "]";
+    public String toSqlCondition(String columnName) {
+        if (!hasConstraints()) {
+            return null;
         }
         
-        StringBuilder sb = new StringBuilder("DateRangeFilter[");
-        if (startDate != null) {
-            sb.append("from=").append(startDate);
-        }
+        StringBuilder condition = new StringBuilder();
+        
         if (startDate != null && endDate != null) {
-            sb.append(", ");
+            // Both start and end dates are specified
+            condition.append(columnName)
+                    .append(" BETWEEN '")
+                    .append(startDate.format(SQL_TIMESTAMP_FORMAT))
+                    .append("' AND '")
+                    .append(endDate.format(SQL_TIMESTAMP_FORMAT))
+                    .append("'");
+        } else if (startDate != null) {
+            // Only start date is specified
+            condition.append(columnName)
+                    .append(" >= '")
+                    .append(startDate.format(SQL_TIMESTAMP_FORMAT))
+                    .append("'");
+        } else if (endDate != null) {
+            // Only end date is specified
+            condition.append(columnName)
+                    .append(" <= '")
+                    .append(endDate.format(SQL_TIMESTAMP_FORMAT))
+                    .append("'");
         }
+        
+        return condition.toString();
+    }
+    
+    /**
+     * Adds this date range filter's parameters to a prepared statement.
+     * 
+     * @param statement The prepared statement
+     * @param startIndex The parameter index to start with
+     * @return The next parameter index
+     * @throws java.sql.SQLException If a database access error occurs
+     */
+    public int addParametersToStatement(java.sql.PreparedStatement statement, int startIndex) 
+            throws java.sql.SQLException {
+        int index = startIndex;
+        
+        if (startDate != null) {
+            statement.setTimestamp(index++, java.sql.Timestamp.valueOf(startDate));
+        }
+        
         if (endDate != null) {
-            sb.append("to=").append(endDate);
+            statement.setTimestamp(index++, java.sql.Timestamp.valueOf(endDate));
         }
-        sb.append("]");
-        return sb.toString();
+        
+        return index;
+    }
+    
+    /**
+     * Generates a parameterized SQL condition for this date range filter.
+     * 
+     * @param columnName The database column name to filter on
+     * @return A SQL condition string with ? placeholders, or null if no constraints
+     */
+    public String toParameterizedSqlCondition(String columnName) {
+        if (!hasConstraints()) {
+            return null;
+        }
+        
+        StringBuilder condition = new StringBuilder();
+        
+        if (startDate != null && endDate != null) {
+            // Both start and end dates are specified
+            condition.append(columnName)
+                    .append(" BETWEEN ? AND ?");
+        } else if (startDate != null) {
+            // Only start date is specified
+            condition.append(columnName)
+                    .append(" >= ?");
+        } else if (endDate != null) {
+            // Only end date is specified
+            condition.append(columnName)
+                    .append(" <= ?");
+        }
+        
+        return condition.toString();
+    }
+    
+    /**
+     * Creates a copy of this date range filter.
+     * 
+     * @return A new date range filter with the same values
+     */
+    public DateRangeFilter copy() {
+        DateRangeFilter copy = new DateRangeFilter();
+        copy.startDate = this.startDate;
+        copy.endDate = this.endDate;
+        copy.relativeDateExpression = this.relativeDateExpression;
+        copy.timezone = this.timezone;
+        return copy;
+    }
+    
+    @Override
+    public String toString() {
+        if (relativeDateExpression != null) {
+            return "DateRangeFilter{" + relativeDateExpression + "}";
+        } else {
+            return "DateRangeFilter{" +
+                    "startDate=" + (startDate != null ? startDate.format(DateTimeFormatter.ISO_DATE_TIME) : "null") +
+                    ", endDate=" + (endDate != null ? endDate.format(DateTimeFormatter.ISO_DATE_TIME) : "null") +
+                    "}";
+        }
     }
 }

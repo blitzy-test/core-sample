@@ -7,26 +7,33 @@ import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Properties;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yaml.snakeyaml.Yaml;
 
+/**
+ * Configuration source for the application.
+ * Loads configuration from YAML files and environment variables.
+ * Provides methods for retrieving configuration values with proper validation.
+ */
 public class ConfigSource {
 
 	private static final Logger logger = LoggerFactory.getLogger(ConfigSource.class);
 	private Map<String, Object> properties = new HashMap<>();
+	private Map<String, Object> paymentProperties = new HashMap<>();
+	private boolean paymentModuleEnabled = false;
 
 	/**
-	 * Default constructor that loads configuration from the BRIK_CONFIG environment variable.
+	 * Constructs a new ConfigSource using the BRIK_CONFIG environment variable.
 	 */
 	public ConfigSource() {
 		this(System.getenv("BRIK_CONFIG"));
 	}
 
 	/**
-	 * Constructor that loads configuration from the specified path.
-	 * Falls back to BRIK_CONFIG environment variable if path is null.
+	 * Constructs a new ConfigSource with the specified configuration path.
 	 * 
 	 * @param path Path to the configuration file
 	 */
@@ -39,6 +46,9 @@ public class ConfigSource {
 
 				Yaml yaml = new Yaml();
 				properties = yaml.load(fis);
+				
+				// Load payment configuration if enabled
+				loadPaymentConfig();
 			} catch (FileNotFoundException e) {
 				logger.warn("Cannot read the provided path {}, it will be ignored and other config sources will be attempted", configPath);
 			}
@@ -46,21 +56,24 @@ public class ConfigSource {
 	}
 
 	/**
-	 * Constructor that loads configuration from the provided input stream.
+	 * Constructs a new ConfigSource with the specified input stream.
 	 * 
 	 * @param is Input stream containing configuration data
 	 */
 	public ConfigSource(InputStream is) {
 		Yaml yaml = new Yaml();
 		properties = yaml.load(is);
+		
+		// Load payment configuration if enabled
+		loadPaymentConfig();
 	}
 
 	/**
-	 * Gets a configuration value by property path.
-	 * Checks environment variables first, then falls back to the loaded configuration.
+	 * Gets a configuration value by property name.
+	 * Checks environment variables first, then the loaded configuration.
 	 * 
-	 * @param property Dot-separated property path
-	 * @return The configuration value, or null if not found
+	 * @param property Property name (dot-separated)
+	 * @return Property value or null if not found
 	 */
 	@SuppressWarnings("unchecked")
 	public String get(String property) {
@@ -108,7 +121,7 @@ public class ConfigSource {
 	 * Note, it's package protected, you need to explicitly subclass ConfigSource to use it
 	 * 
 	 * @param key Configuration key
-	 * @param value Value to set
+	 * @param value Configuration value
 	 * @return true if the override was successful, false otherwise
 	 */
 	@SuppressWarnings("unchecked")
@@ -156,9 +169,9 @@ public class ConfigSource {
 	/**
 	 * Gets a configuration value with a default fallback.
 	 * 
-	 * @param property Dot-separated property path
-	 * @param defaultValue Default value to return if property is not found
-	 * @return The configuration value, or defaultValue if not found
+	 * @param property Property name
+	 * @param defaultValue Default value if property is not found
+	 * @return Property value or default value
 	 */
 	public String getOrDefault(String property, String defaultValue) {
 		String result = get(property);
@@ -168,9 +181,9 @@ public class ConfigSource {
 	/**
 	 * Gets an integer configuration value with a default fallback.
 	 * 
-	 * @param property Dot-separated property path
-	 * @param defaultValue Default value to return if property is not found
-	 * @return The configuration value as an integer, or defaultValue if not found
+	 * @param property Property name
+	 * @param defaultValue Default value if property is not found
+	 * @return Property value as integer or default value
 	 */
 	public int getOrDefault(String property, int defaultValue) {
 		String value = get(property);
@@ -178,34 +191,11 @@ public class ConfigSource {
 	}
 
 	/**
-	 * Gets a boolean configuration value with a default fallback.
-	 * 
-	 * @param property Dot-separated property path
-	 * @param defaultValue Default value to return if property is not found
-	 * @return The configuration value as a boolean, or defaultValue if not found
-	 */
-	public boolean getOrDefault(String property, boolean defaultValue) {
-		String value = get(property);
-		return value != null ? Boolean.parseBoolean(value) : defaultValue;
-	}
-
-	/**
-	 * Gets a required configuration value, throwing an exception if not found.
-	 * 
-	 * @param property Dot-separated property path
-	 * @return The configuration value
-	 * @throws NullPointerException if the property is not found
-	 */
-	public String getRequired(String property) {
-		return Objects.requireNonNull(get(property), () -> "Missing required config variable " + property);
-	}
-
-	/**
 	 * Gets a long configuration value with a default fallback.
 	 * 
-	 * @param property Dot-separated property path
-	 * @param defaultValue Default value to return if property is not found
-	 * @return The configuration value as a long, or defaultValue if not found
+	 * @param property Property name
+	 * @param defaultValue Default value if property is not found
+	 * @return Property value as long or default value
 	 */
 	public long getOrDefault(String property, long defaultValue) {
 		String value = get(property);
@@ -213,46 +203,33 @@ public class ConfigSource {
 	}
 
 	/**
-	 * Gets a required integer configuration value, throwing an exception if not found.
+	 * Gets a boolean configuration value with a default fallback.
 	 * 
-	 * @param property Dot-separated property path
-	 * @return The configuration value as an integer
-	 * @throws NullPointerException if the property is not found
-	 * @throws NumberFormatException if the property cannot be parsed as an integer
+	 * @param property Property name
+	 * @param defaultValue Default value if property is not found
+	 * @return Property value as boolean or default value
 	 */
-	public int getRequiredInt(String property) {
-		return Integer.parseInt(getRequired(property));
+	public boolean getOrDefault(String property, boolean defaultValue) {
+		String value = get(property);
+		return value != null ? Boolean.parseBoolean(value) : defaultValue;
 	}
 
 	/**
-	 * Gets a required long configuration value, throwing an exception if not found.
+	 * Gets a required configuration value.
 	 * 
-	 * @param property Dot-separated property path
-	 * @return The configuration value as a long
+	 * @param property Property name
+	 * @return Property value
 	 * @throws NullPointerException if the property is not found
-	 * @throws NumberFormatException if the property cannot be parsed as a long
 	 */
-	public long getRequiredLong(String property) {
-		return Long.parseLong(getRequired(property));
+	public String getRequired(String property) {
+		return Objects.requireNonNull(get(property), () -> "Missing required config variable " + property);
 	}
 
 	/**
-	 * Gets a required boolean configuration value, throwing an exception if not found.
-	 * 
-	 * @param property Dot-separated property path
-	 * @return The configuration value as a boolean
-	 * @throws NullPointerException if the property is not found
-	 */
-	public boolean getRequiredBoolean(String property) {
-		return Boolean.parseBoolean(getRequired(property));
-	}
-
-	/**
-	 * Gets an environment variable.
-	 * Protected to allow mocking in tests.
+	 * Gets an environment variable value.
 	 * 
 	 * @param key Environment variable name
-	 * @return The environment variable value, or null if not found
+	 * @return Environment variable value or null if not set
 	 */
 	protected String getEnv(String key) {
 		return System.getenv(key);
@@ -260,9 +237,8 @@ public class ConfigSource {
 
 	/**
 	 * Gets all environment variables.
-	 * Protected to allow mocking in tests.
 	 * 
-	 * @return Map of all environment variables
+	 * @return Map of environment variables
 	 */
 	protected Map<String, String> getAllEnv() {
 		return System.getenv();
@@ -271,7 +247,7 @@ public class ConfigSource {
 	/**
 	 * Checks if a configuration section exists.
 	 * 
-	 * @param property Dot-separated property path
+	 * @param property Property name (section path)
 	 * @return true if the section exists, false otherwise
 	 */
 	@SuppressWarnings("unchecked")
@@ -315,170 +291,341 @@ public class ConfigSource {
 
 		return result;
 	}
-
+	
 	/**
-	 * Gets a payment-specific configuration value with a default fallback.
-	 * Automatically prefixes the property with "payment."
-	 * 
-	 * @param property Dot-separated property path (without "payment." prefix)
-	 * @param defaultValue Default value to return if property is not found
-	 * @return The configuration value, or defaultValue if not found
+	 * Loads payment configuration if enabled.
+	 * Reads the payment configuration file specified in the main configuration.
 	 */
-	public String getPaymentConfig(String property, String defaultValue) {
-		return getOrDefault("payment." + property, defaultValue);
+	private void loadPaymentConfig() {
+		// Check if payment module is enabled
+		paymentModuleEnabled = getOrDefault("brik.payments.enabled", false);
+		
+		if (!paymentModuleEnabled) {
+			logger.info("Payment module is disabled - skipping payment configuration loading");
+			return;
+		}
+		
+		// Get payment configuration file path
+		String paymentConfigFile = getOrDefault("brik.payments.configFile", "payment-config.yaml");
+		logger.info("Payment module is enabled - loading payment configuration from {}", paymentConfigFile);
+		
+		try {
+			File configFile = new File(paymentConfigFile);
+			if (!configFile.exists()) {
+				// Try to load from classpath if file doesn't exist
+				InputStream is = getClass().getClassLoader().getResourceAsStream(paymentConfigFile);
+				if (is != null) {
+					loadPaymentConfigFromStream(is);
+				} else {
+					logger.warn("Payment configuration file not found: {} - using default values", paymentConfigFile);
+				}
+			} else {
+				// Load from file
+				FileInputStream fis = new FileInputStream(configFile);
+				loadPaymentConfigFromStream(fis);
+			}
+		} catch (Exception e) {
+			logger.error("Failed to load payment configuration: {}", e.getMessage(), e);
+		}
 	}
-
+	
 	/**
-	 * Gets a required payment-specific configuration value, throwing an exception if not found.
-	 * Automatically prefixes the property with "payment."
+	 * Loads payment configuration from an input stream.
 	 * 
-	 * @param property Dot-separated property path (without "payment." prefix)
-	 * @return The configuration value
+	 * @param is Input stream containing payment configuration
+	 */
+	private void loadPaymentConfigFromStream(InputStream is) {
+		try {
+			Yaml yaml = new Yaml();
+			paymentProperties = yaml.load(is);
+			logger.info("Payment configuration loaded successfully");
+		} catch (Exception e) {
+			logger.error("Failed to parse payment configuration: {}", e.getMessage(), e);
+		}
+	}
+	
+	/**
+	 * Checks if the payment module is enabled.
+	 * 
+	 * @return true if payment module is enabled, false otherwise
+	 */
+	public boolean isPaymentModuleEnabled() {
+		return paymentModuleEnabled;
+	}
+	
+	/**
+	 * Gets a payment configuration value.
+	 * 
+	 * @param property Property name (dot-separated)
+	 * @param defaultValue Default value if property is not found
+	 * @return Property value or default value
+	 */
+	@SuppressWarnings("unchecked")
+	public String getPaymentConfig(String property, String defaultValue) {
+		if (!paymentModuleEnabled) {
+			return defaultValue;
+		}
+		
+		// Check for environment variable override
+		String envName = "PAYMENT_" + property.replace('.', '_').toUpperCase();
+		String fromEnv = getEnv(envName);
+		if (fromEnv != null) {
+			return fromEnv;
+		}
+		
+		// Check in payment properties
+		String[] split = property.split("\\.");
+		Map<String, Object> map = paymentProperties;
+		
+		for (int i = 0; i < split.length; i++) {
+			String level = split[i];
+			
+			if (map == null) {
+				return defaultValue;
+			}
+			
+			Object object = map.get(level);
+			if (object == null) {
+				return defaultValue;
+			} else if (object instanceof Map) {
+				map = (Map<String, Object>) object;
+				continue;
+			} else {
+				if (i == split.length - 1) {
+					return String.valueOf(object);
+				}
+			}
+		}
+		
+		// Check in main properties with brik.payments prefix
+		return getOrDefault("brik.payments." + property, defaultValue);
+	}
+	
+	/**
+	 * Gets an integer payment configuration value.
+	 * 
+	 * @param property Property name (dot-separated)
+	 * @param defaultValue Default value if property is not found
+	 * @return Property value as integer or default value
+	 */
+	public int getPaymentConfigInt(String property, int defaultValue) {
+		String value = getPaymentConfig(property, null);
+		if (value == null) {
+			return defaultValue;
+		}
+		
+		try {
+			return Integer.parseInt(value);
+		} catch (NumberFormatException e) {
+			logger.warn("Invalid integer value for payment property {}: {}", property, value);
+			return defaultValue;
+		}
+	}
+	
+	/**
+	 * Gets a long payment configuration value.
+	 * 
+	 * @param property Property name (dot-separated)
+	 * @param defaultValue Default value if property is not found
+	 * @return Property value as long or default value
+	 */
+	public long getPaymentConfigLong(String property, long defaultValue) {
+		String value = getPaymentConfig(property, null);
+		if (value == null) {
+			return defaultValue;
+		}
+		
+		try {
+			return Long.parseLong(value);
+		} catch (NumberFormatException e) {
+			logger.warn("Invalid long value for payment property {}: {}", property, value);
+			return defaultValue;
+		}
+	}
+	
+	/**
+	 * Gets a boolean payment configuration value.
+	 * 
+	 * @param property Property name (dot-separated)
+	 * @param defaultValue Default value if property is not found
+	 * @return Property value as boolean or default value
+	 */
+	public boolean getPaymentConfigBoolean(String property, boolean defaultValue) {
+		String value = getPaymentConfig(property, null);
+		if (value == null) {
+			return defaultValue;
+		}
+		
+		return Boolean.parseBoolean(value);
+	}
+	
+	/**
+	 * Gets a required payment configuration value.
+	 * 
+	 * @param property Property name (dot-separated)
+	 * @return Property value
 	 * @throws NullPointerException if the property is not found
 	 */
 	public String getRequiredPaymentConfig(String property) {
-		return getRequired("payment." + property);
+		String value = getPaymentConfig(property, null);
+		return Objects.requireNonNull(value, () -> "Missing required payment config property: " + property);
 	}
-
+	
 	/**
-	 * Gets a payment-specific integer configuration value with a default fallback.
-	 * Automatically prefixes the property with "payment."
+	 * Validates payment configuration.
+	 * Checks for required properties and valid values.
 	 * 
-	 * @param property Dot-separated property path (without "payment." prefix)
-	 * @param defaultValue Default value to return if property is not found
-	 * @return The configuration value as an integer, or defaultValue if not found
-	 */
-	public int getPaymentConfigInt(String property, int defaultValue) {
-		return getOrDefault("payment." + property, defaultValue);
-	}
-
-	/**
-	 * Gets a required payment-specific integer configuration value, throwing an exception if not found.
-	 * Automatically prefixes the property with "payment."
-	 * 
-	 * @param property Dot-separated property path (without "payment." prefix)
-	 * @return The configuration value as an integer
-	 * @throws NullPointerException if the property is not found
-	 * @throws NumberFormatException if the property cannot be parsed as an integer
-	 */
-	public int getRequiredPaymentConfigInt(String property) {
-		return getRequiredInt("payment." + property);
-	}
-
-	/**
-	 * Gets a payment-specific boolean configuration value with a default fallback.
-	 * Automatically prefixes the property with "payment."
-	 * 
-	 * @param property Dot-separated property path (without "payment." prefix)
-	 * @param defaultValue Default value to return if property is not found
-	 * @return The configuration value as a boolean, or defaultValue if not found
-	 */
-	public boolean getPaymentConfigBoolean(String property, boolean defaultValue) {
-		return getOrDefault("payment." + property, defaultValue);
-	}
-
-	/**
-	 * Gets a payment-specific long configuration value with a default fallback.
-	 * Automatically prefixes the property with "payment."
-	 * 
-	 * @param property Dot-separated property path (without "payment." prefix)
-	 * @param defaultValue Default value to return if property is not found
-	 * @return The configuration value as a long, or defaultValue if not found
-	 */
-	public long getPaymentConfigLong(String property, long defaultValue) {
-		return getOrDefault("payment." + property, defaultValue);
-	}
-
-	/**
-	 * Gets HikariCP connection pool parameters for the specified pool name.
-	 * Supports both default and payment-specific connection pools.
-	 * 
-	 * @param poolName The name of the connection pool (e.g., "default", "payment")
-	 * @return Map of connection pool parameters
-	 */
-	public Map<String, Object> getConnectionPoolConfig(String poolName) {
-		Map<String, Object> poolConfig = new HashMap<>();
-		
-		// Base path for connection pool configuration
-		String basePath = "database.connectionPool." + poolName + ".";
-		
-		// Load standard connection pool parameters with reasonable defaults
-		poolConfig.put("maximumPoolSize", getOrDefault(basePath + "maximumPoolSize", 10));
-		poolConfig.put("minimumIdle", getOrDefault(basePath + "minimumIdle", 5));
-		poolConfig.put("connectionTimeout", getOrDefault(basePath + "connectionTimeout", 30000));
-		poolConfig.put("idleTimeout", getOrDefault(basePath + "idleTimeout", 600000));
-		poolConfig.put("maxLifetime", getOrDefault(basePath + "maxLifetime", 1800000));
-		poolConfig.put("autoCommit", getOrDefault(basePath + "autoCommit", true));
-		poolConfig.put("connectionTestQuery", getOrDefault(basePath + "connectionTestQuery", "SELECT 1"));
-		poolConfig.put("leakDetectionThreshold", getOrDefault(basePath + "leakDetectionThreshold", 0));
-		poolConfig.put("registerMbeans", getOrDefault(basePath + "registerMbeans", false));
-		
-		// Add pool name for monitoring and troubleshooting
-		poolConfig.put("poolName", poolName + "HikariPool");
-		
-		return poolConfig;
-	}
-
-	/**
-	 * Gets payment-specific HikariCP connection pool parameters.
-	 * Uses optimized defaults for payment transaction processing.
-	 * 
-	 * @return Map of payment-specific connection pool parameters
-	 */
-	public Map<String, Object> getPaymentConnectionPoolConfig() {
-		Map<String, Object> poolConfig = new HashMap<>();
-		
-		// Base path for payment connection pool configuration
-		String basePath = "payment.database.connectionPool.";
-		
-		// Load payment-specific connection pool parameters with optimized defaults for payment processing
-		poolConfig.put("maximumPoolSize", getOrDefault(basePath + "maximumPoolSize", 30));
-		poolConfig.put("minimumIdle", getOrDefault(basePath + "minimumIdle", 10));
-		poolConfig.put("connectionTimeout", getOrDefault(basePath + "connectionTimeout", 20000));
-		poolConfig.put("idleTimeout", getOrDefault(basePath + "idleTimeout", 300000));
-		poolConfig.put("maxLifetime", getOrDefault(basePath + "maxLifetime", 1200000));
-		poolConfig.put("autoCommit", getOrDefault(basePath + "autoCommit", false));
-		poolConfig.put("connectionTestQuery", getOrDefault(basePath + "connectionTestQuery", "SELECT 1"));
-		poolConfig.put("leakDetectionThreshold", getOrDefault(basePath + "leakDetectionThreshold", 60000));
-		poolConfig.put("registerMbeans", getOrDefault(basePath + "registerMbeans", true));
-		
-		// Add pool name for monitoring and troubleshooting
-		poolConfig.put("poolName", "PaymentHikariPool");
-		
-		return poolConfig;
-	}
-
-	/**
-	 * Checks if a payment feature is enabled.
-	 * 
-	 * @param featureName Name of the payment feature
-	 * @param defaultValue Default value if not configured
-	 * @return true if the feature is enabled, false otherwise
-	 */
-	public boolean isPaymentFeatureEnabled(String featureName, boolean defaultValue) {
-		return getPaymentConfigBoolean("features." + featureName + ".enabled", defaultValue);
-	}
-
-	/**
-	 * Validates payment configuration by checking required properties.
-	 * 
-	 * @return true if all required payment configuration is present, false otherwise
+	 * @return true if configuration is valid, false otherwise
 	 */
 	public boolean validatePaymentConfig() {
+		if (!paymentModuleEnabled) {
+			return false;
+		}
+		
 		try {
-			// Check essential payment database configuration
-			getRequired("payment.database.url");
-			getRequired("payment.database.username");
-			getRequired("payment.database.password");
-			getRequired("payment.database.schema");
+			// Check required properties
+			getRequiredPaymentConfig("database.schema");
+			getRequiredPaymentConfig("database.tables.transaction");
+			getRequiredPaymentConfig("database.tables.paymentData");
+			getRequiredPaymentConfig("database.tables.paymentEvent");
 			
-			// Check payment module configuration
-			getRequiredPaymentConfig("module.enabled");
+			// Validate connection pool settings
+			int maxPoolSize = getPaymentConfigInt("database.connectionPool.maximumPoolSize", 30);
+			int minIdle = getPaymentConfigInt("database.connectionPool.minimumIdle", 10);
+			
+			if (minIdle > maxPoolSize) {
+				logger.warn("Invalid connection pool configuration: minimumIdle ({}) > maximumPoolSize ({})", 
+						minIdle, maxPoolSize);
+				return false;
+			}
 			
 			return true;
-		} catch (NullPointerException e) {
+		} catch (Exception e) {
 			logger.error("Payment configuration validation failed: {}", e.getMessage());
 			return false;
 		}
+	}
+	
+	/**
+	 * Gets connection pool configuration for a specific database.
+	 * 
+	 * @param dbName Database name
+	 * @return Map of connection pool configuration parameters
+	 */
+	public Map<String, Object> getConnectionPoolConfig(String dbName) {
+		Map<String, Object> config = new HashMap<>();
+		
+		String prefix = "brik.database." + dbName + ".connectionPool.";
+		
+		// Get connection pool parameters with defaults
+		config.put("maximumPoolSize", getOrDefault(prefix + "maximumPoolSize", 10));
+		config.put("minimumIdle", getOrDefault(prefix + "minimumIdle", 5));
+		config.put("connectionTimeout", getOrDefault(prefix + "connectionTimeout", 30000));
+		config.put("idleTimeout", getOrDefault(prefix + "idleTimeout", 600000));
+		config.put("maxLifetime", getOrDefault(prefix + "maxLifetime", 1800000));
+		config.put("autoCommit", getOrDefault(prefix + "autoCommit", true));
+		config.put("connectionTestQuery", getOrDefault(prefix + "connectionTestQuery", "SELECT 1"));
+		config.put("leakDetectionThreshold", getOrDefault(prefix + "leakDetectionThreshold", 0));
+		config.put("registerMbeans", getOrDefault(prefix + "registerMbeans", false));
+		
+		return config;
+	}
+	
+	/**
+	 * Gets payment-specific connection pool configuration.
+	 * 
+	 * @return Map of connection pool configuration parameters optimized for payment processing
+	 */
+	public Map<String, Object> getPaymentConnectionPoolConfig() {
+		Map<String, Object> config = new HashMap<>();
+		
+		// Get payment-specific connection pool parameters with optimized defaults
+		config.put("maximumPoolSize", getPaymentConfigInt("database.connectionPool.maximumPoolSize", 30));
+		config.put("minimumIdle", getPaymentConfigInt("database.connectionPool.minimumIdle", 10));
+		config.put("connectionTimeout", getPaymentConfigLong("database.connectionPool.connectionTimeout", 20000));
+		config.put("idleTimeout", getPaymentConfigLong("database.connectionPool.idleTimeout", 300000));
+		config.put("maxLifetime", getPaymentConfigLong("database.connectionPool.maxLifetime", 1200000));
+		config.put("autoCommit", getPaymentConfigBoolean("database.connectionPool.autoCommit", false));
+		config.put("connectionTestQuery", getPaymentConfig("database.connectionPool.connectionTestQuery", "SELECT 1"));
+		config.put("leakDetectionThreshold", getPaymentConfigLong("database.connectionPool.leakDetectionThreshold", 60000));
+		config.put("registerMbeans", getPaymentConfigBoolean("database.connectionPool.registerMbeans", true));
+		config.put("poolName", getPaymentConfig("database.connectionPool.poolName", "PaymentHikariPool"));
+		
+		// Add any additional properties from hikari-config.properties if specified
+		String hikariConfigFile = getOrDefault("brik.hikaricp.configurationFile", null);
+		if (hikariConfigFile != null) {
+			try {
+				Properties hikariProps = new Properties();
+				hikariProps.load(new FileInputStream(new File(hikariConfigFile)));
+				
+				// Add properties to config map
+				for (String propName : hikariProps.stringPropertyNames()) {
+					if (!config.containsKey(propName)) {
+						config.put(propName, hikariProps.getProperty(propName));
+					}
+				}
+				
+				logger.info("Loaded additional HikariCP properties from {}", hikariConfigFile);
+			} catch (Exception e) {
+				logger.warn("Failed to load HikariCP properties from {}: {}", hikariConfigFile, e.getMessage());
+			}
+		}
+		
+		return config;
+	}
+	
+	/**
+	 * Gets payment feature flags.
+	 * 
+	 * @return Map of payment feature flags
+	 */
+	public Map<String, Boolean> getPaymentFeatureFlags() {
+		Map<String, Boolean> flags = new HashMap<>();
+		
+		// Core payment features
+		flags.put("enabled", paymentModuleEnabled);
+		flags.put("accessRightsIntegration", getOrDefault("brik.payments.accessRights.integration", false));
+		
+		// Payment processing features
+		flags.put("asyncProcessing", getPaymentConfigBoolean("processing.async.enabled", true));
+		flags.put("partialCapture", getPaymentConfigBoolean("merchant.defaults.partialCapture.enabled", true));
+		flags.put("partialRefund", getPaymentConfigBoolean("merchant.defaults.partialRefund.enabled", true));
+		
+		// Query features
+		flags.put("fullTextSearch", getPaymentConfigBoolean("query.features.enableFullTextSearch", true));
+		flags.put("dateRangeQueries", getPaymentConfigBoolean("query.features.enableDateRangeQueries", true));
+		flags.put("amountRangeQueries", getPaymentConfigBoolean("query.features.enableAmountRangeQueries", true));
+		flags.put("multiStatusFilter", getPaymentConfigBoolean("query.features.enableMultiStatusFilter", true));
+		flags.put("metadataFiltering", getPaymentConfigBoolean("query.features.enableMetadataFiltering", true));
+		
+		// Logging features
+		flags.put("detailedLogging", getPaymentConfigBoolean("logging.detailedLogging", true));
+		flags.put("logToDatabase", getPaymentConfigBoolean("logging.logToDatabase", true));
+		
+		return flags;
+	}
+	
+	/**
+	 * Gets payment transaction states configuration.
+	 * 
+	 * @return Map of transaction states configuration
+	 */
+	@SuppressWarnings("unchecked")
+	public Map<String, Object> getPaymentTransactionStatesConfig() {
+		if (!paymentModuleEnabled) {
+			return new HashMap<>();
+		}
+		
+		Map<String, Object> result = new HashMap<>();
+		
+		// Get transaction states from payment properties
+		if (paymentProperties.containsKey("transactionStates")) {
+			Object statesObj = paymentProperties.get("transactionStates");
+			if (statesObj instanceof Map) {
+				result = (Map<String, Object>) statesObj;
+			}
+		}
+		
+		return result;
 	}
 }

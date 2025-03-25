@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 
+  Payment-specific logging configuration for the core-sample project.
+  This configuration extends the core logging setup with payment-specific
+  categories, levels, and formatting patterns.
+  
+  Key features:
+  - Structured JSON logging for payment operations
+  - Contextual enrichment for payment transaction logs
+  - PII protection through pattern-based masking
+  - State transition logging for payment operations
+  - Correlation tracking across asynchronous boundaries
+-->
+<included>
+  <!-- Status listener to suppress internal Logback status messages -->
+  <statusListener class="ch.qos.logback.core.status.NopStatusListener" />
+  
+  <!-- Define payment-specific properties with defaults -->
+  <property name="payment.log.level" value="${log.payment.level:-INFO}" />
+  <property name="payment.log.path" value="${log.payment.path:-${LOG_PATH:-./logs}}" />
+  <property name="payment.log.archive" value="${payment.log.path}/archive" />
+  <property name="payment.log.filename" value="payment" />
+  <property name="payment.log.max.history" value="30" />
+  <property name="payment.log.max.filesize" value="100MB" />
+  
+  <!-- Masking patterns for sensitive payment data -->
+  <conversionRule conversionWord="maskedPayment" 
+                 converterClass="io.briklabs.sample.payments.logging.PaymentDataMaskingConverter" />
+  
+  <!-- JSON appender for payment operations with Logstash-compatible format -->
+  <appender name="PAYMENT_JSON" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${payment.log.path}/${payment.log.filename}.json</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+      <fileNamePattern>${payment.log.archive}/${payment.log.filename}-%d{yyyy-MM-dd}.%i.json.gz</fileNamePattern>
+      <maxFileSize>${payment.log.max.filesize}</maxFileSize>
+      <maxHistory>${payment.log.max.history}</maxHistory>
+      <totalSizeCap>3GB</totalSizeCap>
+    </rollingPolicy>
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <includeMdcKeyName>transaction_id</includeMdcKeyName>
+      <includeMdcKeyName>merchant_id</includeMdcKeyName>
+      <includeMdcKeyName>organization_id</includeMdcKeyName>
+      <includeMdcKeyName>account_id</includeMdcKeyName>
+      <includeMdcKeyName>payment_status</includeMdcKeyName>
+      <includeMdcKeyName>previous_status</includeMdcKeyName>
+      <includeMdcKeyName>new_status</includeMdcKeyName>
+      <includeMdcKeyName>amount</includeMdcKeyName>
+      <includeMdcKeyName>currency</includeMdcKeyName>
+      <includeMdcKeyName>payment_type</includeMdcKeyName>
+      <includeMdcKeyName>correlation_id</includeMdcKeyName>
+      <includeMdcKeyName>processing_stage</includeMdcKeyName>
+      <includeMdcKeyName>execution_time_ms</includeMdcKeyName>
+      <includeMdcKeyName>user_id</includeMdcKeyName>
+      <includeMdcKeyName>error_code</includeMdcKeyName>
+      <includeMdcKeyName>error_category</includeMdcKeyName>
+      <customFields>{"application":"payment-service"}</customFields>
+      <fieldNames>
+        <timestamp>timestamp</timestamp>
+        <message>message</message>
+        <logger>logger_name</logger>
+        <thread>thread_name</thread>
+        <level>log_level</level>
+        <levelValue>log_level_value</levelValue>
+      </fieldNames>
+      <provider class="net.logstash.logback.composite.loggingevent.LoggingEventPatternJsonProvider">
+        <pattern>
+          {
+            "payment_context": {
+              "transaction_id": "#asJson{%mdc{transaction_id}}",
+              "merchant_id": "#asJson{%mdc{merchant_id}}",
+              "organization_id": "#asJson{%mdc{organization_id}}",
+              "account_id": "#asJson{%mdc{account_id}}",
+              "payment_status": "#asJson{%mdc{payment_status}}",
+              "amount": "#asJson{%mdc{amount}}",
+              "currency": "#asJson{%mdc{currency}}",
+              "payment_type": "#asJson{%mdc{payment_type}}",
+              "correlation_id": "#asJson{%mdc{correlation_id}}"
+            }
+          }
+        </pattern>
+      </provider>
+    </encoder>
+  </appender>
+  
+  <!-- Console appender for payment logs with masked sensitive data -->
+  <appender name="PAYMENT_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%date{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %highlight(%-5level) %cyan(%logger{36}) - %maskedPayment(%msg) %mdc%n</pattern>
+    </encoder>
+  </appender>
+  
+  <!-- File appender for payment audit trail -->
+  <appender name="PAYMENT_AUDIT" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${payment.log.path}/${payment.log.filename}-audit.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+      <fileNamePattern>${payment.log.archive}/${payment.log.filename}-audit-%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+      <maxFileSize>${payment.log.max.filesize}</maxFileSize>
+      <maxHistory>365</maxHistory> <!-- Longer retention for audit logs -->
+      <totalSizeCap>10GB</totalSizeCap>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%date{yyyy-MM-dd HH:mm:ss.SSS}|%mdc{transaction_id}|%mdc{merchant_id}|%mdc{organization_id}|%mdc{account_id}|%mdc{user_id}|%mdc{previous_status}|%mdc{new_status}|%mdc{amount}|%mdc{currency}|%mdc{correlation_id}|%msg%n</pattern>
+    </encoder>
+  </appender>
+  
+  <!-- Async wrapper for payment JSON appender to improve performance -->
+  <appender name="ASYNC_PAYMENT_JSON" class="ch.qos.logback.classic.AsyncAppender">
+    <appender-ref ref="PAYMENT_JSON" />
+    <queueSize>512</queueSize>
+    <discardingThreshold>0</discardingThreshold>
+    <includeCallerData>false</includeCallerData>
+    <neverBlock>false</neverBlock>
+  </appender>
+  
+  <!-- Async wrapper for payment audit appender -->
+  <appender name="ASYNC_PAYMENT_AUDIT" class="ch.qos.logback.classic.AsyncAppender">
+    <appender-ref ref="PAYMENT_AUDIT" />
+    <queueSize>1024</queueSize>
+    <discardingThreshold>0</discardingThreshold> <!-- Never discard audit logs -->
+    <includeCallerData>true</includeCallerData>
+    <neverBlock>false</neverBlock>
+  </appender>
+  
+  <!-- Payment-specific loggers -->
+  
+  <!-- Main payment package logger -->
+  <logger name="io.briklabs.sample.payments" level="${payment.log.level}" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+    <appender-ref ref="PAYMENT_CONSOLE" />
+  </logger>
+  
+  <!-- Payment transaction service logger -->
+  <logger name="io.briklabs.sample.payments.service" level="${payment.log.level}" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+    <appender-ref ref="PAYMENT_CONSOLE" />
+  </logger>
+  
+  <!-- Payment data access layer logger -->
+  <logger name="io.briklabs.sample.payments.data" level="${payment.log.level}" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+    <appender-ref ref="PAYMENT_CONSOLE" />
+  </logger>
+  
+  <!-- Payment REST API logger -->
+  <logger name="io.briklabs.sample.payments.rest" level="${payment.log.level}" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+    <appender-ref ref="PAYMENT_CONSOLE" />
+  </logger>
+  
+  <!-- Payment state transition audit logger -->
+  <logger name="io.briklabs.sample.payments.audit" level="INFO" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_AUDIT" />
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+  </logger>
+  
+  <!-- HikariCP connection pool logger -->
+  <logger name="com.zaxxer.hikari" level="${log.hikari.level:-INFO}" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+    <appender-ref ref="PAYMENT_CONSOLE" />
+  </logger>
+  
+  <!-- HikariCP connection pool metrics logger -->
+  <logger name="com.zaxxer.hikari.metrics" level="${log.hikari.metrics.level:-INFO}" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+    <appender-ref ref="PAYMENT_CONSOLE" />
+  </logger>
+  
+  <!-- Payment SQL query logger -->
+  <logger name="io.briklabs.sample.payments.data.sql" level="${log.payment.sql.level:-INFO}" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+    <appender-ref ref="PAYMENT_CONSOLE" />
+  </logger>
+  
+  <!-- Payment error logger -->
+  <logger name="io.briklabs.sample.payments.error" level="ERROR" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+    <appender-ref ref="PAYMENT_CONSOLE" />
+  </logger>
+  
+  <!-- Payment security logger -->
+  <logger name="io.briklabs.sample.payments.security" level="INFO" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+    <appender-ref ref="PAYMENT_CONSOLE" />
+  </logger>
+  
+  <!-- Payment performance metrics logger -->
+  <logger name="io.briklabs.sample.payments.metrics" level="${log.payment.metrics.level:-INFO}" additivity="false">
+    <appender-ref ref="ASYNC_PAYMENT_JSON" />
+  </logger>
+  
+  <!-- Turbo filter for PII masking in payment logs -->
+  <turboFilter class="io.briklabs.sample.payments.logging.PaymentPIIFilter">
+    <maskPatterns>
+      <!-- Credit card number pattern -->
+      <pattern>\b(?:\d[ -]*?){13,16}\b</pattern>
+      <!-- Bank account number pattern -->
+      <pattern>\b\d{10,12}\b</pattern>
+      <!-- Social security number pattern -->
+      <pattern>\b\d{3}[-]?\d{2}[-]?\d{4}\b</pattern>
+      <!-- Email address pattern -->
+      <pattern>\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b</pattern>
+    </maskPatterns>
+    <replacementText>[REDACTED]</replacementText>
+  </turboFilter>
+  
+  <!-- MDC cleanup filter to prevent context leakage -->
+  <turboFilter class="io.briklabs.sample.payments.logging.PaymentMDCCleanupFilter">
+    <OnMatch>NEUTRAL</OnMatch>
+    <OnMismatch>NEUTRAL</OnMismatch>
+  </turboFilter>
+</included>

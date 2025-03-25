@@ -11,17 +11,30 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "jsx": "preserve",
+    "jsx": "react-jsx",
     "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@/components/*": ["./src/components/*"],
+      "@/components/payments/*": ["./src/components/payments/*"],
+      "@/api/*": ["./src/api/*"],
+      "@/api/payments/*": ["./src/api/payments/*"],
+      "@/redux/*": ["./src/redux/*"],
+      "@/redux/payments/*": ["./src/redux/payments/*"],
+      "@/app/*": ["./src/app/*"],
+      "@/i18n/*": ["./src/i18n/*"]
     }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.js",
+    "src/**/*.jsx",
+    "src/components/payments/**/*.ts",
+    "src/components/payments/**/*.tsx",
+    "src/api/payments/**/*.ts",
+    "src/redux/payments/**/*.ts",
+    "vite-env.d.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
 }

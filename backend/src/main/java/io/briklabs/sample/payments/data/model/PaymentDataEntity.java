@@ -15,11 +15,18 @@ import io.briklabs.sample.payments.model.PaymentData;
  * through a foreign key and provides secure storage for payment instrument details while
  * supporting appropriate data masking and security controls.
  * </p>
+ * <p>
+ * The entity supports flexible payment method data through JSONB fields for payment_details
+ * and billing_data, allowing for storage of different payment method types with varying
+ * data requirements.
+ * </p>
  */
 public class PaymentDataEntity extends PaymentEntityBase {
 
+    private static final long serialVersionUID = 1L;
+
     /**
-     * Unique identifier for the payment data record (PRIMARY KEY).
+     * Unique identifier for this payment data record (PRIMARY KEY).
      */
     private UUID paymentDataId;
 
@@ -29,34 +36,34 @@ public class PaymentDataEntity extends PaymentEntityBase {
     private UUID transactionId;
 
     /**
-     * Payment method identifier used for reference and tracking.
+     * Identifier for the payment method.
      */
     private String paymentMethodId;
 
     /**
-     * Tokenized payment data for secure storage of sensitive information.
+     * Tokenized payment data for secure storage.
      */
     private String paymentToken;
 
     /**
      * Flexible payment method details stored as JSONB.
-     * This can include method-specific attributes that vary by payment type.
+     * This field contains method-specific data in a structured format.
      */
     private String paymentDetails;
 
     /**
-     * Timestamp when the payment data was created.
+     * Creation timestamp.
      */
     private Instant createdAt;
 
     /**
-     * Expiration date for the payment method, if applicable.
+     * Payment method expiration date (if applicable).
      */
     private LocalDate expiration;
 
     /**
-     * Associated billing information stored as JSONB.
-     * This can include billing address, contact information, etc.
+     * Billing information stored as JSONB.
+     * This field contains address and billing contact information.
      */
     private String billingData;
 
@@ -74,10 +81,10 @@ public class PaymentDataEntity extends PaymentEntityBase {
      * @param paymentMethodId The payment method identifier
      */
     public PaymentDataEntity(UUID transactionId, String paymentMethodId) {
-        this.paymentDataId = UUID.randomUUID();
+        this.paymentDataId = generateId();
         this.transactionId = transactionId;
         this.paymentMethodId = paymentMethodId;
-        this.createdAt = Instant.now();
+        this.createdAt = getCurrentTimestamp();
     }
 
     /**
@@ -87,10 +94,10 @@ public class PaymentDataEntity extends PaymentEntityBase {
      * @param transactionId The associated transaction identifier
      * @param paymentMethodId The payment method identifier
      * @param paymentToken The tokenized payment data
-     * @param paymentDetails The payment method details as JSONB
+     * @param paymentDetails The payment method details as JSON
      * @param createdAt The creation timestamp
      * @param expiration The payment method expiration date
-     * @param billingData The billing information as JSONB
+     * @param billingData The billing information as JSON
      */
     public PaymentDataEntity(UUID paymentDataId, UUID transactionId, String paymentMethodId,
                             String paymentToken, String paymentDetails, Instant createdAt,
@@ -110,75 +117,82 @@ public class PaymentDataEntity extends PaymentEntityBase {
      *
      * @throws IllegalArgumentException if any validation fails
      */
+    @Override
     public void validate() {
+        validateId(paymentDataId, "Payment data ID");
+        validateId(transactionId, "Transaction ID");
+        validateRequiredString(paymentMethodId, "Payment method ID");
+        validateTimestamp(createdAt, "Created");
+    }
+
+    /**
+     * Prepares the entity for persistence operations.
+     * <p>
+     * This method sets the creation timestamp if it is not already set,
+     * and generates a payment data ID if it is not already set.
+     * </p>
+     */
+    @Override
+    public void prepareForPersistence() {
         if (paymentDataId == null) {
-            throw new IllegalArgumentException("Payment data ID is required");
-        }
-        
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID is required");
-        }
-        
-        if (paymentMethodId == null || paymentMethodId.isEmpty()) {
-            throw new IllegalArgumentException("Payment method ID is required");
+            paymentDataId = generateId();
         }
         
         if (createdAt == null) {
-            throw new IllegalArgumentException("Created timestamp is required");
-        }
-        
-        // If expiration date is provided, ensure it's not in the past
-        if (expiration != null && expiration.isBefore(LocalDate.now())) {
-            throw new IllegalArgumentException("Expiration date cannot be in the past");
+            createdAt = getCurrentTimestamp();
         }
     }
 
     /**
-     * Checks if this payment method has expired.
-     *
-     * @return true if the payment method has expired, false otherwise or if no expiration is set
+     * Updates the entity's audit information before an update operation.
+     * <p>
+     * This method is a no-op for PaymentDataEntity as it doesn't have an updatedAt field.
+     * Payment data records are generally immutable after creation for security and audit purposes.
+     * </p>
      */
-    public boolean isExpired() {
-        return expiration != null && expiration.isBefore(LocalDate.now());
+    @Override
+    public void prepareForUpdate() {
+        // Payment data is generally immutable after creation
+        // No update timestamp to set
     }
 
     /**
-     * Masks sensitive payment data for display or logging purposes.
-     * This method returns a copy of the payment data entity with sensitive information masked.
+     * Checks if this entity is new (not yet persisted).
      *
-     * @return A new PaymentDataEntity instance with masked sensitive data
+     * @return true if the entity is new, false otherwise
      */
-    public PaymentDataEntity maskedCopy() {
-        PaymentDataEntity masked = new PaymentDataEntity();
-        masked.paymentDataId = this.paymentDataId;
-        masked.transactionId = this.transactionId;
-        masked.paymentMethodId = this.paymentMethodId;
-        masked.createdAt = this.createdAt;
-        masked.expiration = this.expiration;
-        
-        // Mask the payment token if present
-        if (this.paymentToken != null && !this.paymentToken.isEmpty()) {
-            // Keep only the last 4 characters, mask the rest
-            int length = this.paymentToken.length();
-            if (length > 4) {
-                masked.paymentToken = "****" + this.paymentToken.substring(length - 4);
-            } else {
-                masked.paymentToken = "****";
-            }
-        }
-        
-        // For payment details and billing data, we would need to parse the JSON
-        // and selectively mask fields. For simplicity, we're just indicating
-        // that these fields contain data but not showing the actual content.
-        if (this.paymentDetails != null && !this.paymentDetails.isEmpty()) {
-            masked.paymentDetails = "{...}";
-        }
-        
-        if (this.billingData != null && !this.billingData.isEmpty()) {
-            masked.billingData = "{...}";
-        }
-        
-        return masked;
+    @Override
+    public boolean isNew() {
+        return createdAt == null;
+    }
+
+    /**
+     * Gets the primary key of this entity.
+     *
+     * @return The payment data ID (primary key)
+     */
+    @Override
+    public UUID getId() {
+        return paymentDataId;
+    }
+
+    /**
+     * Creates a deep copy of the entity.
+     *
+     * @return A new PaymentDataEntity with the same values
+     */
+    @Override
+    public Object clone() {
+        return new PaymentDataEntity(
+            this.paymentDataId,
+            this.transactionId,
+            this.paymentMethodId,
+            this.paymentToken,
+            this.paymentDetails,
+            this.createdAt,
+            this.expiration,
+            this.billingData
+        );
     }
 
     /**
@@ -186,17 +200,19 @@ public class PaymentDataEntity extends PaymentEntityBase {
      *
      * @return A PaymentData domain model object
      */
+    @Override
     public PaymentData toDomainModel() {
-        return new PaymentData(
-            paymentDataId,
-            transactionId,
-            paymentMethodId,
-            paymentToken,
-            paymentDetails,
-            createdAt,
-            expiration,
-            billingData
-        );
+        PaymentData model = new PaymentData();
+        model.setPaymentDataId(this.paymentDataId);
+        model.setTransactionId(this.transactionId);
+        model.setPaymentMethodId(this.paymentMethodId);
+        model.setPaymentToken(this.paymentToken);
+        model.setPaymentDetails(this.paymentDetails);
+        model.setExpiration(this.expiration);
+        model.setBillingData(this.billingData);
+        model.setCreatedAt(this.createdAt != null ? 
+                this.createdAt.atZone(java.time.ZoneOffset.UTC).toLocalDateTime() : null);
+        return model;
     }
 
     /**
@@ -206,16 +222,80 @@ public class PaymentDataEntity extends PaymentEntityBase {
      * @return A PaymentDataEntity
      */
     public static PaymentDataEntity fromDomainModel(PaymentData domainModel) {
+        if (domainModel == null) {
+            return null;
+        }
+        
         return new PaymentDataEntity(
             domainModel.getPaymentDataId(),
             domainModel.getTransactionId(),
             domainModel.getPaymentMethodId(),
             domainModel.getPaymentToken(),
             domainModel.getPaymentDetails(),
-            domainModel.getCreatedAt(),
+            domainModel.getCreatedAt() != null ? 
+                domainModel.getCreatedAt().atZone(java.time.ZoneOffset.UTC).toInstant() : null,
             domainModel.getExpiration(),
             domainModel.getBillingData()
         );
+    }
+
+    /**
+     * Returns a copy of this entity with sensitive data masked for logging or display.
+     * <p>
+     * This method creates a new instance with the same identifiers but with sensitive
+     * payment data masked to prevent accidental exposure.
+     * </p>
+     *
+     * @return A new PaymentDataEntity with masked sensitive fields
+     */
+    public PaymentDataEntity getMaskedCopy() {
+        PaymentDataEntity masked = new PaymentDataEntity();
+        masked.setPaymentDataId(this.paymentDataId);
+        masked.setTransactionId(this.transactionId);
+        masked.setPaymentMethodId(this.paymentMethodId);
+        
+        // Mask the payment token if present
+        if (this.paymentToken != null && !this.paymentToken.isEmpty()) {
+            int length = this.paymentToken.length();
+            if (length > 4) {
+                masked.setPaymentToken("****" + this.paymentToken.substring(length - 4));
+            } else {
+                masked.setPaymentToken("****");
+            }
+        }
+        
+        // Don't include payment details in masked copy
+        masked.setPaymentDetails(null);
+        
+        masked.setCreatedAt(this.createdAt);
+        masked.setExpiration(this.expiration);
+        
+        // Don't include billing data in masked copy
+        masked.setBillingData(null);
+        
+        return masked;
+    }
+
+    /**
+     * Checks if the payment method has expired.
+     *
+     * @return true if the payment method has an expiration date and it has passed, false otherwise
+     */
+    public boolean isExpired() {
+        return expiration != null && expiration.isBefore(LocalDate.now());
+    }
+
+    /**
+     * Checks if the payment method will expire soon (within 30 days).
+     *
+     * @return true if the payment method will expire within 30 days, false otherwise
+     */
+    public boolean isExpiringSoon() {
+        if (expiration == null) {
+            return false;
+        }
+        LocalDate thirtyDaysFromNow = LocalDate.now().plusDays(30);
+        return expiration.isAfter(LocalDate.now()) && expiration.isBefore(thirtyDaysFromNow);
     }
 
     // Getters and setters
@@ -299,17 +379,15 @@ public class PaymentDataEntity extends PaymentEntityBase {
 
     @Override
     public String toString() {
-        // Use maskedCopy to ensure sensitive data isn't accidentally logged
-        PaymentDataEntity masked = this.maskedCopy();
+        // Use masked copy for toString to prevent accidental logging of sensitive data
+        PaymentDataEntity masked = getMaskedCopy();
         return "PaymentDataEntity{" +
                 "paymentDataId=" + masked.paymentDataId +
                 ", transactionId=" + masked.transactionId +
                 ", paymentMethodId='" + masked.paymentMethodId + '\'' +
                 ", paymentToken='" + masked.paymentToken + '\'' +
-                ", paymentDetails='" + masked.paymentDetails + '\'' +
-                ", createdAt=" + masked.createdAt +
                 ", expiration=" + masked.expiration +
-                ", billingData='" + masked.billingData + '\'' +
+                ", createdAt=" + masked.createdAt +
                 '}';
     }
 }

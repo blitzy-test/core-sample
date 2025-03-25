@@ -1,534 +1,789 @@
 package io.briklabs.sample.payments.service;
 
-import io.briklabs.sample.payments.data.dao.PaymentDAOFactory;
-import io.briklabs.sample.payments.data.dao.PaymentTransactionDAO;
-import io.briklabs.sample.payments.data.query.AmountRangeFilter;
-import io.briklabs.sample.payments.data.query.DateRangeFilter;
-import io.briklabs.sample.payments.data.query.PaginationParams;
-import io.briklabs.sample.payments.data.query.PaymentFilterParams;
-import io.briklabs.sample.payments.data.query.SortCriteria;
-import io.briklabs.sample.payments.data.query.StatusFilter;
-import io.briklabs.sample.payments.model.PaymentStatus;
-import io.briklabs.sample.payments.model.PaymentTransaction;
-
-import java.math.BigDecimal;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.briklabs.sample.payments.data.dao.PaymentDAOFactory;
+import io.briklabs.sample.payments.data.dao.PaymentTransactionDAO;
+import io.briklabs.sample.payments.data.exception.ConnectionException;
+import io.briklabs.sample.payments.data.exception.QueryExecutionException;
+import io.briklabs.sample.payments.data.query.AmountRangeFilter;
+import io.briklabs.sample.payments.data.query.DateRangeFilter;
+import io.briklabs.sample.payments.data.query.PaginationParams;
+import io.briklabs.sample.payments.data.query.PaymentFilterParams;
+import io.briklabs.sample.payments.data.query.SortCriteria;
+import io.briklabs.sample.payments.data.query.StatusFilter;
+import io.briklabs.sample.payments.model.PaymentTransaction;
+
 /**
- * Implementation of the PaymentQueryService interface that provides
- * advanced payment data querying capabilities.
- * 
- * This class handles complex filter construction, query execution, sorting logic,
- * and pagination, working closely with the data access layer to retrieve optimized
- * result sets.
+ * Implementation of the PaymentQueryService interface that provides advanced payment data querying capabilities.
+ * <p>
+ * This class handles complex filter construction, query execution, sorting logic, and pagination,
+ * working closely with the data access layer to retrieve optimized result sets. It's critical for
+ * efficient payment data retrieval and reporting.
+ * </p>
  */
 public class PaymentQueryServiceImpl implements PaymentQueryService {
 
     private static final Logger logger = LoggerFactory.getLogger(PaymentQueryServiceImpl.class);
     
-    // Constants for validation and defaults
-    private static final int DEFAULT_PAGE_SIZE = 20;
-    private static final int MAX_PAGE_SIZE = 100;
-    private static final int MIN_PAGE_SIZE = 1;
-    private static final int DEFAULT_OFFSET = 0;
-    
-    // Set of allowed sort fields for validation
-    private static final Set<String> ALLOWED_SORT_FIELDS = new HashSet<>(Arrays.asList(
-            "transaction_id", "status", "amount", "currency", "created_at", "updated_at", 
-            "merchant_id", "payment_type", "transaction_reference", "description"
-    ));
-    
-    // Default sort criteria if none provided
-    private static final List<SortCriteria> DEFAULT_SORT_CRITERIA = Collections.singletonList(
-            new SortCriteria("created_at", SortCriteria.Direction.DESC)
-    );
-    
     private final PaymentTransactionDAO transactionDAO;
     
     /**
-     * Constructs a new PaymentQueryServiceImpl with the necessary dependencies.
+     * Default page size for pagination when not specified
+     */
+    private static final int DEFAULT_PAGE_SIZE = 20;
+    
+    /**
+     * Maximum allowed page size to prevent excessive resource usage
+     */
+    private static final int MAX_PAGE_SIZE = 100;
+
+    /**
+     * Constructs a new PaymentQueryServiceImpl with the specified DAO factory.
      * 
-     * @param daoFactory Factory for creating data access objects
+     * @param daoFactory The factory for creating data access objects
      */
     public PaymentQueryServiceImpl(PaymentDAOFactory daoFactory) {
         this.transactionDAO = daoFactory.getPaymentTransactionDAO();
+        logger.debug("Initialized PaymentQueryServiceImpl with DAO factory");
     }
-    
+
     /**
-     * Alternative constructor for testing or when DAO is directly available.
-     * 
-     * @param transactionDAO The payment transaction DAO implementation
+     * Retrieves payment transactions using a comprehensive filter parameter object.
+     * <p>
+     * This method provides a unified approach to querying payment transactions with
+     * support for multiple filter criteria, sorting options, and pagination parameters.
+     * </p>
+     *
+     * @param filterParams The filter parameters containing all query criteria
+     * @return List of payment transactions matching the filter criteria
      */
-    public PaymentQueryServiceImpl(PaymentTransactionDAO transactionDAO) {
-        this.transactionDAO = transactionDAO;
-    }
-
     @Override
-    public List<PaymentTransaction> findTransactions(UUID organizationId, UUID accountId, 
-                                                    PaymentFilterParams filterParams) {
-        logger.debug("Finding transactions for org: {}, account: {}, filters: {}", 
-                organizationId, accountId, filterParams);
-        
-        // Validate and normalize filter parameters
-        PaymentFilterParams validatedParams = validateAndNormalizeFilterParams(filterParams);
-        
-        // Use default sort if none provided
-        List<SortCriteria> sortCriteria = validatedParams.getSortCriteria();
-        if (sortCriteria == null || sortCriteria.isEmpty()) {
-            sortCriteria = DEFAULT_SORT_CRITERIA;
-        } else {
-            sortCriteria = validateAndNormalizeSortCriteria(sortCriteria);
-        }
-        
-        // Execute query with validated parameters
-        return transactionDAO.findTransactions(organizationId, accountId, validatedParams, sortCriteria);
-    }
-
-    @Override
-    public List<PaymentTransaction> findTransactionsPaginated(UUID organizationId, UUID accountId,
-                                                            PaymentFilterParams filterParams,
-                                                            PaginationParams paginationParams) {
-        logger.debug("Finding paginated transactions for org: {}, account: {}, filters: {}, pagination: {}", 
-                organizationId, accountId, filterParams, paginationParams);
-        
-        // Validate and normalize parameters
-        PaymentFilterParams validatedFilters = validateAndNormalizeFilterParams(filterParams);
-        PaginationParams validatedPagination = validateAndNormalizePaginationParams(paginationParams);
-        
-        // Use default sort if none provided
-        List<SortCriteria> sortCriteria = validatedFilters.getSortCriteria();
-        if (sortCriteria == null || sortCriteria.isEmpty()) {
-            sortCriteria = DEFAULT_SORT_CRITERIA;
-        } else {
-            sortCriteria = validateAndNormalizeSortCriteria(sortCriteria);
-        }
-        
-        // Execute paginated query with validated parameters
-        return transactionDAO.findTransactionsPaginated(
-                organizationId, accountId, validatedFilters, sortCriteria, validatedPagination);
-    }
-
-    @Override
-    public long countTransactions(UUID organizationId, UUID accountId, PaymentFilterParams filterParams) {
-        logger.debug("Counting transactions for org: {}, account: {}, filters: {}", 
-                organizationId, accountId, filterParams);
-        
-        // Validate filter parameters
-        PaymentFilterParams validatedParams = validateAndNormalizeFilterParams(filterParams);
-        
-        // Execute count query
-        return transactionDAO.countTransactions(organizationId, accountId, validatedParams);
-    }
-
-    @Override
-    public List<PaymentTransaction> findTransactionsByDateRange(UUID organizationId, UUID accountId,
-                                                              DateRangeFilter dateRangeFilter,
-                                                              Optional<PaginationParams> paginationParams) {
-        logger.debug("Finding transactions by date range for org: {}, account: {}, dateRange: {}", 
-                organizationId, accountId, dateRangeFilter);
-        
-        // Validate date range filter
-        validateDateRangeFilter(dateRangeFilter);
-        
-        // Create filter params with date range
-        PaymentFilterParams filterParams = new PaymentFilterParams();
-        filterParams.setDateRangeFilter(dateRangeFilter);
-        
-        // Apply pagination if provided
-        if (paginationParams.isPresent()) {
-            PaginationParams validatedPagination = validateAndNormalizePaginationParams(paginationParams.get());
-            return findTransactionsPaginated(organizationId, accountId, filterParams, validatedPagination);
-        } else {
-            return findTransactions(organizationId, accountId, filterParams);
+    public List<PaymentTransaction> findTransactions(PaymentFilterParams filterParams) {
+        try {
+            // Validate and normalize filter parameters
+            PaymentFilterParams validatedParams = validateQueryParameters(filterParams);
+            
+            logger.debug("Executing payment transaction query with filter parameters: {}", validatedParams);
+            
+            // Execute the query through the DAO
+            List<PaymentTransaction> transactions = transactionDAO.query(validatedParams);
+            
+            // Apply additional sorting if needed (for complex sort criteria that can't be handled at the DB level)
+            if (validatedParams.getSortCriteria() != null && !validatedParams.getSortCriteria().isEmpty()) {
+                transactions = sortTransactions(transactions, validatedParams.getSortCriteria().get(0));
+            }
+            
+            // Apply pagination if needed
+            if (validatedParams.getPagination() != null) {
+                transactions = paginateTransactions(transactions, validatedParams.getPagination());
+            }
+            
+            logger.debug("Found {} payment transactions matching filter criteria", transactions.size());
+            return transactions;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Error executing payment transaction query", e);
+            // Translate data access exceptions to service-level exceptions
+            throw new PaymentQueryException("Failed to query payment transactions: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Unexpected error in payment transaction query", e);
+            throw new PaymentQueryException("Unexpected error querying payment transactions: " + e.getMessage(), e);
         }
     }
 
+    /**
+     * Retrieves payment transactions for a specific organization.
+     * <p>
+     * This method filters transactions by organization ID with optional additional
+     * filter criteria, sorting, and pagination.
+     * </p>
+     *
+     * @param organizationId The organization ID to filter by
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions for the specified organization
+     */
     @Override
-    public List<PaymentTransaction> findTransactionsByAmountRange(UUID organizationId, UUID accountId,
-                                                                AmountRangeFilter amountRangeFilter,
-                                                                Optional<PaginationParams> paginationParams) {
-        logger.debug("Finding transactions by amount range for org: {}, account: {}, amountRange: {}", 
-                organizationId, accountId, amountRangeFilter);
-        
-        // Validate amount range filter
-        validateAmountRangeFilter(amountRangeFilter);
-        
-        // Create filter params with amount range
-        PaymentFilterParams filterParams = new PaymentFilterParams();
-        filterParams.setAmountRangeFilter(amountRangeFilter);
-        
-        // Apply pagination if provided
-        if (paginationParams.isPresent()) {
-            PaginationParams validatedPagination = validateAndNormalizePaginationParams(paginationParams.get());
-            return findTransactionsPaginated(organizationId, accountId, filterParams, validatedPagination);
-        } else {
-            return findTransactions(organizationId, accountId, filterParams);
+    public List<PaymentTransaction> findTransactionsByOrganization(UUID organizationId, PaymentFilterParams filterParams) {
+        try {
+            // Create a new filter params object if none provided
+            PaymentFilterParams params = (filterParams != null) ? filterParams : new PaymentFilterParams();
+            
+            // Set the organization ID in the filter parameters
+            params.setOrganizationId(organizationId);
+            
+            // Validate and normalize filter parameters
+            PaymentFilterParams validatedParams = validateQueryParameters(params);
+            
+            logger.debug("Executing payment transaction query for organization {}", organizationId);
+            
+            // Execute the query through the DAO
+            List<PaymentTransaction> transactions = transactionDAO.findByOrganizationId(organizationId, validatedParams);
+            
+            // Apply additional sorting if needed
+            if (validatedParams.getSortCriteria() != null && !validatedParams.getSortCriteria().isEmpty()) {
+                transactions = sortTransactions(transactions, validatedParams.getSortCriteria().get(0));
+            }
+            
+            // Apply pagination if needed
+            if (validatedParams.getPagination() != null) {
+                transactions = paginateTransactions(transactions, validatedParams.getPagination());
+            }
+            
+            logger.debug("Found {} payment transactions for organization {}", transactions.size(), organizationId);
+            return transactions;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Error executing payment transaction query for organization {}", organizationId, e);
+            throw new PaymentQueryException("Failed to query payment transactions for organization: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Unexpected error in payment transaction query for organization {}", organizationId, e);
+            throw new PaymentQueryException("Unexpected error querying payment transactions for organization: " + e.getMessage(), e);
         }
     }
 
+    /**
+     * Retrieves payment transactions for a specific account within an organization.
+     * <p>
+     * This method filters transactions by organization ID and account ID with optional
+     * additional filter criteria, sorting, and pagination.
+     * </p>
+     *
+     * @param organizationId The organization ID to filter by
+     * @param accountId The account ID to filter by
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions for the specified account
+     */
     @Override
-    public List<PaymentTransaction> findTransactionsByStatus(UUID organizationId, UUID accountId,
-                                                           StatusFilter statusFilter,
-                                                           Optional<PaginationParams> paginationParams) {
-        logger.debug("Finding transactions by status for org: {}, account: {}, statusFilter: {}", 
-                organizationId, accountId, statusFilter);
-        
-        // Validate status filter
-        validateStatusFilter(statusFilter);
-        
-        // Create filter params with status filter
-        PaymentFilterParams filterParams = new PaymentFilterParams();
-        filterParams.setStatusFilter(statusFilter);
-        
-        // Apply pagination if provided
-        if (paginationParams.isPresent()) {
-            PaginationParams validatedPagination = validateAndNormalizePaginationParams(paginationParams.get());
-            return findTransactionsPaginated(organizationId, accountId, filterParams, validatedPagination);
-        } else {
-            return findTransactions(organizationId, accountId, filterParams);
+    public List<PaymentTransaction> findTransactionsByAccount(UUID organizationId, UUID accountId, PaymentFilterParams filterParams) {
+        try {
+            // Create a new filter params object if none provided
+            PaymentFilterParams params = (filterParams != null) ? filterParams : new PaymentFilterParams();
+            
+            // Set the organization and account IDs in the filter parameters
+            params.setOrganizationId(organizationId);
+            params.setAccountId(accountId);
+            
+            // Validate and normalize filter parameters
+            PaymentFilterParams validatedParams = validateQueryParameters(params);
+            
+            logger.debug("Executing payment transaction query for organization {} and account {}", organizationId, accountId);
+            
+            // Execute the query through the DAO
+            List<PaymentTransaction> transactions = transactionDAO.findByOrganizationIdAndAccountId(
+                    organizationId, accountId, validatedParams);
+            
+            // Apply additional sorting if needed
+            if (validatedParams.getSortCriteria() != null && !validatedParams.getSortCriteria().isEmpty()) {
+                transactions = sortTransactions(transactions, validatedParams.getSortCriteria().get(0));
+            }
+            
+            // Apply pagination if needed
+            if (validatedParams.getPagination() != null) {
+                transactions = paginateTransactions(transactions, validatedParams.getPagination());
+            }
+            
+            logger.debug("Found {} payment transactions for organization {} and account {}", 
+                    transactions.size(), organizationId, accountId);
+            return transactions;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Error executing payment transaction query for organization {} and account {}", 
+                    organizationId, accountId, e);
+            throw new PaymentQueryException("Failed to query payment transactions for account: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Unexpected error in payment transaction query for organization {} and account {}", 
+                    organizationId, accountId, e);
+            throw new PaymentQueryException("Unexpected error querying payment transactions for account: " + e.getMessage(), e);
         }
     }
 
+    /**
+     * Retrieves payment transactions by status.
+     * <p>
+     * This method filters transactions by status with optional additional filter criteria,
+     * sorting, and pagination.
+     * </p>
+     *
+     * @param statusFilter The status filter criteria
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions matching the status criteria
+     */
     @Override
-    public List<PaymentTransaction> findTransactionsByMerchant(UUID organizationId, UUID accountId,
-                                                             String merchantId,
-                                                             Optional<PaymentFilterParams> filterParams,
-                                                             Optional<PaginationParams> paginationParams) {
-        logger.debug("Finding transactions by merchant for org: {}, account: {}, merchantId: {}", 
-                organizationId, accountId, merchantId);
-        
-        // Validate merchant ID
-        if (merchantId == null || merchantId.trim().isEmpty()) {
-            throw new IllegalArgumentException("Merchant ID cannot be null or empty");
-        }
-        
-        // Create or update filter params with merchant ID
-        PaymentFilterParams params = filterParams.orElse(new PaymentFilterParams());
-        params.setMerchantId(merchantId);
-        
-        // Validate and normalize filter parameters
-        PaymentFilterParams validatedParams = validateAndNormalizeFilterParams(params);
-        
-        // Apply pagination if provided
-        if (paginationParams.isPresent()) {
-            PaginationParams validatedPagination = validateAndNormalizePaginationParams(paginationParams.get());
-            return findTransactionsPaginated(organizationId, accountId, validatedParams, validatedPagination);
-        } else {
-            return findTransactions(organizationId, accountId, validatedParams);
-        }
-    }
-
-    @Override
-    public List<PaymentTransaction> findTransactionsSorted(UUID organizationId, UUID accountId,
-                                                         PaymentFilterParams filterParams,
-                                                         List<SortCriteria> sortCriteria,
-                                                         Optional<PaginationParams> paginationParams) {
-        logger.debug("Finding sorted transactions for org: {}, account: {}, sortCriteria: {}", 
-                organizationId, accountId, sortCriteria);
-        
-        // Validate and normalize filter parameters
-        PaymentFilterParams validatedFilters = validateAndNormalizeFilterParams(filterParams);
-        
-        // Validate and normalize sort criteria
-        List<SortCriteria> validatedSortCriteria = validateAndNormalizeSortCriteria(sortCriteria);
-        validatedFilters.setSortCriteria(validatedSortCriteria);
-        
-        // Apply pagination if provided
-        if (paginationParams.isPresent()) {
-            PaginationParams validatedPagination = validateAndNormalizePaginationParams(paginationParams.get());
-            return findTransactionsPaginated(organizationId, accountId, validatedFilters, validatedPagination);
-        } else {
-            return findTransactions(organizationId, accountId, validatedFilters);
+    public List<PaymentTransaction> findTransactionsByStatus(StatusFilter statusFilter, PaymentFilterParams filterParams) {
+        try {
+            // Create a new filter params object if none provided
+            PaymentFilterParams params = (filterParams != null) ? filterParams : new PaymentFilterParams();
+            
+            // Set the status filter in the filter parameters
+            params.setStatusFilter(statusFilter);
+            
+            // Validate and normalize filter parameters
+            PaymentFilterParams validatedParams = validateQueryParameters(params);
+            
+            logger.debug("Executing payment transaction query for status filter: {}", statusFilter);
+            
+            // Execute the query through the DAO
+            List<PaymentTransaction> transactions = transactionDAO.findByStatusIn(statusFilter, validatedParams);
+            
+            // Apply additional sorting if needed
+            if (validatedParams.getSortCriteria() != null && !validatedParams.getSortCriteria().isEmpty()) {
+                transactions = sortTransactions(transactions, validatedParams.getSortCriteria().get(0));
+            }
+            
+            // Apply pagination if needed
+            if (validatedParams.getPagination() != null) {
+                transactions = paginateTransactions(transactions, validatedParams.getPagination());
+            }
+            
+            logger.debug("Found {} payment transactions matching status filter", transactions.size());
+            return transactions;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Error executing payment transaction query for status filter: {}", statusFilter, e);
+            throw new PaymentQueryException("Failed to query payment transactions by status: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Unexpected error in payment transaction query for status filter: {}", statusFilter, e);
+            throw new PaymentQueryException("Unexpected error querying payment transactions by status: " + e.getMessage(), e);
         }
     }
 
+    /**
+     * Retrieves payment transactions within a date range.
+     * <p>
+     * This method filters transactions by creation date range with optional additional
+     * filter criteria, sorting, and pagination.
+     * </p>
+     *
+     * @param dateRange The date range filter criteria
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions within the specified date range
+     */
     @Override
-    public PaymentFilterParams validateAndNormalizeFilterParams(PaymentFilterParams filterParams) {
+    public List<PaymentTransaction> findTransactionsByDateRange(DateRangeFilter dateRange, PaymentFilterParams filterParams) {
+        try {
+            // Create a new filter params object if none provided
+            PaymentFilterParams params = (filterParams != null) ? filterParams : new PaymentFilterParams();
+            
+            // Set the date range filter in the filter parameters
+            params.setDateRange(dateRange);
+            
+            // Validate and normalize filter parameters
+            PaymentFilterParams validatedParams = validateQueryParameters(params);
+            
+            logger.debug("Executing payment transaction query for date range: {}", dateRange);
+            
+            // Execute the query through the DAO
+            List<PaymentTransaction> transactions = transactionDAO.findByCreatedAtBetween(dateRange, validatedParams);
+            
+            // Apply additional sorting if needed
+            if (validatedParams.getSortCriteria() != null && !validatedParams.getSortCriteria().isEmpty()) {
+                transactions = sortTransactions(transactions, validatedParams.getSortCriteria().get(0));
+            }
+            
+            // Apply pagination if needed
+            if (validatedParams.getPagination() != null) {
+                transactions = paginateTransactions(transactions, validatedParams.getPagination());
+            }
+            
+            logger.debug("Found {} payment transactions within date range", transactions.size());
+            return transactions;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Error executing payment transaction query for date range: {}", dateRange, e);
+            throw new PaymentQueryException("Failed to query payment transactions by date range: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Unexpected error in payment transaction query for date range: {}", dateRange, e);
+            throw new PaymentQueryException("Unexpected error querying payment transactions by date range: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Retrieves payment transactions within an amount range.
+     * <p>
+     * This method filters transactions by amount range with optional additional filter
+     * criteria, sorting, and pagination.
+     * </p>
+     *
+     * @param amountRange The amount range filter criteria
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions within the specified amount range
+     */
+    @Override
+    public List<PaymentTransaction> findTransactionsByAmountRange(AmountRangeFilter amountRange, PaymentFilterParams filterParams) {
+        try {
+            // Create a new filter params object if none provided
+            PaymentFilterParams params = (filterParams != null) ? filterParams : new PaymentFilterParams();
+            
+            // Set the amount range filter in the filter parameters
+            params.setAmountRange(amountRange);
+            
+            // Validate and normalize filter parameters
+            PaymentFilterParams validatedParams = validateQueryParameters(params);
+            
+            logger.debug("Executing payment transaction query for amount range: {}", amountRange);
+            
+            // Execute the query through the DAO
+            List<PaymentTransaction> transactions = transactionDAO.findByAmountBetween(amountRange, validatedParams);
+            
+            // Apply additional sorting if needed
+            if (validatedParams.getSortCriteria() != null && !validatedParams.getSortCriteria().isEmpty()) {
+                transactions = sortTransactions(transactions, validatedParams.getSortCriteria().get(0));
+            }
+            
+            // Apply pagination if needed
+            if (validatedParams.getPagination() != null) {
+                transactions = paginateTransactions(transactions, validatedParams.getPagination());
+            }
+            
+            logger.debug("Found {} payment transactions within amount range", transactions.size());
+            return transactions;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Error executing payment transaction query for amount range: {}", amountRange, e);
+            throw new PaymentQueryException("Failed to query payment transactions by amount range: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Unexpected error in payment transaction query for amount range: {}", amountRange, e);
+            throw new PaymentQueryException("Unexpected error querying payment transactions by amount range: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Retrieves payment transactions for a specific merchant.
+     * <p>
+     * This method filters transactions by merchant ID with optional additional filter
+     * criteria, sorting, and pagination.
+     * </p>
+     *
+     * @param merchantId The merchant ID to filter by
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions for the specified merchant
+     */
+    @Override
+    public List<PaymentTransaction> findTransactionsByMerchant(String merchantId, PaymentFilterParams filterParams) {
+        try {
+            // Create a new filter params object if none provided
+            PaymentFilterParams params = (filterParams != null) ? filterParams : new PaymentFilterParams();
+            
+            // Set the merchant ID in the filter parameters
+            params.setMerchantId(merchantId);
+            
+            // Validate and normalize filter parameters
+            PaymentFilterParams validatedParams = validateQueryParameters(params);
+            
+            logger.debug("Executing payment transaction query for merchant: {}", merchantId);
+            
+            // Execute the query through the DAO
+            List<PaymentTransaction> transactions = transactionDAO.findByMerchantId(merchantId, validatedParams);
+            
+            // Apply additional sorting if needed
+            if (validatedParams.getSortCriteria() != null && !validatedParams.getSortCriteria().isEmpty()) {
+                transactions = sortTransactions(transactions, validatedParams.getSortCriteria().get(0));
+            }
+            
+            // Apply pagination if needed
+            if (validatedParams.getPagination() != null) {
+                transactions = paginateTransactions(transactions, validatedParams.getPagination());
+            }
+            
+            logger.debug("Found {} payment transactions for merchant {}", transactions.size(), merchantId);
+            return transactions;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Error executing payment transaction query for merchant: {}", merchantId, e);
+            throw new PaymentQueryException("Failed to query payment transactions by merchant: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Unexpected error in payment transaction query for merchant: {}", merchantId, e);
+            throw new PaymentQueryException("Unexpected error querying payment transactions by merchant: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Retrieves payment transactions with a specific payment type.
+     * <p>
+     * This method filters transactions by payment type with optional additional filter
+     * criteria, sorting, and pagination.
+     * </p>
+     *
+     * @param paymentType The payment type to filter by
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions with the specified payment type
+     */
+    @Override
+    public List<PaymentTransaction> findTransactionsByPaymentType(String paymentType, PaymentFilterParams filterParams) {
+        try {
+            // Create a new filter params object if none provided
+            PaymentFilterParams params = (filterParams != null) ? filterParams : new PaymentFilterParams();
+            
+            // Set the payment type in the filter parameters
+            params.setPaymentType(paymentType);
+            
+            // Validate and normalize filter parameters
+            PaymentFilterParams validatedParams = validateQueryParameters(params);
+            
+            logger.debug("Executing payment transaction query for payment type: {}", paymentType);
+            
+            // Execute the query through the DAO
+            List<PaymentTransaction> transactions = transactionDAO.query(validatedParams);
+            
+            // Apply additional sorting if needed
+            if (validatedParams.getSortCriteria() != null && !validatedParams.getSortCriteria().isEmpty()) {
+                transactions = sortTransactions(transactions, validatedParams.getSortCriteria().get(0));
+            }
+            
+            // Apply pagination if needed
+            if (validatedParams.getPagination() != null) {
+                transactions = paginateTransactions(transactions, validatedParams.getPagination());
+            }
+            
+            logger.debug("Found {} payment transactions with payment type {}", transactions.size(), paymentType);
+            return transactions;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Error executing payment transaction query for payment type: {}", paymentType, e);
+            throw new PaymentQueryException("Failed to query payment transactions by payment type: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Unexpected error in payment transaction query for payment type: {}", paymentType, e);
+            throw new PaymentQueryException("Unexpected error querying payment transactions by payment type: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Counts the total number of payment transactions matching the filter criteria.
+     * <p>
+     * This method provides an efficient way to get the total count without retrieving
+     * the actual transaction data, useful for pagination and reporting.
+     * </p>
+     *
+     * @param filterParams The filter parameters containing query criteria
+     * @return The total count of matching transactions
+     */
+    @Override
+    public long countTransactions(PaymentFilterParams filterParams) {
+        try {
+            // Validate and normalize filter parameters
+            PaymentFilterParams validatedParams = validateQueryParameters(filterParams);
+            
+            logger.debug("Counting payment transactions with filter parameters: {}", validatedParams);
+            
+            // Execute the count query through the DAO
+            long count = transactionDAO.count(validatedParams);
+            
+            logger.debug("Found {} payment transactions matching filter criteria", count);
+            return count;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Error counting payment transactions", e);
+            throw new PaymentQueryException("Failed to count payment transactions: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Unexpected error counting payment transactions", e);
+            throw new PaymentQueryException("Unexpected error counting payment transactions: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Applies sorting to a payment transaction query.
+     * <p>
+     * This method provides a way to sort payment transactions by various criteria
+     * with support for multiple sort fields and directions.
+     * </p>
+     *
+     * @param transactions The list of transactions to sort
+     * @param sortCriteria The sorting criteria to apply
+     * @return The sorted list of transactions
+     */
+    @Override
+    public List<PaymentTransaction> sortTransactions(List<PaymentTransaction> transactions, SortCriteria sortCriteria) {
+        if (transactions == null || transactions.isEmpty() || sortCriteria == null) {
+            return transactions;
+        }
+        
+        logger.debug("Sorting payment transactions by criteria: {}", sortCriteria);
+        
+        // Create a comparator based on the sort criteria
+        Comparator<PaymentTransaction> comparator = createComparator(sortCriteria);
+        
+        // Sort the transactions using the comparator
+        List<PaymentTransaction> sortedTransactions = new ArrayList<>(transactions);
+        sortedTransactions.sort(comparator);
+        
+        return sortedTransactions;
+    }
+
+    /**
+     * Creates a comparator for sorting payment transactions based on the specified criteria.
+     *
+     * @param sortCriteria The sorting criteria
+     * @return A comparator for sorting payment transactions
+     */
+    private Comparator<PaymentTransaction> createComparator(SortCriteria sortCriteria) {
+        String column = sortCriteria.getColumn();
+        boolean ascending = SortCriteria.Direction.ASC.equals(sortCriteria.getDirection());
+        
+        Comparator<PaymentTransaction> comparator;
+        
+        // Create a comparator based on the sort column
+        switch (column.toLowerCase()) {
+            case "transaction_id":
+            case "transactionid":
+                comparator = Comparator.comparing(PaymentTransaction::getTransactionId);
+                break;
+            case "created_at":
+            case "createdat":
+                comparator = Comparator.comparing(PaymentTransaction::getCreatedAt);
+                break;
+            case "updated_at":
+            case "updatedat":
+                comparator = Comparator.comparing(PaymentTransaction::getUpdatedAt);
+                break;
+            case "amount":
+                comparator = Comparator.comparing(PaymentTransaction::getAmount);
+                break;
+            case "status":
+                comparator = Comparator.comparing(t -> t.getStatus().name());
+                break;
+            case "merchant_id":
+            case "merchantid":
+                comparator = Comparator.comparing(PaymentTransaction::getMerchantId, 
+                        Comparator.nullsLast(String::compareTo));
+                break;
+            case "payment_type":
+            case "paymenttype":
+                comparator = Comparator.comparing(PaymentTransaction::getPaymentType, 
+                        Comparator.nullsLast(String::compareTo));
+                break;
+            case "currency":
+                comparator = Comparator.comparing(PaymentTransaction::getCurrency, 
+                        Comparator.nullsLast(String::compareTo));
+                break;
+            default:
+                // Default to sorting by created_at
+                logger.warn("Unknown sort column: {}. Defaulting to created_at", column);
+                comparator = Comparator.comparing(PaymentTransaction::getCreatedAt);
+                break;
+        }
+        
+        // Reverse the comparator if descending order is requested
+        if (!ascending) {
+            comparator = comparator.reversed();
+        }
+        
+        return comparator;
+    }
+
+    /**
+     * Applies pagination to a payment transaction query result.
+     * <p>
+     * This method provides a way to paginate large result sets with support for
+     * offset-based pagination.
+     * </p>
+     *
+     * @param transactions The list of transactions to paginate
+     * @param paginationParams The pagination parameters to apply
+     * @return The paginated list of transactions
+     */
+    @Override
+    public List<PaymentTransaction> paginateTransactions(List<PaymentTransaction> transactions, PaginationParams paginationParams) {
+        if (transactions == null || transactions.isEmpty() || paginationParams == null) {
+            return transactions;
+        }
+        
+        int offset = paginationParams.getOffset();
+        int limit = paginationParams.getLimit();
+        
+        logger.debug("Applying pagination with offset {} and limit {} to {} transactions", 
+                offset, limit, transactions.size());
+        
+        // Validate pagination parameters
+        if (offset < 0) {
+            offset = 0;
+        }
+        
+        if (limit <= 0) {
+            limit = DEFAULT_PAGE_SIZE;
+        } else if (limit > MAX_PAGE_SIZE) {
+            limit = MAX_PAGE_SIZE;
+        }
+        
+        // Apply pagination
+        int fromIndex = Math.min(offset, transactions.size());
+        int toIndex = Math.min(fromIndex + limit, transactions.size());
+        
+        return transactions.subList(fromIndex, toIndex);
+    }
+
+    /**
+     * Validates and normalizes query parameters for payment transaction queries.
+     * <p>
+     * This method ensures that filter parameters are valid and properly formatted
+     * before executing queries, preventing invalid query conditions.
+     * </p>
+     *
+     * @param filterParams The filter parameters to validate
+     * @return The validated and normalized filter parameters
+     * @throws IllegalArgumentException if the filter parameters are invalid
+     */
+    @Override
+    public PaymentFilterParams validateQueryParameters(PaymentFilterParams filterParams) {
+        // If filter params is null, create a new empty one
         if (filterParams == null) {
             return new PaymentFilterParams();
         }
         
-        // Create a new instance to avoid modifying the input
+        // Create a copy of the filter params to avoid modifying the original
         PaymentFilterParams validatedParams = new PaymentFilterParams();
         
-        // Validate and copy date range filter if present
-        if (filterParams.getDateRangeFilter() != null) {
-            validateDateRangeFilter(filterParams.getDateRangeFilter());
-            validatedParams.setDateRangeFilter(filterParams.getDateRangeFilter());
+        // Copy and validate organization ID
+        validatedParams.setOrganizationId(filterParams.getOrganizationId());
+        
+        // Copy and validate account ID
+        validatedParams.setAccountId(filterParams.getAccountId());
+        
+        // Validate and normalize date range filter
+        if (filterParams.getDateRange() != null) {
+            DateRangeFilter dateRange = filterParams.getDateRange();
+            
+            // Ensure start date is before end date
+            if (dateRange.getStartDate() != null && dateRange.getEndDate() != null &&
+                    dateRange.getStartDate().isAfter(dateRange.getEndDate())) {
+                throw new IllegalArgumentException("Start date must be before end date");
+            }
+            
+            validatedParams.setDateRange(dateRange);
         }
         
-        // Validate and copy amount range filter if present
-        if (filterParams.getAmountRangeFilter() != null) {
-            validateAmountRangeFilter(filterParams.getAmountRangeFilter());
-            validatedParams.setAmountRangeFilter(filterParams.getAmountRangeFilter());
+        // Validate and normalize amount range filter
+        if (filterParams.getAmountRange() != null) {
+            AmountRangeFilter amountRange = filterParams.getAmountRange();
+            
+            // Ensure min amount is less than max amount
+            if (amountRange.getMinAmount() != null && amountRange.getMaxAmount() != null &&
+                    amountRange.getMinAmount().compareTo(amountRange.getMaxAmount()) > 0) {
+                throw new IllegalArgumentException("Minimum amount must be less than or equal to maximum amount");
+            }
+            
+            // Ensure amounts are not negative
+            if (amountRange.getMinAmount() != null && amountRange.getMinAmount().signum() < 0) {
+                throw new IllegalArgumentException("Minimum amount cannot be negative");
+            }
+            
+            if (amountRange.getMaxAmount() != null && amountRange.getMaxAmount().signum() < 0) {
+                throw new IllegalArgumentException("Maximum amount cannot be negative");
+            }
+            
+            validatedParams.setAmountRange(amountRange);
         }
         
-        // Validate and copy status filter if present
+        // Validate and normalize status filter
         if (filterParams.getStatusFilter() != null) {
-            validateStatusFilter(filterParams.getStatusFilter());
-            validatedParams.setStatusFilter(filterParams.getStatusFilter());
+            StatusFilter statusFilter = filterParams.getStatusFilter();
+            
+            // Ensure status filter has at least one status
+            if (statusFilter.getStatuses() == null || statusFilter.getStatuses().isEmpty()) {
+                logger.warn("Status filter with no statuses provided, ignoring");
+            } else {
+                validatedParams.setStatusFilter(statusFilter);
+            }
         }
         
-        // Copy merchant ID if present
+        // Copy and validate merchant ID
         if (filterParams.getMerchantId() != null && !filterParams.getMerchantId().trim().isEmpty()) {
             validatedParams.setMerchantId(filterParams.getMerchantId().trim());
         }
         
-        // Copy payment type if present
+        // Copy and validate payment type
         if (filterParams.getPaymentType() != null && !filterParams.getPaymentType().trim().isEmpty()) {
             validatedParams.setPaymentType(filterParams.getPaymentType().trim());
         }
         
-        // Copy transaction reference if present
-        if (filterParams.getTransactionReference() != null && !filterParams.getTransactionReference().trim().isEmpty()) {
-            validatedParams.setTransactionReference(filterParams.getTransactionReference().trim());
+        // Copy and validate search term
+        if (filterParams.getSearchTerm() != null && !filterParams.getSearchTerm().trim().isEmpty()) {
+            validatedParams.setSearchTerm(filterParams.getSearchTerm().trim());
         }
         
-        // Copy search text if present
-        if (filterParams.getSearchText() != null && !filterParams.getSearchText().trim().isEmpty()) {
-            // Sanitize search text to prevent SQL injection
-            String sanitizedSearchText = filterParams.getSearchText().trim()
-                    .replaceAll("[%_\\[\\]^]", "\\\\$0"); // Escape special characters
-            validatedParams.setSearchText(sanitizedSearchText);
-        }
-        
-        // Copy and validate sort criteria if present
+        // Validate and normalize sort criteria
         if (filterParams.getSortCriteria() != null && !filterParams.getSortCriteria().isEmpty()) {
-            validatedParams.setSortCriteria(validateAndNormalizeSortCriteria(filterParams.getSortCriteria()));
+            List<SortCriteria> sortCriteria = new ArrayList<>();
+            
+            for (SortCriteria criteria : filterParams.getSortCriteria()) {
+                // Validate sort column
+                if (criteria.getColumn() == null || criteria.getColumn().trim().isEmpty()) {
+                    logger.warn("Sort criteria with no column provided, ignoring");
+                    continue;
+                }
+                
+                // Normalize column name
+                String column = criteria.getColumn().trim().toLowerCase();
+                
+                // Validate sort direction
+                SortCriteria.Direction direction = criteria.getDirection();
+                if (direction == null) {
+                    direction = SortCriteria.Direction.DESC; // Default to descending
+                }
+                
+                sortCriteria.add(new SortCriteria(column, direction));
+            }
+            
+            if (!sortCriteria.isEmpty()) {
+                validatedParams.setSortCriteria(sortCriteria);
+            }
         } else {
-            validatedParams.setSortCriteria(DEFAULT_SORT_CRITERIA);
+            // Default sort by created_at descending if no sort criteria provided
+            List<SortCriteria> defaultSort = Collections.singletonList(
+                    new SortCriteria("created_at", SortCriteria.Direction.DESC));
+            validatedParams.setSortCriteria(defaultSort);
+        }
+        
+        // Validate and normalize pagination parameters
+        if (filterParams.getPagination() != null) {
+            PaginationParams pagination = filterParams.getPagination();
+            
+            int offset = pagination.getOffset();
+            int limit = pagination.getLimit();
+            
+            // Ensure offset is not negative
+            if (offset < 0) {
+                offset = 0;
+            }
+            
+            // Ensure limit is within bounds
+            if (limit <= 0) {
+                limit = DEFAULT_PAGE_SIZE;
+            } else if (limit > MAX_PAGE_SIZE) {
+                limit = MAX_PAGE_SIZE;
+            }
+            
+            validatedParams.setPagination(new PaginationParams(offset, limit));
+        } else {
+            // Default pagination if not provided
+            validatedParams.setPagination(new PaginationParams(0, DEFAULT_PAGE_SIZE));
         }
         
         return validatedParams;
     }
-
-    @Override
-    public PaginationParams validateAndNormalizePaginationParams(PaginationParams paginationParams) {
-        if (paginationParams == null) {
-            return new PaginationParams(DEFAULT_PAGE_SIZE, DEFAULT_OFFSET);
-        }
-        
-        int limit = paginationParams.getLimit();
-        int offset = paginationParams.getOffset();
-        
-        // Validate and normalize limit
-        if (limit < MIN_PAGE_SIZE) {
-            limit = DEFAULT_PAGE_SIZE;
-            logger.debug("Normalizing page size to default: {}", DEFAULT_PAGE_SIZE);
-        } else if (limit > MAX_PAGE_SIZE) {
-            limit = MAX_PAGE_SIZE;
-            logger.debug("Capping page size to maximum: {}", MAX_PAGE_SIZE);
-        }
-        
-        // Validate and normalize offset
-        if (offset < 0) {
-            offset = DEFAULT_OFFSET;
-            logger.debug("Normalizing negative offset to default: {}", DEFAULT_OFFSET);
-        }
-        
-        return new PaginationParams(limit, offset);
-    }
-
-    @Override
-    public List<SortCriteria> validateAndNormalizeSortCriteria(List<SortCriteria> sortCriteria) {
-        if (sortCriteria == null || sortCriteria.isEmpty()) {
-            return DEFAULT_SORT_CRITERIA;
-        }
-        
-        List<SortCriteria> validatedCriteria = new ArrayList<>();
-        
-        for (SortCriteria criteria : sortCriteria) {
-            if (criteria == null) {
-                continue;
-            }
-            
-            String field = criteria.getField();
-            
-            // Validate field name
-            if (field == null || field.trim().isEmpty()) {
-                logger.warn("Ignoring sort criteria with null or empty field");
-                continue;
-            }
-            
-            field = field.trim().toLowerCase();
-            
-            // Check if field is allowed
-            if (!ALLOWED_SORT_FIELDS.contains(field)) {
-                logger.warn("Ignoring sort criteria with invalid field: {}", field);
-                continue;
-            }
-            
-            // Use provided direction or default to ASC
-            SortCriteria.Direction direction = criteria.getDirection() != null ? 
-                    criteria.getDirection() : SortCriteria.Direction.ASC;
-            
-            validatedCriteria.add(new SortCriteria(field, direction));
-        }
-        
-        // If all criteria were invalid, use default
-        if (validatedCriteria.isEmpty()) {
-            logger.debug("All sort criteria were invalid, using default sort");
-            return DEFAULT_SORT_CRITERIA;
-        }
-        
-        return validatedCriteria;
-    }
     
     /**
-     * Validates a date range filter for correctness and security.
-     * 
-     * @param dateRangeFilter The date range filter to validate
-     * @throws IllegalArgumentException if the filter is invalid
+     * Exception class for payment query errors.
      */
-    private void validateDateRangeFilter(DateRangeFilter dateRangeFilter) {
-        if (dateRangeFilter == null) {
-            throw new IllegalArgumentException("Date range filter cannot be null");
+    public static class PaymentQueryException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+        
+        /**
+         * Constructs a new PaymentQueryException with the specified detail message.
+         *
+         * @param message The detail message
+         */
+        public PaymentQueryException(String message) {
+            super(message);
         }
         
-        LocalDateTime startDate = dateRangeFilter.getStartDate();
-        LocalDateTime endDate = dateRangeFilter.getEndDate();
-        
-        // If both dates are null, that's invalid
-        if (startDate == null && endDate == null) {
-            throw new IllegalArgumentException("Date range filter must specify at least one date boundary");
+        /**
+         * Constructs a new PaymentQueryException with the specified detail message and cause.
+         *
+         * @param message The detail message
+         * @param cause The cause
+         */
+        public PaymentQueryException(String message, Throwable cause) {
+            super(message, cause);
         }
-        
-        // If both dates are specified, ensure start is before end
-        if (startDate != null && endDate != null && startDate.isAfter(endDate)) {
-            throw new IllegalArgumentException("Start date must be before end date in date range filter");
-        }
-        
-        // Validate date field to filter on
-        String dateField = dateRangeFilter.getDateField();
-        if (dateField == null || dateField.trim().isEmpty()) {
-            // Default to created_at if not specified
-            dateRangeFilter.setDateField("created_at");
-        } else {
-            // Ensure date field is one of the allowed values
-            String normalizedField = dateField.trim().toLowerCase();
-            if (!Arrays.asList("created_at", "updated_at", "processed_at").contains(normalizedField)) {
-                throw new IllegalArgumentException("Invalid date field for filtering: " + dateField);
-            }
-            dateRangeFilter.setDateField(normalizedField);
-        }
-        
-        // Limit date ranges to reasonable values (e.g., prevent querying all transactions ever)
-        if (startDate == null) {
-            // If no start date, default to 90 days ago
-            LocalDateTime defaultStart = LocalDateTime.now(ZoneOffset.UTC).minusDays(90);
-            dateRangeFilter.setStartDate(defaultStart);
-            logger.debug("Setting default start date to 90 days ago: {}", defaultStart);
-        }
-        
-        if (endDate == null) {
-            // If no end date, default to now
-            LocalDateTime defaultEnd = LocalDateTime.now(ZoneOffset.UTC);
-            dateRangeFilter.setEndDate(defaultEnd);
-            logger.debug("Setting default end date to now: {}", defaultEnd);
-        }
-    }
-    
-    /**
-     * Validates an amount range filter for correctness and security.
-     * 
-     * @param amountRangeFilter The amount range filter to validate
-     * @throws IllegalArgumentException if the filter is invalid
-     */
-    private void validateAmountRangeFilter(AmountRangeFilter amountRangeFilter) {
-        if (amountRangeFilter == null) {
-            throw new IllegalArgumentException("Amount range filter cannot be null");
-        }
-        
-        BigDecimal minAmount = amountRangeFilter.getMinAmount();
-        BigDecimal maxAmount = amountRangeFilter.getMaxAmount();
-        
-        // If both amounts are null, that's invalid
-        if (minAmount == null && maxAmount == null) {
-            throw new IllegalArgumentException("Amount range filter must specify at least one amount boundary");
-        }
-        
-        // If both amounts are specified, ensure min is less than or equal to max
-        if (minAmount != null && maxAmount != null && minAmount.compareTo(maxAmount) > 0) {
-            throw new IllegalArgumentException("Minimum amount must be less than or equal to maximum amount");
-        }
-        
-        // Ensure amounts are not negative
-        if (minAmount != null && minAmount.compareTo(BigDecimal.ZERO) < 0) {
-            throw new IllegalArgumentException("Minimum amount cannot be negative");
-        }
-        
-        if (maxAmount != null && maxAmount.compareTo(BigDecimal.ZERO) < 0) {
-            throw new IllegalArgumentException("Maximum amount cannot be negative");
-        }
-        
-        // Validate currency if specified
-        String currency = amountRangeFilter.getCurrency();
-        if (currency != null) {
-            if (currency.trim().isEmpty()) {
-                amountRangeFilter.setCurrency(null);
-            } else if (!currency.matches("[A-Z]{3}")) {
-                throw new IllegalArgumentException("Currency must be a 3-letter ISO code");
-            }
-        }
-    }
-    
-    /**
-     * Validates a status filter for correctness and security.
-     * 
-     * @param statusFilter The status filter to validate
-     * @throws IllegalArgumentException if the filter is invalid
-     */
-    private void validateStatusFilter(StatusFilter statusFilter) {
-        if (statusFilter == null) {
-            throw new IllegalArgumentException("Status filter cannot be null");
-        }
-        
-        List<String> statuses = statusFilter.getStatuses();
-        
-        // Must have at least one status
-        if (statuses == null || statuses.isEmpty()) {
-            throw new IllegalArgumentException("Status filter must include at least one status");
-        }
-        
-        // Validate each status against the PaymentStatus enum
-        List<String> validatedStatuses = new ArrayList<>();
-        for (String status : statuses) {
-            if (status == null || status.trim().isEmpty()) {
-                continue;
-            }
-            
-            String normalizedStatus = status.trim().toUpperCase();
-            
-            try {
-                // Verify this is a valid status by parsing it
-                PaymentStatus.valueOf(normalizedStatus);
-                validatedStatuses.add(normalizedStatus);
-            } catch (IllegalArgumentException e) {
-                logger.warn("Ignoring invalid status in filter: {}", status);
-                // Skip invalid statuses
-            }
-        }
-        
-        // If all statuses were invalid, that's an error
-        if (validatedStatuses.isEmpty()) {
-            throw new IllegalArgumentException("Status filter contains no valid status values");
-        }
-        
-        // Update the filter with validated statuses
-        statusFilter.setStatuses(validatedStatuses);
     }
 }

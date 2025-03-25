@@ -1,107 +1,81 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { BrowserRouter } from 'react-router-dom';
 import { Provider as ReduxProvider } from 'react-redux';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { configureStore } from '@reduxjs/toolkit';
-import { Geist, Geist_Mono } from '@fontsource/geist-sans';
+import { Geist, Geist_Mono } from 'geist/font';
 import AppRoutes from './routes';
 
 // Import reducers
-// Note: These will be created in separate files
-const rootReducer = {
-  // Core reducers
-  // Payment reducers will be added here when implemented
-};
-
-// Configure Redux store
+// Note: These will be created in separate files in the redux directory
+// This is a placeholder for the store configuration
 const store = configureStore({
-  reducer: rootReducer,
-  middleware: (getDefaultMiddleware) =>
-    getDefaultMiddleware({
-      serializableCheck: {
-        // Ignore non-serializable values in specific action types if needed
-        ignoredActions: [],
-      },
-    }),
+  reducer: {
+    // Core application reducers
+    // Will be expanded as more features are added
+    // payments: paymentsReducer will be imported from redux/payments
+  },
+  // Enable Redux DevTools in development
   devTools: process.env.NODE_ENV !== 'production',
 });
 
-// Configure React Query client
+// Configure React Query client with default options
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       refetchOnWindowFocus: false,
       retry: 1,
       staleTime: 5 * 60 * 1000, // 5 minutes
-      cacheTime: 10 * 60 * 1000, // 10 minutes
-    },
-    mutations: {
-      retry: 0,
     },
   },
 });
 
-// Define store type for TypeScript
+// Define the root type for the Redux store
 export type RootState = ReturnType<typeof store.getState>;
 export type AppDispatch = typeof store.dispatch;
 
 /**
  * Main application component that serves as the entry point
  * Configures and provides all necessary context providers:
- * - Redux store for state management
- * - React Query for data fetching
+ * - Redux store for global state management
+ * - React Query for data fetching and caching
  * - React Router for navigation
  */
-const Main: React.FC = () => {
-  // State to track theme preference
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
-
-  // Effect to detect and apply system theme preference
-  useEffect(() => {
-    // Check for system preference
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const initialTheme = prefersDark ? 'dark' : 'light';
-    setTheme(initialTheme);
+function Main() {
+  // Detect user's preferred color scheme
+  const prefersDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  
+  // Apply theme class to body
+  React.useEffect(() => {
+    document.body.classList.toggle('dark', prefersDarkMode);
     
-    // Apply theme to document
-    document.documentElement.classList.toggle('dark', initialTheme === 'dark');
+    // Add font classes from Geist
+    document.body.classList.add(Geist.variable);
+    document.body.classList.add(Geist_Mono.variable);
+    document.body.classList.add('antialiased');
     
-    // Listen for system theme changes
+    // Listen for changes in color scheme preference
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
     const handleChange = (e: MediaQueryListEvent) => {
-      const newTheme = e.matches ? 'dark' : 'light';
-      setTheme(newTheme);
-      document.documentElement.classList.toggle('dark', newTheme === 'dark');
+      document.body.classList.toggle('dark', e.matches);
     };
     
     mediaQuery.addEventListener('change', handleChange);
     return () => mediaQuery.removeEventListener('change', handleChange);
   }, []);
-
-  // Apply font classes to body
-  useEffect(() => {
-    // Add font classes to body
-    document.body.classList.add('antialiased');
-    
-    // Clean up on unmount
-    return () => {
-      document.body.classList.remove('antialiased');
-    };
-  }, []);
-
+  
   return (
     <ReduxProvider store={store}>
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
-          <div className={`${theme === 'dark' ? 'dark' : ''}`}>
-            <AppRoutes />
-          </div>
-          {process.env.NODE_ENV !== 'production' && <ReactQueryDevtools />}
+          <AppRoutes />
         </BrowserRouter>
+        {/* Enable React Query DevTools in development */}
+        {process.env.NODE_ENV !== 'production' && <ReactQueryDevtools initialIsOpen={false} />}
       </QueryClientProvider>
     </ReduxProvider>
   );
-};
+}
 
 export default Main;

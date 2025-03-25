@@ -1,15 +1,34 @@
-@import "tailwindcss";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  
+  /* Payment status colors */
+  --payment-success: #10b981; /* Green for successful/completed transactions */
+  --payment-pending: #f59e0b; /* Amber for processing/pending transactions */
+  --payment-failed: #ef4444; /* Red for failed/error transactions */
+  --payment-attention: #6366f1; /* Indigo for transactions requiring attention */
+  
+  /* Payment UI component colors */
+  --payment-capture-action: #3b82f6; /* Blue for capture actions */
+  --payment-refund-action: #f97316; /* Orange for refund actions */
+  --payment-void-action: #64748b; /* Slate for void actions */
+  
+  /* Payment card background colors */
+  --payment-card-bg-light: #f8fafc;
+  --payment-card-bg-dark: #1e293b;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+@layer base {
+  :root {
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --font-sans: var(--font-geist-sans);
+    --font-mono: var(--font-geist-mono);
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -22,5 +41,92 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans, Arial, Helvetica, sans-serif);
+}
+
+/* Payment-specific responsive utility classes */
+@layer utilities {
+  /* Payment card layouts */
+  .payment-card {
+    @apply rounded-lg border p-4 shadow-sm;
+  }
+  
+  /* Payment status indicators */
+  .payment-status-success {
+    @apply text-[var(--payment-success)] bg-[var(--payment-success)]/10 px-2 py-1 rounded-full text-xs font-medium;
+  }
+  
+  .payment-status-pending {
+    @apply text-[var(--payment-pending)] bg-[var(--payment-pending)]/10 px-2 py-1 rounded-full text-xs font-medium;
+  }
+  
+  .payment-status-failed {
+    @apply text-[var(--payment-failed)] bg-[var(--payment-failed)]/10 px-2 py-1 rounded-full text-xs font-medium;
+  }
+  
+  .payment-status-attention {
+    @apply text-[var(--payment-attention)] bg-[var(--payment-attention)]/10 px-2 py-1 rounded-full text-xs font-medium;
+  }
+  
+  /* Payment action buttons */
+  .payment-action-btn {
+    @apply px-4 py-2 rounded-md font-medium transition-colors;
+  }
+  
+  .payment-action-capture {
+    @apply bg-[var(--payment-capture-action)] text-white hover:bg-[var(--payment-capture-action)]/90;
+  }
+  
+  .payment-action-refund {
+    @apply bg-[var(--payment-refund-action)] text-white hover:bg-[var(--payment-refund-action)]/90;
+  }
+  
+  .payment-action-void {
+    @apply bg-[var(--payment-void-action)] text-white hover:bg-[var(--payment-void-action)]/90;
+  }
+  
+  /* Responsive payment table/card transformations */
+  .payment-table-row {
+    @apply grid grid-cols-1 gap-2 sm:table-row;
+  }
+  
+  .payment-table-cell {
+    @apply block sm:table-cell py-2 sm:py-4;
+  }
+  
+  .payment-table-cell-label {
+    @apply font-medium sm:hidden;
+  }
+  
+  /* Touch-friendly targets for mobile */
+  .payment-touch-target {
+    @apply min-h-[44px] min-w-[44px] flex items-center justify-center;
+  }
+  
+  /* Payment filter components */
+  .payment-filter-container {
+    @apply fixed inset-x-0 bottom-0 sm:static bg-[var(--background)] sm:bg-transparent p-4 sm:p-0 border-t sm:border-0 z-10 sm:z-auto;
+  }
+  
+  .payment-filter-toggle {
+    @apply fixed bottom-4 right-4 sm:hidden rounded-full w-12 h-12 flex items-center justify-center bg-[var(--payment-capture-action)] text-white shadow-lg z-20;
+  }
+  
+  /* Payment form controls */
+  .payment-form-input {
+    @apply w-full rounded-md border border-gray-300 dark:border-gray-700 px-3 py-2 min-h-[44px] sm:min-h-[36px];
+  }
+  
+  /* Payment modal sizes */
+  .payment-modal-sm {
+    @apply w-full sm:max-w-[400px] mx-auto;
+  }
+  
+  .payment-modal-md {
+    @apply w-full sm:max-w-[600px] mx-auto;
+  }
+  
+  .payment-modal-lg {
+    @apply w-full sm:max-w-[800px] mx-auto;
+  }
 }

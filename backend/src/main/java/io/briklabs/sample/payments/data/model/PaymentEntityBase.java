@@ -1,227 +1,245 @@
 package io.briklabs.sample.payments.data.model;
 
-import java.io.Serializable;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
  * Abstract base class for all payment-related entities.
- * <p>
- * This class provides shared functionality for ID generation, timestamp management,
- * and core data operations across payment entities. It serves as the foundation for
- * the payment entity inheritance hierarchy, ensuring consistent implementation patterns,
- * standardized validation, and centralized core logic for all payment data model classes.
- * </p>
- * <p>
- * By extending this base class, payment entity implementations benefit from:
- * <ul>
- *   <li>Standardized UUID-based primary key handling</li>
- *   <li>Consistent timestamp management for audit and tracking</li>
- *   <li>Common validation patterns</li>
- *   <li>Centralized utility methods</li>
- * </ul>
- * </p>
+ * Provides common fields and functionality for payment data models including:
+ * - UUID-based primary key management
+ * - Timestamp tracking for audit purposes
+ * - Standard object methods (equals, hashCode, toString)
+ * - Validation utilities
+ * 
+ * This class serves as the foundation for the payment entity hierarchy,
+ * ensuring consistent implementation patterns across all payment data models.
  */
-public abstract class PaymentEntityBase implements Serializable {
-
-    private static final long serialVersionUID = 1L;
-
+public abstract class PaymentEntityBase {
+    
     /**
-     * Validates the entity data.
-     * <p>
-     * This method should be implemented by all subclasses to perform
-     * entity-specific validation logic. It should throw an IllegalArgumentException
-     * with a descriptive message if validation fails.
-     * </p>
-     *
-     * @throws IllegalArgumentException if any validation fails
+     * Unique identifier for the entity.
+     * Uses UUID to ensure global uniqueness across distributed systems.
      */
-    public abstract void validate();
-
+    private UUID id;
+    
     /**
-     * Generates a new UUID for entity creation.
-     * <p>
-     * This utility method provides a standardized way to generate UUIDs
-     * for primary keys across all payment entities.
-     * </p>
-     *
-     * @return A new randomly generated UUID
+     * Timestamp when the entity was created.
+     * Used for audit tracking and chronological ordering.
      */
-    protected UUID generateId() {
-        return UUID.randomUUID();
+    private Instant createdAt;
+    
+    /**
+     * Timestamp when the entity was last updated.
+     * Used for change tracking and optimistic locking.
+     * May be null for newly created entities.
+     */
+    private Instant updatedAt;
+    
+    /**
+     * Default constructor.
+     * Initializes a new entity with a random UUID and current timestamp.
+     */
+    protected PaymentEntityBase() {
+        this.id = UUID.randomUUID();
+        this.createdAt = Instant.now();
     }
-
+    
     /**
-     * Gets the current timestamp for entity creation or updates.
-     * <p>
-     * This utility method provides a standardized way to generate timestamps
-     * for audit fields across all payment entities.
-     * </p>
-     *
-     * @return The current instant
+     * Constructor with specified ID.
+     * Used for creating entities with pre-defined IDs (e.g., from database).
+     * 
+     * @param id The unique identifier for this entity
      */
-    protected Instant getCurrentTimestamp() {
-        return Instant.now();
+    protected PaymentEntityBase(UUID id) {
+        this.id = id;
+        this.createdAt = Instant.now();
     }
-
+    
     /**
-     * Validates that a required field is not null.
-     * <p>
-     * This utility method provides a standardized way to validate
-     * required fields across all payment entities.
-     * </p>
-     *
-     * @param field The field to validate
-     * @param fieldName The name of the field for the error message
-     * @throws IllegalArgumentException if the field is null
+     * Full constructor with all base fields.
+     * Used primarily for reconstructing entities from database records.
+     * 
+     * @param id The unique identifier for this entity
+     * @param createdAt The timestamp when this entity was created
+     * @param updatedAt The timestamp when this entity was last updated
      */
-    protected void validateRequired(Object field, String fieldName) {
-        if (field == null) {
-            throw new IllegalArgumentException(fieldName + " is required");
+    protected PaymentEntityBase(UUID id, Instant createdAt, Instant updatedAt) {
+        this.id = id;
+        this.createdAt = createdAt;
+        this.updatedAt = updatedAt;
+    }
+    
+    /**
+     * Gets the unique identifier for this entity.
+     * 
+     * @return The UUID of this entity
+     */
+    public UUID getId() {
+        return id;
+    }
+    
+    /**
+     * Sets the unique identifier for this entity.
+     * This method should be used with caution, typically only when
+     * reconstructing entities from database records.
+     * 
+     * @param id The UUID to set for this entity
+     */
+    public void setId(UUID id) {
+        this.id = id;
+    }
+    
+    /**
+     * Gets the creation timestamp of this entity.
+     * 
+     * @return The Instant when this entity was created
+     */
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+    
+    /**
+     * Sets the creation timestamp of this entity.
+     * This method should be used with caution, typically only when
+     * reconstructing entities from database records.
+     * 
+     * @param createdAt The creation timestamp to set
+     */
+    public void setCreatedAt(Instant createdAt) {
+        this.createdAt = createdAt;
+    }
+    
+    /**
+     * Gets the last update timestamp of this entity.
+     * 
+     * @return The Instant when this entity was last updated, or null if never updated
+     */
+    public Instant getUpdatedAt() {
+        return updatedAt;
+    }
+    
+    /**
+     * Sets the last update timestamp of this entity.
+     * 
+     * @param updatedAt The update timestamp to set
+     */
+    public void setUpdatedAt(Instant updatedAt) {
+        this.updatedAt = updatedAt;
+    }
+    
+    /**
+     * Updates the entity's updatedAt timestamp to the current time.
+     * Should be called whenever the entity is modified.
+     */
+    public void markUpdated() {
+        this.updatedAt = Instant.now();
+    }
+    
+    /**
+     * Validates that a string value is not null or empty.
+     * 
+     * @param value The string to validate
+     * @param fieldName The name of the field being validated (for error messages)
+     * @throws IllegalArgumentException if the value is null or empty
+     */
+    protected void validateNotEmpty(String value, String fieldName) {
+        if (value == null || value.trim().isEmpty()) {
+            throw new IllegalArgumentException(fieldName + " cannot be null or empty");
         }
     }
-
+    
     /**
-     * Validates that a required string field is not null or empty.
-     * <p>
-     * This utility method provides a standardized way to validate
-     * required string fields across all payment entities.
-     * </p>
-     *
-     * @param field The string field to validate
-     * @param fieldName The name of the field for the error message
-     * @throws IllegalArgumentException if the field is null or empty
+     * Validates that an object is not null.
+     * 
+     * @param value The object to validate
+     * @param fieldName The name of the field being validated (for error messages)
+     * @throws IllegalArgumentException if the value is null
      */
-    protected void validateRequiredString(String field, String fieldName) {
-        if (field == null || field.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " is required and cannot be empty");
+    protected void validateNotNull(Object value, String fieldName) {
+        if (value == null) {
+            throw new IllegalArgumentException(fieldName + " cannot be null");
         }
     }
-
+    
     /**
-     * Validates that a UUID field is not null.
-     * <p>
-     * This utility method provides a standardized way to validate
-     * UUID fields across all payment entities.
-     * </p>
-     *
-     * @param id The UUID to validate
-     * @param fieldName The name of the field for the error message
-     * @throws IllegalArgumentException if the UUID is null
+     * Validates that a numeric value is positive (greater than zero).
+     * 
+     * @param value The numeric value to validate
+     * @param fieldName The name of the field being validated (for error messages)
+     * @throws IllegalArgumentException if the value is not positive
      */
-    protected void validateId(UUID id, String fieldName) {
-        if (id == null) {
-            throw new IllegalArgumentException(fieldName + " is required");
+    protected void validatePositive(Number value, String fieldName) {
+        if (value == null) {
+            throw new IllegalArgumentException(fieldName + " cannot be null");
+        }
+        
+        if (value.doubleValue() <= 0) {
+            throw new IllegalArgumentException(fieldName + " must be positive");
         }
     }
-
+    
     /**
-     * Validates that a timestamp field is not null.
-     * <p>
-     * This utility method provides a standardized way to validate
-     * timestamp fields across all payment entities.
-     * </p>
-     *
-     * @param timestamp The timestamp to validate
-     * @param fieldName The name of the field for the error message
-     * @throws IllegalArgumentException if the timestamp is null
+     * Validates that a string has a specific length.
+     * 
+     * @param value The string to validate
+     * @param length The exact required length
+     * @param fieldName The name of the field being validated (for error messages)
+     * @throws IllegalArgumentException if the value's length doesn't match the requirement
      */
-    protected void validateTimestamp(Instant timestamp, String fieldName) {
-        if (timestamp == null) {
-            throw new IllegalArgumentException(fieldName + " timestamp is required");
+    protected void validateExactLength(String value, int length, String fieldName) {
+        if (value == null) {
+            throw new IllegalArgumentException(fieldName + " cannot be null");
+        }
+        
+        if (value.length() != length) {
+            throw new IllegalArgumentException(fieldName + " must be exactly " + length + " characters");
         }
     }
-
+    
     /**
-     * Validates that a currency code is in the correct format.
-     * <p>
-     * This utility method validates that a currency code is a 3-character
-     * string as per ISO 4217 standard.
-     * </p>
-     *
-     * @param currency The currency code to validate
-     * @throws IllegalArgumentException if the currency code is invalid
+     * Validates that a string doesn't exceed a maximum length.
+     * 
+     * @param value The string to validate
+     * @param maxLength The maximum allowed length
+     * @param fieldName The name of the field being validated (for error messages)
+     * @throws IllegalArgumentException if the value's length exceeds the maximum
      */
-    protected void validateCurrency(String currency) {
-        if (currency == null || currency.length() != 3) {
-            throw new IllegalArgumentException("Currency must be a valid 3-character ISO 4217 code");
+    protected void validateMaxLength(String value, int maxLength, String fieldName) {
+        if (value != null && value.length() > maxLength) {
+            throw new IllegalArgumentException(fieldName + " cannot exceed " + maxLength + " characters");
         }
     }
-
+    
     /**
-     * Creates a deep copy of the entity.
-     * <p>
-     * This method should be implemented by subclasses to provide
-     * a proper deep copy implementation specific to each entity type.
-     * </p>
-     *
-     * @return A deep copy of this entity
-     */
-    public abstract Object clone();
-
-    /**
-     * Converts the entity to a domain model object.
-     * <p>
-     * This method should be implemented by subclasses to provide
-     * conversion from entity objects to domain model objects.
-     * </p>
-     *
-     * @return A domain model object representing this entity
-     */
-    public abstract Object toDomainModel();
-
-    /**
-     * Prepares the entity for persistence operations.
-     * <p>
-     * This method performs any necessary operations before the entity
-     * is persisted to the database, such as setting creation timestamps
-     * or generating IDs if they are not already set.
-     * </p>
-     * <p>
-     * Subclasses should override this method to add entity-specific
-     * preparation logic while calling super.prepareForPersistence().
-     * </p>
-     */
-    public void prepareForPersistence() {
-        // Default implementation does nothing
-        // Subclasses should override as needed
-    }
-
-    /**
-     * Updates the entity's audit information before an update operation.
-     * <p>
-     * This method updates timestamps and other audit fields before
-     * the entity is updated in the database.
-     * </p>
-     * <p>
-     * Subclasses should override this method to add entity-specific
-     * update logic while calling super.prepareForUpdate().
-     * </p>
-     */
-    public void prepareForUpdate() {
-        // Default implementation does nothing
-        // Subclasses should override as needed
-    }
-
-    /**
-     * Checks if this entity is new (not yet persisted).
-     * <p>
-     * This method should be implemented by subclasses to determine
-     * if the entity has been persisted to the database.
-     * </p>
-     *
+     * Checks if this entity is new (has not been persisted to the database).
+     * This is typically determined by whether the entity has been updated.
+     * 
      * @return true if the entity is new, false otherwise
      */
-    public abstract boolean isNew();
-
-    /**
-     * Gets the primary key of this entity.
-     * <p>
-     * This method should be implemented by subclasses to return
-     * the primary key field of the entity.
-     * </p>
-     *
-     * @return The primary key of this entity
-     */
-    public abstract UUID getId();
+    public boolean isNew() {
+        return updatedAt == null;
+    }
+    
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        PaymentEntityBase that = (PaymentEntityBase) o;
+        return Objects.equals(id, that.id);
+    }
+    
+    @Override
+    public int hashCode() {
+        return Objects.hash(id);
+    }
+    
+    @Override
+    public String toString() {
+        return getClass().getSimpleName() + "{" +
+                "id=" + id +
+                ", createdAt=" + createdAt +
+                ", updatedAt=" + updatedAt +
+                '}';
+    }
 }

@@ -13,10 +13,6 @@ import org.glassfish.jersey.servlet.ServletContainer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.briklabs.sample.payments.rest.TransactionResource;
-import io.briklabs.sample.payments.rest.TransactionProcessingResource;
-import io.briklabs.sample.payments.rest.TransactionEventResource;
-
 import io.swagger.v3.jaxrs2.SwaggerSerializers;
 import io.swagger.v3.jaxrs2.integration.JaxrsApplicationScanner;
 import io.swagger.v3.jaxrs2.integration.resources.OpenApiResource;
@@ -27,64 +23,82 @@ import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.servers.Server;
 import io.swagger.v3.oas.models.tags.Tag;
 
+import io.briklabs.sample.payments.rest.TransactionProcessingResource;
+import io.briklabs.sample.payments.rest.TransactionEventResource;
+
+/**
+ * Main REST application configuration class that registers resources, filters, and
+ * configures the JAX-RS application. This class has been updated to include payment-specific
+ * resources and OpenAPI documentation.
+ */
 public class RestApplication extends ResourceConfig {
-	public RestApplication() {
-		this(null);
-	}
+    public RestApplication() {
+        this(null);
+    }
 
-	public RestApplication(String serverUrl) {
-		// Register core resources
-		register(new StatusResource());
-		register(new CharsetResponseFilter());
-		register(new CorsFilter());
+    /**
+     * Constructs the REST application with the specified server URL.
+     * Registers core and payment-specific resources, filters, and configures OpenAPI documentation.
+     *
+     * @param serverUrl The base URL for the server, used in OpenAPI documentation
+     */
+    public RestApplication(String serverUrl) {
+        // Register core resources and filters
+        register(new StatusResource());
+        register(new CharsetResponseFilter());
+        register(new CorsFilter());
+        
+        // Register payment-specific resources
+        // These resources implement the payment API endpoints following the pattern
+        // /organizations/{org_id}/accounts/{account_id}/transactions/
+        register(TransactionProcessingResource.class);
+        register(TransactionEventResource.class);
+        
+        // Configure OpenAPI documentation
+        List<Server> servers = serverUrl == null ? List.of() : List.of(new Server().url(serverUrl));
 
-		// Register payment-specific resources
-		register(new TransactionResource());
-		register(new TransactionProcessingResource());
-		register(new TransactionEventResource());
+        // Create and configure OpenAPI documentation with payment-specific metadata
+        OpenApiResource openapiResource = new OpenApiResource();
+        openapiResource.setOpenApiConfiguration(new SwaggerConfiguration()
+                .openAPI31(true)
+                .openAPI(new OpenAPI(SpecVersion.V31)
+                        .info(new Info()
+                            .title("Core Sample API with Payments")
+                            .description("REST API for core sample application with payment processing capabilities")
+                            .version("1.0.0"))
+                        .servers(servers)
+                        .addTagsItem(new Tag().name("Payments").description("Payment transaction operations"))
+                        .addTagsItem(new Tag().name("Payment Events").description("Payment transaction event history"))
+                )
+                .prettyPrint(true)
+                .scannerClass(JaxrsApplicationScanner.class.getName()));
+        register(openapiResource);
+        register(SwaggerSerializers.class);
 
-		List<Server> servers = serverUrl == null ? List.of() : List.of(new Server().url(serverUrl));
+        // Disable WADL generation as we're using OpenAPI instead
+        setProperties(Map.of(ServerProperties.WADL_FEATURE_DISABLE, true));
+    }
 
-		// Configure OpenAPI documentation
-		OpenApiResource openapiResource = new OpenApiResource();
-		openapiResource.setOpenApiConfiguration(new SwaggerConfiguration()
-				.openAPI31(true)
-				.openAPI(new OpenAPI(SpecVersion.V31)
-						.info(new Info()
-							.title("Core Sample API with Payments")
-							.description("API for core sample application with payment transaction processing")
-							.version("1.0.0"))
-						.servers(servers)
-						.tags(List.of(
-							new Tag().name("Core").description("Core API endpoints"),
-							new Tag().name("Payments").description("Payment transaction operations")
-						)))
-				.prettyPrint(true)
-				.scannerClass(JaxrsApplicationScanner.class.getName()));
-		register(openapiResource);
-		register(SwaggerSerializers.class);
+    /**
+     * Starts the HTTP server with the specified base URI and application configuration.
+     * 
+     * @param baseURI The base URI for the server
+     * @param application The REST application configuration
+     * @throws IOException If an error occurs during server startup
+     */
+    public static void start(URI baseURI, RestApplication application) throws IOException {
+        Logger logger = LoggerFactory.getLogger(application.getClass());
+        ServletContainer servletContainer = new ServletContainer(application);
+        
+        // Create and start the HTTP server with the configured application
+        HttpServer server = GrizzlyWebContainerFactory.create(baseURI.resolve("/"), servletContainer, null, null);
+        
+        // Register shutdown hook to gracefully stop the server on JVM shutdown
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            logger.info("Shutting down server...");
+            server.shutdownNow();
+        }));
 
-		setProperties(Map.of(ServerProperties.WADL_FEATURE_DISABLE, true));
-	}
-
-	public static void start(URI baseURI, RestApplication application) throws IOException {
-		Logger logger = LoggerFactory.getLogger(application.getClass());
-		ServletContainer servletContainer = new ServletContainer(application);
-		
-		// Configure Grizzly HTTP server with HikariCP connection pool support
-		Map<String, String> initParams = Map.of(
-			"com.sun.jersey.config.property.packages", "io.briklabs.sample",
-			"hikaricp.maximumPoolSize", "30",
-			"hikaricp.minimumIdle", "10",
-			"hikaricp.connectionTimeout", "20000",
-			"hikaricp.idleTimeout", "300000",
-			"hikaricp.maxLifetime", "1200000",
-			"hikaricp.leakDetectionThreshold", "60000"
-		);
-		
-		HttpServer server = GrizzlyWebContainerFactory.create(baseURI.resolve("/"), servletContainer, initParams, null);
-		Runtime.getRuntime().addShutdownHook(new Thread(server::shutdownNow));
-
-		logger.info("{} started on {}", application.getClass().getSimpleName(), baseURI);
-	}
+        logger.info("{} started on {}", application.getClass().getSimpleName(), baseURI);
+    }
 }

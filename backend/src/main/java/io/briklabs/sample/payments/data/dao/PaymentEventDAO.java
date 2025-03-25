@@ -1,13 +1,11 @@
 package io.briklabs.sample.payments.data.dao;
 
+import io.briklabs.sample.payments.data.model.PaymentEventEntity;
+import io.briklabs.sample.payments.model.PaymentStatus;
+
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
-
-import io.briklabs.sample.payments.data.exception.ConnectionException;
-import io.briklabs.sample.payments.data.exception.QueryExecutionException;
-import io.briklabs.sample.payments.data.query.PaymentFilterParams;
-import io.briklabs.sample.payments.model.PaymentEvent;
 
 /**
  * Interface for payment event data access operations enabling comprehensive event tracking and audit trails.
@@ -17,288 +15,239 @@ import io.briklabs.sample.payments.model.PaymentEvent;
  * It supports event querying by transaction ID, event type, and timeline filtering, essential
  * for transaction debugging, audit compliance, and user activity tracking.
  * </p>
+ * <p>
+ * The implementation of this interface should ensure proper indexing for efficient timeline
+ * queries and maintain the relationship between transactions and their events.
+ * </p>
  */
-public interface PaymentEventDAO extends PaymentDAO<PaymentEvent, UUID> {
+public interface PaymentEventDAO extends PaymentDAO<PaymentEventEntity, UUID> {
 
     /**
-     * Finds all events for a specific transaction.
+     * Retrieves all events for a specific transaction, ordered chronologically.
      *
      * @param transactionId The transaction identifier
-     * @return List of events for the specified transaction, ordered chronologically
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @return A list of events for the transaction in chronological order
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<PaymentEvent> findByTransactionId(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException;
+    List<PaymentEventEntity> findByTransactionId(UUID transactionId);
 
     /**
-     * Finds all events for a specific transaction with filtering parameters.
+     * Retrieves events for a specific transaction filtered by event type.
      *
      * @param transactionId The transaction identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of events for the specified transaction, filtered and ordered according to parameters
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @param eventType The event type to filter by (e.g., "CREATED", "STATUS_CHANGE", "CAPTURE")
+     * @return A list of events matching the transaction ID and event type
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<PaymentEvent> findByTransactionId(UUID transactionId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
+    List<PaymentEventEntity> findByTransactionIdAndEventType(UUID transactionId, String eventType);
 
     /**
-     * Finds events by event type.
+     * Retrieves events for a specific transaction within a time range.
      *
-     * @param eventType The type of event to find
-     * @param filterParams Additional filtering parameters
-     * @return List of events of the specified type
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    List<PaymentEvent> findByEventType(String eventType, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Finds events by multiple event types.
-     *
-     * @param eventTypes List of event types to find
-     * @param filterParams Additional filtering parameters
-     * @return List of events matching any of the specified types
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    List<PaymentEvent> findByEventTypeIn(List<String> eventTypes, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Finds events created within a specific time range.
-     *
+     * @param transactionId The transaction identifier
      * @param startTime The start of the time range (inclusive)
      * @param endTime The end of the time range (inclusive)
-     * @param filterParams Additional filtering parameters
-     * @return List of events created within the specified time range
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @return A list of events within the specified time range
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<PaymentEvent> findByCreatedAtBetween(Instant startTime, Instant endTime, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
+    List<PaymentEventEntity> findByTransactionIdAndTimeRange(UUID transactionId, Instant startTime, Instant endTime);
 
     /**
-     * Finds events created by a specific user or system.
+     * Retrieves events for a specific transaction that resulted in a particular status.
      *
-     * @param createdBy The identifier of the user or system that created the events
-     * @param filterParams Additional filtering parameters
-     * @return List of events created by the specified user or system
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @param transactionId The transaction identifier
+     * @param status The resulting status to filter by
+     * @return A list of events that resulted in the specified status
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<PaymentEvent> findByCreatedBy(String createdBy, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
+    List<PaymentEventEntity> findByTransactionIdAndResultingStatus(UUID transactionId, PaymentStatus status);
 
     /**
-     * Finds events with a specific correlation ID.
+     * Retrieves the most recent event for a transaction.
+     *
+     * @param transactionId The transaction identifier
+     * @return The most recent event for the transaction, or empty if no events exist
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    java.util.Optional<PaymentEventEntity> findMostRecentByTransactionId(UUID transactionId);
+
+    /**
+     * Retrieves events by correlation ID to track related events across requests.
      *
      * @param correlationId The correlation identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of events with the specified correlation ID
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @return A list of events with the specified correlation ID
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<PaymentEvent> findByCorrelationId(UUID correlationId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
+    List<PaymentEventEntity> findByCorrelationId(UUID correlationId);
 
     /**
-     * Finds status change events for a transaction.
+     * Retrieves events created by a specific user or system.
+     *
+     * @param createdBy The identifier of the user or system that created the events
+     * @param limit Maximum number of events to return
+     * @param offset Offset for pagination
+     * @return A list of events created by the specified user or system
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    List<PaymentEventEntity> findByCreatedBy(String createdBy, int limit, int offset);
+
+    /**
+     * Retrieves events for all transactions in an organization within a time range.
+     *
+     * @param organizationId The organization identifier
+     * @param startTime The start of the time range (inclusive)
+     * @param endTime The end of the time range (inclusive)
+     * @param limit Maximum number of events to return
+     * @param offset Offset for pagination
+     * @return A list of events for the organization within the specified time range
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    List<PaymentEventEntity> findByOrganizationIdAndTimeRange(UUID organizationId, Instant startTime, Instant endTime, int limit, int offset);
+
+    /**
+     * Retrieves events for all transactions in an account within a time range.
+     *
+     * @param accountId The account identifier
+     * @param startTime The start of the time range (inclusive)
+     * @param endTime The end of the time range (inclusive)
+     * @param limit Maximum number of events to return
+     * @param offset Offset for pagination
+     * @return A list of events for the account within the specified time range
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    List<PaymentEventEntity> findByAccountIdAndTimeRange(UUID accountId, Instant startTime, Instant endTime, int limit, int offset);
+
+    /**
+     * Retrieves status change events for a transaction.
      *
      * @param transactionId The transaction identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of status change events for the specified transaction
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @return A list of status change events for the transaction
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<PaymentEvent> findStatusChangeEvents(UUID transactionId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
+    List<PaymentEventEntity> findStatusChangesByTransactionId(UUID transactionId);
 
     /**
-     * Finds error events for a transaction.
+     * Retrieves events for transactions that transitioned to a specific status within a time range.
+     *
+     * @param status The status to filter by
+     * @param startTime The start of the time range (inclusive)
+     * @param endTime The end of the time range (inclusive)
+     * @param limit Maximum number of events to return
+     * @param offset Offset for pagination
+     * @return A list of events for transactions that transitioned to the specified status
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    List<PaymentEventEntity> findByNewStatusAndTimeRange(PaymentStatus status, Instant startTime, Instant endTime, int limit, int offset);
+
+    /**
+     * Counts the number of events for a transaction.
      *
      * @param transactionId The transaction identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of error events for the specified transaction
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @return The count of events for the transaction
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<PaymentEvent> findErrorEvents(UUID transactionId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
+    long countByTransactionId(UUID transactionId);
 
     /**
-     * Finds the most recent event for a transaction.
+     * Creates a transaction creation event.
      *
      * @param transactionId The transaction identifier
-     * @return The most recent event for the specified transaction
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @param createdBy The identifier of the user or system that created the transaction
+     * @return The created event entity
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    PaymentEvent findMostRecentEvent(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException;
+    PaymentEventEntity createTransactionCreatedEvent(UUID transactionId, String createdBy);
 
     /**
-     * Finds the most recent event of a specific type for a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @param eventType The type of event to find
-     * @return The most recent event of the specified type for the transaction
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    PaymentEvent findMostRecentEventByType(UUID transactionId, String eventType) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Creates a status change event for a transaction.
+     * Creates a status change event.
      *
      * @param transactionId The transaction identifier
      * @param previousStatus The previous status
      * @param newStatus The new status
-     * @param createdBy The identifier of the user or system creating the event
-     * @return The created event
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @param createdBy The identifier of the user or system that changed the status
+     * @param correlationId Optional correlation ID for tracking related events
+     * @return The created event entity
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     * @throws IllegalStateException if the status transition is not allowed
      */
-    PaymentEvent createStatusChangeEvent(UUID transactionId, String previousStatus, String newStatus, String createdBy) 
-            throws ConnectionException, QueryExecutionException;
+    PaymentEventEntity createStatusChangeEvent(UUID transactionId, PaymentStatus previousStatus, 
+                                              PaymentStatus newStatus, String createdBy, UUID correlationId);
 
     /**
-     * Creates an error event for a transaction.
+     * Creates a capture event.
+     *
+     * @param transactionId The transaction identifier
+     * @param captureAmount The amount captured
+     * @param createdBy The identifier of the user or system that performed the capture
+     * @param correlationId Optional correlation ID for tracking related events
+     * @return The created event entity
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    PaymentEventEntity createCaptureEvent(UUID transactionId, String captureAmount, 
+                                         String createdBy, UUID correlationId);
+
+    /**
+     * Creates a refund event.
+     *
+     * @param transactionId The transaction identifier
+     * @param refundAmount The amount refunded
+     * @param reason The reason for the refund
+     * @param createdBy The identifier of the user or system that performed the refund
+     * @param correlationId Optional correlation ID for tracking related events
+     * @return The created event entity
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    PaymentEventEntity createRefundEvent(UUID transactionId, String refundAmount, 
+                                        String reason, String createdBy, UUID correlationId);
+
+    /**
+     * Creates a void event.
+     *
+     * @param transactionId The transaction identifier
+     * @param reason The reason for voiding the transaction
+     * @param createdBy The identifier of the user or system that voided the transaction
+     * @param correlationId Optional correlation ID for tracking related events
+     * @return The created event entity
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
+     */
+    PaymentEventEntity createVoidEvent(UUID transactionId, String reason, 
+                                      String createdBy, UUID correlationId);
+
+    /**
+     * Creates an error event.
      *
      * @param transactionId The transaction identifier
      * @param errorCode The error code
      * @param errorMessage The error message
-     * @param createdBy The identifier of the system reporting the error
-     * @return The created event
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @param createdBy The identifier of the system that reported the error
+     * @param correlationId Optional correlation ID for tracking related events
+     * @return The created event entity
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    PaymentEvent createErrorEvent(UUID transactionId, String errorCode, String errorMessage, String createdBy) 
-            throws ConnectionException, QueryExecutionException;
+    PaymentEventEntity createErrorEvent(UUID transactionId, String errorCode, 
+                                       String errorMessage, String createdBy, UUID correlationId);
 
     /**
-     * Finds events for multiple transactions.
+     * Retrieves events with specific event data content.
+     * This method allows searching within the JSON event data for specific keys or values.
      *
-     * @param transactionIds List of transaction identifiers
-     * @param filterParams Additional filtering parameters
-     * @return List of events for the specified transactions
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    List<PaymentEvent> findByTransactionIdIn(List<UUID> transactionIds, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Counts events by type for a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @return Map of event type to count
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    java.util.Map<String, Long> countEventsByType(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Finds events for transactions belonging to a specific organization.
-     *
-     * @param organizationId The organization identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of events for transactions belonging to the specified organization
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    List<PaymentEvent> findByOrganizationId(UUID organizationId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Finds events for transactions belonging to a specific account.
-     *
-     * @param organizationId The organization identifier
-     * @param accountId The account identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of events for transactions belonging to the specified account
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    List<PaymentEvent> findByOrganizationIdAndAccountId(UUID organizationId, UUID accountId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Finds events related to status transitions to a specific status.
-     *
-     * @param status The target status
-     * @param filterParams Additional filtering parameters
-     * @return List of events representing transitions to the specified status
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    List<PaymentEvent> findByNewStatus(String status, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Finds events related to status transitions from a specific status.
-     *
-     * @param status The source status
-     * @param filterParams Additional filtering parameters
-     * @return List of events representing transitions from the specified status
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    List<PaymentEvent> findByPreviousStatus(String status, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Finds events containing specific data in the event_data JSON field.
-     *
-     * @param jsonPath The JSON path expression
+     * @param key The JSON key to search for
      * @param value The value to match
-     * @param filterParams Additional filtering parameters
-     * @return List of events matching the JSON criteria
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @param limit Maximum number of events to return
+     * @param offset Offset for pagination
+     * @return A list of events with matching event data content
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<PaymentEvent> findByEventDataContains(String jsonPath, String value, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
+    List<PaymentEventEntity> findByEventDataContent(String key, String value, int limit, int offset);
 
     /**
-     * Gets the complete timeline of events for a transaction.
+     * Retrieves a timeline of events for a transaction with pagination.
      *
      * @param transactionId The transaction identifier
-     * @return List of events ordered chronologically
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * @param limit Maximum number of events to return
+     * @param offset Offset for pagination
+     * @return A paginated list of events for the transaction in chronological order
+     * @throws io.briklabs.sample.payments.data.exception.PaymentDataAccessException if a database error occurs
      */
-    List<PaymentEvent> getTransactionTimeline(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Gets the audit trail for a specific time period.
-     *
-     * @param startTime The start of the time period
-     * @param endTime The end of the time period
-     * @param filterParams Additional filtering parameters
-     * @return List of events within the specified time period
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    List<PaymentEvent> getAuditTrail(Instant startTime, Instant endTime, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
-
-    /**
-     * Gets the user activity log for a specific user.
-     *
-     * @param userId The user identifier
-     * @param startTime The start of the time period
-     * @param endTime The end of the time period
-     * @param filterParams Additional filtering parameters
-     * @return List of events created by the specified user within the time period
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    List<PaymentEvent> getUserActivityLog(String userId, Instant startTime, Instant endTime, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException;
+    List<PaymentEventEntity> getTransactionTimeline(UUID transactionId, int limit, int offset);
 }

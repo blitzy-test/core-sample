@@ -1,279 +1,389 @@
 package io.briklabs.sample.payments.data.query;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
 import java.util.Set;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.util.stream.Collectors;
 
 /**
- * A utility class that defines and validates sorting parameters for payment transaction queries.
- * This class provides a structured way to represent sort order, direction, and multi-column
- * sorting operations with validation against allowed sort fields.
- * 
+ * Defines and validates sorting parameters for payment transaction queries.
+ * This class provides a structured way to represent sort order, direction, and
+ * multi-column sorting operations with validation against allowed sort fields.
  * It handles the generation of SQL ORDER BY clauses with proper escaping and validation.
  */
 public class SortCriteria {
-    private static final Logger logger = LoggerFactory.getLogger(SortCriteria.class);
-    
+
     /**
-     * Enumeration of valid sort directions.
+     * Enumeration of sort directions.
      */
     public enum SortDirection {
-        ASC, DESC;
-        
+        ASC("ASC"),
+        DESC("DESC");
+
+        private final String sqlValue;
+
+        SortDirection(String sqlValue) {
+            this.sqlValue = sqlValue;
+        }
+
+        public String getSqlValue() {
+            return sqlValue;
+        }
+
         /**
-         * Parses a string into a SortDirection.
+         * Parse a string value to a SortDirection enum.
          * 
-         * @param direction The direction string (case-insensitive)
-         * @return The corresponding SortDirection, defaulting to ASC if invalid
+         * @param value The string value to parse
+         * @return The corresponding SortDirection enum value
          */
-        public static SortDirection fromString(String direction) {
-            if (direction == null || direction.isEmpty()) {
-                return ASC;
+        public static SortDirection fromString(String value) {
+            if (value == null) {
+                return SortDirection.DESC; // Default to descending
             }
             
-            try {
-                return valueOf(direction.toUpperCase());
-            } catch (IllegalArgumentException e) {
-                logger.warn("Invalid sort direction: {}, defaulting to ASC", direction);
-                return ASC;
+            String upperValue = value.trim().toUpperCase();
+            if ("ASC".equals(upperValue) || "ASCENDING".equals(upperValue)) {
+                return SortDirection.ASC;
+            } else if ("DESC".equals(upperValue) || "DESCENDING".equals(upperValue)) {
+                return SortDirection.DESC;
+            } else {
+                return SortDirection.DESC; // Default to descending for invalid values
             }
         }
     }
-    
-    // Set of allowed sort fields for payment transactions
-    private static final Set<String> ALLOWED_SORT_FIELDS = new HashSet<>(Arrays.asList(
-        "transaction_id", "organization_id", "account_id", "status", 
-        "amount", "currency", "created_at", "updated_at", "merchant_id", 
-        "payment_type", "transaction_reference", "description"
-    ));
-    
-    // Default sort field if none specified
-    private static final String DEFAULT_SORT_FIELD = "created_at";
-    
-    // Default sort direction if none specified
-    private static final SortDirection DEFAULT_SORT_DIRECTION = SortDirection.DESC;
-    
-    private String field;
-    private SortDirection direction;
-    private int priority;
-    
+
     /**
-     * Creates a new sort criterion with the specified field and direction.
-     * 
-     * @param field The field to sort by
-     * @param direction The sort direction
-     * @throws IllegalArgumentException If the field is not allowed
+     * Represents a single sort field with its direction.
      */
-    public SortCriteria(String field, SortDirection direction) {
-        this(field, direction, 0);
-    }
-    
-    /**
-     * Creates a new sort criterion with the specified field, direction, and priority.
-     * 
-     * @param field The field to sort by
-     * @param direction The sort direction
-     * @param priority The sort priority (lower values are applied first)
-     * @throws IllegalArgumentException If the field is not allowed
-     */
-    public SortCriteria(String field, SortDirection direction, int priority) {
-        validateField(field);
-        this.field = field;
-        this.direction = direction != null ? direction : DEFAULT_SORT_DIRECTION;
-        this.priority = priority;
-    }
-    
-    /**
-     * Creates a new sort criterion with the specified field and direction string.
-     * 
-     * @param field The field to sort by
-     * @param directionStr The sort direction as a string (ASC or DESC, case-insensitive)
-     * @throws IllegalArgumentException If the field is not allowed
-     */
-    public SortCriteria(String field, String directionStr) {
-        this(field, SortDirection.fromString(directionStr), 0);
-    }
-    
-    /**
-     * Creates a new sort criterion with the specified field, direction string, and priority.
-     * 
-     * @param field The field to sort by
-     * @param directionStr The sort direction as a string (ASC or DESC, case-insensitive)
-     * @param priority The sort priority (lower values are applied first)
-     * @throws IllegalArgumentException If the field is not allowed
-     */
-    public SortCriteria(String field, String directionStr, int priority) {
-        this(field, SortDirection.fromString(directionStr), priority);
-    }
-    
-    /**
-     * Validates that the field is allowed for sorting.
-     * 
-     * @param field The field to validate
-     * @throws IllegalArgumentException If the field is not allowed
-     */
-    private void validateField(String field) {
-        if (field == null || field.isEmpty()) {
-            this.field = DEFAULT_SORT_FIELD;
-            return;
+    public static class SortField {
+        private final String field;
+        private final SortDirection direction;
+        private final int priority;
+
+        /**
+         * Creates a new SortField with the specified field name and direction.
+         * 
+         * @param field The field name to sort by
+         * @param direction The sort direction
+         * @param priority The priority of this sort field (lower values have higher priority)
+         */
+        public SortField(String field, SortDirection direction, int priority) {
+            this.field = field;
+            this.direction = direction;
+            this.priority = priority;
         }
-        
-        // Check if the field is in the allowed list
-        String normalizedField = normalizeField(field);
-        if (!ALLOWED_SORT_FIELDS.contains(normalizedField)) {
-            logger.warn("Invalid sort field: {}, defaulting to {}", field, DEFAULT_SORT_FIELD);
-            this.field = DEFAULT_SORT_FIELD;
-        } else {
-            this.field = normalizedField;
+
+        /**
+         * Creates a new SortField with the specified field name and direction.
+         * 
+         * @param field The field name to sort by
+         * @param direction The sort direction
+         */
+        public SortField(String field, SortDirection direction) {
+            this(field, direction, 0);
         }
-    }
-    
-    /**
-     * Normalizes a field name by removing table aliases and ensuring proper format.
-     * 
-     * @param field The field name to normalize
-     * @return The normalized field name
-     */
-    private String normalizeField(String field) {
-        // Remove table alias if present (e.g., "t.created_at" -> "created_at")
-        if (field.contains(".")) {
-            return field.substring(field.lastIndexOf('.') + 1);
+
+        /**
+         * Creates a new SortField with the specified field name and default descending direction.
+         * 
+         * @param field The field name to sort by
+         */
+        public SortField(String field) {
+            this(field, SortDirection.DESC, 0);
         }
-        return field;
-    }
-    
-    /**
-     * Gets the sort field.
-     * 
-     * @return The sort field
-     */
-    public String getField() {
-        return field;
-    }
-    
-    /**
-     * Gets the sort direction.
-     * 
-     * @return The sort direction
-     */
-    public SortDirection getDirection() {
-        return direction;
-    }
-    
-    /**
-     * Gets the sort priority.
-     * 
-     * @return The sort priority
-     */
-    public int getPriority() {
-        return priority;
-    }
-    
-    /**
-     * Gets the column name with table alias for use in SQL queries.
-     * 
-     * @param tableAlias The table alias to use
-     * @return The column name with table alias
-     */
-    public String getColumn() {
-        return field;
-    }
-    
-    /**
-     * Gets the column name with table alias for use in SQL queries.
-     * 
-     * @param tableAlias The table alias to use
-     * @return The column name with table alias
-     */
-    public String getColumn(String tableAlias) {
-        if (tableAlias == null || tableAlias.isEmpty()) {
+
+        public String getField() {
             return field;
         }
-        return tableAlias + "." + field;
+
+        public SortDirection getDirection() {
+            return direction;
+        }
+
+        public int getPriority() {
+            return priority;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            SortField sortField = (SortField) o;
+            return priority == sortField.priority &&
+                   Objects.equals(field, sortField.field) &&
+                   direction == sortField.direction;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(field, direction, priority);
+        }
+
+        @Override
+        public String toString() {
+            return field + " " + direction.getSqlValue();
+        }
     }
-    
+
+    // Set of allowed sort fields to prevent SQL injection
+    private static final Set<String> DEFAULT_ALLOWED_FIELDS = new HashSet<>(Arrays.asList(
+        "transaction_id", "organization_id", "account_id", "status", 
+        "amount", "currency", "created_at", "updated_at", 
+        "merchant_id", "payment_type", "transaction_reference"
+    ));
+
+    // Default sort criteria for common views
+    public static final SortCriteria DEFAULT_SORT = new SortCriteria(
+        new SortField("created_at", SortDirection.DESC)
+    );
+
+    public static final SortCriteria RECENT_TRANSACTIONS_SORT = new SortCriteria(
+        new SortField("created_at", SortDirection.DESC)
+    );
+
+    public static final SortCriteria AMOUNT_DESCENDING_SORT = new SortCriteria(
+        new SortField("amount", SortDirection.DESC),
+        new SortField("created_at", SortDirection.DESC, 1)
+    );
+
+    public static final SortCriteria STATUS_PRIORITY_SORT = new SortCriteria(
+        new SortField("status", SortDirection.ASC),
+        new SortField("created_at", SortDirection.DESC, 1)
+    );
+
+    private final List<SortField> sortFields;
+    private final Set<String> allowedFields;
+
     /**
-     * Gets the SQL ORDER BY clause fragment for this sort criterion.
+     * Creates a new SortCriteria with the specified sort fields and default allowed fields.
      * 
-     * @return The SQL ORDER BY clause fragment
+     * @param sortFields The sort fields to use
      */
-    public String toSql() {
-        return field + " " + direction.name();
+    public SortCriteria(SortField... sortFields) {
+        this(DEFAULT_ALLOWED_FIELDS, sortFields);
     }
-    
+
     /**
-     * Gets the SQL ORDER BY clause fragment for this sort criterion with a table alias.
+     * Creates a new SortCriteria with the specified allowed fields and sort fields.
+     * 
+     * @param allowedFields The set of allowed field names
+     * @param sortFields The sort fields to use
+     */
+    public SortCriteria(Set<String> allowedFields, SortField... sortFields) {
+        this.allowedFields = Collections.unmodifiableSet(new HashSet<>(allowedFields));
+        
+        if (sortFields == null || sortFields.length == 0) {
+            this.sortFields = Collections.singletonList(
+                new SortField("created_at", SortDirection.DESC)
+            );
+        } else {
+            List<SortField> validatedFields = new ArrayList<>();
+            for (SortField field : sortFields) {
+                if (field != null && isValidField(field.getField())) {
+                    validatedFields.add(field);
+                }
+            }
+            
+            if (validatedFields.isEmpty()) {
+                validatedFields.add(new SortField("created_at", SortDirection.DESC));
+            }
+            
+            this.sortFields = Collections.unmodifiableList(validatedFields);
+        }
+    }
+
+    /**
+     * Creates a new SortCriteria from a string representation.
+     * Format: "field1:direction1,field2:direction2"
+     * 
+     * @param sortString The string representation of sort criteria
+     * @return A new SortCriteria instance
+     */
+    public static SortCriteria fromString(String sortString) {
+        return fromString(sortString, DEFAULT_ALLOWED_FIELDS);
+    }
+
+    /**
+     * Creates a new SortCriteria from a string representation with custom allowed fields.
+     * Format: "field1:direction1,field2:direction2"
+     * 
+     * @param sortString The string representation of sort criteria
+     * @param allowedFields The set of allowed field names
+     * @return A new SortCriteria instance
+     */
+    public static SortCriteria fromString(String sortString, Set<String> allowedFields) {
+        if (sortString == null || sortString.trim().isEmpty()) {
+            return new SortCriteria(allowedFields);
+        }
+
+        String[] parts = sortString.split(",");
+        List<SortField> fields = new ArrayList<>();
+        
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i].trim();
+            if (part.isEmpty()) {
+                continue;
+            }
+            
+            String[] fieldParts = part.split(":");
+            String fieldName = fieldParts[0].trim();
+            
+            SortDirection direction = fieldParts.length > 1 
+                ? SortDirection.fromString(fieldParts[1].trim())
+                : SortDirection.DESC;
+                
+            fields.add(new SortField(fieldName, direction, i));
+        }
+        
+        return new SortCriteria(allowedFields, fields.toArray(new SortField[0]));
+    }
+
+    /**
+     * Checks if a field name is valid for sorting.
+     * 
+     * @param fieldName The field name to validate
+     * @return true if the field is valid, false otherwise
+     */
+    public boolean isValidField(String fieldName) {
+        return fieldName != null && allowedFields.contains(fieldName);
+    }
+
+    /**
+     * Gets the list of sort fields.
+     * 
+     * @return The list of sort fields
+     */
+    public List<SortField> getSortFields() {
+        return sortFields;
+    }
+
+    /**
+     * Gets the set of allowed field names.
+     * 
+     * @return The set of allowed field names
+     */
+    public Set<String> getAllowedFields() {
+        return allowedFields;
+    }
+
+    /**
+     * Generates an SQL ORDER BY clause based on the sort criteria.
+     * 
+     * @return The SQL ORDER BY clause
+     */
+    public String toSqlOrderByClause() {
+        if (sortFields.isEmpty()) {
+            return "ORDER BY created_at DESC";
+        }
+        
+        String orderByClause = sortFields.stream()
+            .map(field -> escapeField(field.getField()) + " " + field.getDirection().getSqlValue())
+            .collect(Collectors.joining(", "));
+            
+        return "ORDER BY " + orderByClause;
+    }
+
+    /**
+     * Generates an SQL ORDER BY clause with table alias based on the sort criteria.
      * 
      * @param tableAlias The table alias to use
-     * @return The SQL ORDER BY clause fragment
+     * @return The SQL ORDER BY clause with table alias
      */
-    public String toSql(String tableAlias) {
-        return getColumn(tableAlias) + " " + direction.name();
-    }
-    
-    /**
-     * Creates a default sort criterion for created_at in descending order.
-     * 
-     * @return A default sort criterion
-     */
-    public static SortCriteria createDefault() {
-        return new SortCriteria(DEFAULT_SORT_FIELD, DEFAULT_SORT_DIRECTION);
-    }
-    
-    /**
-     * Creates a sort criterion for the specified field with ascending direction.
-     * 
-     * @param field The field to sort by
-     * @return A sort criterion with ascending direction
-     */
-    public static SortCriteria ascending(String field) {
-        return new SortCriteria(field, SortDirection.ASC);
-    }
-    
-    /**
-     * Creates a sort criterion for the specified field with descending direction.
-     * 
-     * @param field The field to sort by
-     * @return A sort criterion with descending direction
-     */
-    public static SortCriteria descending(String field) {
-        return new SortCriteria(field, SortDirection.DESC);
-    }
-    
-    /**
-     * Checks if a field is allowed for sorting.
-     * 
-     * @param field The field to check
-     * @return true if the field is allowed, false otherwise
-     */
-    public static boolean isAllowedField(String field) {
-        if (field == null || field.isEmpty()) {
-            return false;
+    public String toSqlOrderByClause(String tableAlias) {
+        if (sortFields.isEmpty()) {
+            return "ORDER BY " + tableAlias + ".created_at DESC";
         }
         
-        // Remove table alias if present
-        String normalizedField = field;
-        if (field.contains(".")) {
-            normalizedField = field.substring(field.lastIndexOf('.') + 1);
+        String orderByClause = sortFields.stream()
+            .map(field -> tableAlias + "." + escapeField(field.getField()) + " " + field.getDirection().getSqlValue())
+            .collect(Collectors.joining(", "));
+            
+        return "ORDER BY " + orderByClause;
+    }
+
+    /**
+     * Escapes a field name for use in SQL queries to prevent SQL injection.
+     * 
+     * @param fieldName The field name to escape
+     * @return The escaped field name
+     */
+    private String escapeField(String fieldName) {
+        // Only allow alphanumeric characters and underscores
+        if (!fieldName.matches("^[a-zA-Z0-9_]+$")) {
+            throw new IllegalArgumentException("Invalid field name: " + fieldName);
+        }
+        return fieldName;
+    }
+
+    /**
+     * Creates a new SortCriteria with an additional sort field.
+     * 
+     * @param field The field name to add
+     * @param direction The sort direction
+     * @return A new SortCriteria instance with the additional field
+     */
+    public SortCriteria addSortField(String field, SortDirection direction) {
+        if (!isValidField(field)) {
+            return this;
         }
         
-        return ALLOWED_SORT_FIELDS.contains(normalizedField);
+        List<SortField> newFields = new ArrayList<>(sortFields);
+        newFields.add(new SortField(field, direction, newFields.size()));
+        
+        return new SortCriteria(allowedFields, newFields.toArray(new SortField[0]));
     }
-    
+
     /**
-     * Gets the set of allowed sort fields.
+     * Creates a new SortCriteria with a different primary sort field.
      * 
-     * @return The set of allowed sort fields
+     * @param field The field name to use as primary sort
+     * @param direction The sort direction
+     * @return A new SortCriteria instance with the specified primary sort
      */
-    public static Set<String> getAllowedSortFields() {
-        return new HashSet<>(ALLOWED_SORT_FIELDS);
+    public SortCriteria withPrimarySort(String field, SortDirection direction) {
+        if (!isValidField(field)) {
+            return this;
+        }
+        
+        List<SortField> newFields = new ArrayList<>();
+        newFields.add(new SortField(field, direction, 0));
+        
+        // Add existing fields with incremented priority
+        for (SortField sortField : sortFields) {
+            if (!sortField.getField().equals(field)) {
+                newFields.add(new SortField(
+                    sortField.getField(), 
+                    sortField.getDirection(), 
+                    sortField.getPriority() + 1
+                ));
+            }
+        }
+        
+        return new SortCriteria(allowedFields, newFields.toArray(new SortField[0]));
     }
-    
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        SortCriteria that = (SortCriteria) o;
+        return Objects.equals(sortFields, that.sortFields) &&
+               Objects.equals(allowedFields, that.allowedFields);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(sortFields, allowedFields);
+    }
+
     @Override
     public String toString() {
-        return field + " " + direction.name() + " (priority: " + priority + ")";
+        return sortFields.stream()
+            .map(field -> field.getField() + ":" + field.getDirection().name())
+            .collect(Collectors.joining(","));
     }
 }

@@ -15,6 +15,31 @@
 		</encoder>
 	</appender>
 
+	<!-- Payment-specific JSON appender for structured logging -->
+	<appender name="PAYMENT_JSON" class="ch.qos.logback.core.ConsoleAppender">
+		<encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+			<pattern>%date{dd-MM-yyyy HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n</pattern>
+		</encoder>
+	</appender>
+
+	<!-- HikariCP connection pool logging configuration -->
+	<logger name="com.zaxxer.hikari" level="${log.hikari.level:-INFO}" />
+	<logger name="com.zaxxer.hikari.pool.HikariPool" level="${log.hikari.pool.level:-INFO}" />
+	<logger name="com.zaxxer.hikari.pool.PoolBase" level="${log.hikari.pool.level:-INFO}" />
+	<logger name="com.zaxxer.hikari.HikariConfig" level="${log.hikari.config.level:-INFO}" />
+	<logger name="com.zaxxer.hikari.pool.ProxyConnection" level="${log.hikari.connection.level:-INFO}" />
+
+	<!-- Payment-specific logging configuration -->
+	<logger name="io.briklabs.sample.payments" level="${log.payment.level:-INFO}" additivity="false">
+		<appender-ref ref="PAYMENT_JSON" />
+		<appender-ref ref="STDOUT" />
+	</logger>
+	
+	<logger name="io.briklabs.sample.payments.data" level="${log.payment.data.level:-INFO}" />
+	<logger name="io.briklabs.sample.payments.rest" level="${log.payment.rest.level:-INFO}" />
+	<logger name="io.briklabs.sample.payments.service" level="${log.payment.service.level:-INFO}" />
+	<logger name="io.briklabs.sample.payments.model" level="${log.payment.model.level:-INFO}" />
+
 	<root level="${log.root.level:-INFO}">
 		<appender-ref ref="STDOUT" />
 	</root>

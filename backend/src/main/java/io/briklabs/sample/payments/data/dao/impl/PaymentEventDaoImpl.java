@@ -1,28 +1,26 @@
 package io.briklabs.sample.payments.data.dao.impl;
 
+import io.briklabs.sample.config.ConfigSource;
+import io.briklabs.sample.config.DatabaseConfig;
+import io.briklabs.sample.payments.data.ConnectionManager;
+import io.briklabs.sample.payments.data.dao.PaymentEventDAO;
+import io.briklabs.sample.payments.data.exception.PaymentDataAccessException;
+import io.briklabs.sample.payments.data.model.PaymentEventEntity;
+import io.briklabs.sample.payments.data.query.PaymentQueryBuilder;
+import io.briklabs.sample.payments.model.PaymentStatus;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import io.briklabs.sample.config.ConfigSource;
-import io.briklabs.sample.config.DatabaseConfig;
-import io.briklabs.sample.payments.data.dao.PaymentEventDAO;
-import io.briklabs.sample.payments.data.exception.ConnectionException;
-import io.briklabs.sample.payments.data.exception.QueryExecutionException;
-import io.briklabs.sample.payments.data.exception.ValidationException;
-import io.briklabs.sample.payments.data.query.PaymentFilterParams;
-import io.briklabs.sample.payments.data.query.PaymentQueryBuilder;
-import io.briklabs.sample.payments.model.PaymentEvent;
 
 /**
  * Implementation of the PaymentEventDAO interface that manages the storage and retrieval
@@ -33,16 +31,14 @@ import io.briklabs.sample.payments.model.PaymentEvent;
  * all payment operations, supporting debugging, compliance, and user activity tracking.
  * </p>
  */
-public class PaymentEventDaoImpl extends AbstractPaymentDaoImpl<PaymentEvent, UUID> implements PaymentEventDAO {
+public class PaymentEventDaoImpl extends AbstractPaymentDaoImpl<PaymentEventEntity, UUID> implements PaymentEventDAO {
 
     private static final Logger logger = LoggerFactory.getLogger(PaymentEventDaoImpl.class);
     
     private static final String TABLE_NAME = "payment_event";
-    private static final String[] ALL_COLUMNS = {
-        "event_id", "transaction_id", "event_type", "previous_status", "new_status", 
-        "event_data", "created_at", "created_by", "correlation_id"
-    };
-
+    private static final String ALL_COLUMNS = "event_id, transaction_id, event_type, previous_status, new_status, " +
+            "event_data, created_at, created_by, correlation_id";
+    
     /**
      * Creates a new PaymentEventDaoImpl with the specified database configuration.
      *
@@ -50,1157 +46,906 @@ public class PaymentEventDaoImpl extends AbstractPaymentDaoImpl<PaymentEvent, UU
      * @param configSource the configuration source
      */
     public PaymentEventDaoImpl(DatabaseConfig databaseConfig, ConfigSource configSource) {
-        super(databaseConfig, configSource, TABLE_NAME);
+        super(databaseConfig, configSource);
+        logger.debug("Initialized PaymentEventDaoImpl");
     }
-
+    
     /**
-     * Maps a ResultSet row to a PaymentEvent object.
+     * Creates a new PaymentEventDaoImpl with the specified connection manager.
+     *
+     * @param connectionManager the connection manager
+     */
+    public PaymentEventDaoImpl(ConnectionManager connectionManager) {
+        super(connectionManager);
+        logger.debug("Initialized PaymentEventDaoImpl with provided connection manager");
+    }
+    
+    @Override
+    protected PaymentEventEntity executeCreate(Connection connection, PaymentEventEntity entity) throws SQLException {
+        logger.debug("Creating payment event: {}", entity);
+        
+        entity.prepareForPersistence();
+        entity.validate();
+        
+        String sql = "INSERT INTO " + TABLE_NAME + " (" + ALL_COLUMNS + ") " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            int paramIndex = 1;
+            stmt.setObject(paramIndex++, entity.getEventId());
+            stmt.setObject(paramIndex++, entity.getTransactionId());
+            stmt.setString(paramIndex++, entity.getEventType());
+            stmt.setString(paramIndex++, entity.getPreviousStatus());
+            stmt.setString(paramIndex++, entity.getNewStatus());
+            stmt.setString(paramIndex++, entity.getEventData());
+            stmt.setTimestamp(paramIndex++, Timestamp.from(entity.getCreatedAt()));
+            stmt.setString(paramIndex++, entity.getCreatedBy());
+            stmt.setObject(paramIndex, entity.getCorrelationId());
+            
+            int rowsAffected = stmt.executeUpdate();
+            if (rowsAffected != 1) {
+                throw new SQLException("Failed to create payment event, expected 1 row affected but got " + rowsAffected);
+            }
+            
+            return entity;
+        }
+    }
+    
+    @Override
+    protected Optional<PaymentEventEntity> executeFindById(Connection connection, UUID id) throws SQLException {
+        logger.debug("Finding payment event by ID: {}", id);
+        
+        String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + " WHERE event_id = ?";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            stmt.setObject(1, id);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return Optional.of(mapResultSetToEntity(rs));
+                }
+                return Optional.empty();
+            }
+        }
+    }
+    
+    @Override
+    protected PaymentEventEntity executeUpdate(Connection connection, PaymentEventEntity entity) throws SQLException {
+        // Payment events are immutable once created
+        throw new UnsupportedOperationException("Payment events are immutable and cannot be updated");
+    }
+    
+    @Override
+    protected boolean executeDelete(Connection connection, UUID id) throws SQLException {
+        logger.debug("Deleting payment event with ID: {}", id);
+        
+        // In a production system, we might want to prevent deletion of payment events
+        // for audit and compliance reasons. Consider implementing a soft delete instead.
+        String sql = "DELETE FROM " + TABLE_NAME + " WHERE event_id = ?";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            stmt.setObject(1, id);
+            
+            int rowsAffected = stmt.executeUpdate();
+            return rowsAffected > 0;
+        }
+    }
+    
+    @Override
+    protected List<PaymentEventEntity> executeQuery(Connection connection, Object params) throws SQLException {
+        logger.debug("Querying payment events with params: {}", params);
+        
+        PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder()
+                .select(ALL_COLUMNS)
+                .from(TABLE_NAME);
+        
+        // Apply filters if params is a PaymentFilterParams object
+        if (params != null) {
+            queryBuilder.applyFilters(params);
+        }
+        
+        try (PreparedStatement stmt = queryBuilder.buildPreparedStatement(connection);
+             ResultSet rs = stmt.executeQuery()) {
+            
+            List<PaymentEventEntity> results = new ArrayList<>();
+            while (rs.next()) {
+                results.add(mapResultSetToEntity(rs));
+            }
+            return results;
+        }
+    }
+    
+    @Override
+    protected List<PaymentEventEntity> executeBatchCreate(Connection connection, List<PaymentEventEntity> entities) throws SQLException {
+        logger.debug("Batch creating {} payment events", entities.size());
+        
+        String sql = "INSERT INTO " + TABLE_NAME + " (" + ALL_COLUMNS + ") " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            for (PaymentEventEntity entity : entities) {
+                entity.prepareForPersistence();
+                entity.validate();
+                
+                int paramIndex = 1;
+                stmt.setObject(paramIndex++, entity.getEventId());
+                stmt.setObject(paramIndex++, entity.getTransactionId());
+                stmt.setString(paramIndex++, entity.getEventType());
+                stmt.setString(paramIndex++, entity.getPreviousStatus());
+                stmt.setString(paramIndex++, entity.getNewStatus());
+                stmt.setString(paramIndex++, entity.getEventData());
+                stmt.setTimestamp(paramIndex++, Timestamp.from(entity.getCreatedAt()));
+                stmt.setString(paramIndex++, entity.getCreatedBy());
+                stmt.setObject(paramIndex, entity.getCorrelationId());
+                
+                stmt.addBatch();
+            }
+            
+            stmt.executeBatch();
+            return entities;
+        }
+    }
+    
+    @Override
+    protected List<PaymentEventEntity> executeBatchUpdate(Connection connection, List<PaymentEventEntity> entities) throws SQLException {
+        // Payment events are immutable once created
+        throw new UnsupportedOperationException("Payment events are immutable and cannot be updated");
+    }
+    
+    @Override
+    protected long executeCount(Connection connection, Object params) throws SQLException {
+        logger.debug("Counting payment events with params: {}", params);
+        
+        PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder()
+                .count("*")
+                .from(TABLE_NAME);
+        
+        // Apply filters if params is a PaymentFilterParams object
+        if (params != null) {
+            queryBuilder.applyFilters(params);
+        }
+        
+        try (PreparedStatement stmt = queryBuilder.buildPreparedStatement(connection);
+             ResultSet rs = stmt.executeQuery()) {
+            
+            if (rs.next()) {
+                return rs.getLong(1);
+            }
+            return 0;
+        }
+    }
+    
+    @Override
+    protected boolean executeExists(Connection connection, UUID id) throws SQLException {
+        logger.debug("Checking if payment event exists with ID: {}", id);
+        
+        String sql = "SELECT 1 FROM " + TABLE_NAME + " WHERE event_id = ?";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            stmt.setObject(1, id);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+    
+    @Override
+    protected List<PaymentEventEntity> executeFindByOrganizationId(Connection connection, UUID organizationId) throws SQLException {
+        logger.debug("Finding payment events by organization ID: {}", organizationId);
+        
+        String sql = "SELECT e." + ALL_COLUMNS + " FROM " + TABLE_NAME + " e " +
+                "JOIN payment_transaction t ON e.transaction_id = t.transaction_id " +
+                "WHERE t.organization_id = ? " +
+                "ORDER BY e.created_at DESC";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            stmt.setObject(1, organizationId);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                List<PaymentEventEntity> results = new ArrayList<>();
+                while (rs.next()) {
+                    results.add(mapResultSetToEntity(rs));
+                }
+                return results;
+            }
+        }
+    }
+    
+    @Override
+    protected List<PaymentEventEntity> executeFindByAccountId(Connection connection, UUID accountId) throws SQLException {
+        logger.debug("Finding payment events by account ID: {}", accountId);
+        
+        String sql = "SELECT e." + ALL_COLUMNS + " FROM " + TABLE_NAME + " e " +
+                "JOIN payment_transaction t ON e.transaction_id = t.transaction_id " +
+                "WHERE t.account_id = ? " +
+                "ORDER BY e.created_at DESC";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            stmt.setObject(1, accountId);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                List<PaymentEventEntity> results = new ArrayList<>();
+                while (rs.next()) {
+                    results.add(mapResultSetToEntity(rs));
+                }
+                return results;
+            }
+        }
+    }
+    
+    @Override
+    protected List<PaymentEventEntity> executeFindByOrganizationAndAccountId(Connection connection, UUID organizationId, UUID accountId) throws SQLException {
+        logger.debug("Finding payment events by organization ID: {} and account ID: {}", organizationId, accountId);
+        
+        String sql = "SELECT e." + ALL_COLUMNS + " FROM " + TABLE_NAME + " e " +
+                "JOIN payment_transaction t ON e.transaction_id = t.transaction_id " +
+                "WHERE t.organization_id = ? AND t.account_id = ? " +
+                "ORDER BY e.created_at DESC";
+        
+        try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+            stmt.setObject(1, organizationId);
+            stmt.setObject(2, accountId);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                List<PaymentEventEntity> results = new ArrayList<>();
+                while (rs.next()) {
+                    results.add(mapResultSetToEntity(rs));
+                }
+                return results;
+            }
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findByTransactionId(UUID transactionId) {
+        logger.debug("Finding payment events by transaction ID: {}", transactionId);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE transaction_id = ? ORDER BY created_at ASC";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, transactionId);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find payment events by transaction ID: " + transactionId, e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findByTransactionIdAndEventType(UUID transactionId, String eventType) {
+        logger.debug("Finding payment events by transaction ID: {} and event type: {}", transactionId, eventType);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE transaction_id = ? AND event_type = ? ORDER BY created_at ASC";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, transactionId);
+                    stmt.setString(2, eventType);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find payment events by transaction ID and event type", e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findByTransactionIdAndTimeRange(UUID transactionId, Instant startTime, Instant endTime) {
+        logger.debug("Finding payment events by transaction ID: {} and time range: {} to {}", 
+                transactionId, startTime, endTime);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE transaction_id = ? AND created_at BETWEEN ? AND ? ORDER BY created_at ASC";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, transactionId);
+                    stmt.setTimestamp(2, startTime != null ? Timestamp.from(startTime) : null);
+                    stmt.setTimestamp(3, endTime != null ? Timestamp.from(endTime) : null);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find payment events by transaction ID and time range", e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findByTransactionIdAndResultingStatus(UUID transactionId, PaymentStatus status) {
+        logger.debug("Finding payment events by transaction ID: {} and resulting status: {}", 
+                transactionId, status);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE transaction_id = ? AND new_status = ? ORDER BY created_at ASC";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, transactionId);
+                    stmt.setString(2, status != null ? status.name() : null);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find payment events by transaction ID and resulting status", e);
+        }
+    }
+    
+    @Override
+    public Optional<PaymentEventEntity> findMostRecentByTransactionId(UUID transactionId) {
+        logger.debug("Finding most recent payment event by transaction ID: {}", transactionId);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE transaction_id = ? ORDER BY created_at DESC LIMIT 1";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, transactionId);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (rs.next()) {
+                            return Optional.of(mapResultSetToEntity(rs));
+                        }
+                        return Optional.empty();
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find most recent payment event by transaction ID", e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findByCorrelationId(UUID correlationId) {
+        logger.debug("Finding payment events by correlation ID: {}", correlationId);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE correlation_id = ? ORDER BY created_at ASC";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, correlationId);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find payment events by correlation ID", e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findByCreatedBy(String createdBy, int limit, int offset) {
+        logger.debug("Finding payment events by created by: {} with limit: {} and offset: {}", 
+                createdBy, limit, offset);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE created_by = ? ORDER BY created_at DESC LIMIT ? OFFSET ?";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setString(1, createdBy);
+                    stmt.setInt(2, limit);
+                    stmt.setInt(3, offset);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find payment events by created by", e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findByOrganizationIdAndTimeRange(UUID organizationId, Instant startTime, 
+                                                                    Instant endTime, int limit, int offset) {
+        logger.debug("Finding payment events by organization ID: {} and time range: {} to {} with limit: {} and offset: {}", 
+                organizationId, startTime, endTime, limit, offset);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT e." + ALL_COLUMNS + " FROM " + TABLE_NAME + " e " +
+                        "JOIN payment_transaction t ON e.transaction_id = t.transaction_id " +
+                        "WHERE t.organization_id = ? AND e.created_at BETWEEN ? AND ? " +
+                        "ORDER BY e.created_at DESC LIMIT ? OFFSET ?";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, organizationId);
+                    stmt.setTimestamp(2, startTime != null ? Timestamp.from(startTime) : null);
+                    stmt.setTimestamp(3, endTime != null ? Timestamp.from(endTime) : null);
+                    stmt.setInt(4, limit);
+                    stmt.setInt(5, offset);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find payment events by organization ID and time range", e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findByAccountIdAndTimeRange(UUID accountId, Instant startTime, 
+                                                              Instant endTime, int limit, int offset) {
+        logger.debug("Finding payment events by account ID: {} and time range: {} to {} with limit: {} and offset: {}", 
+                accountId, startTime, endTime, limit, offset);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT e." + ALL_COLUMNS + " FROM " + TABLE_NAME + " e " +
+                        "JOIN payment_transaction t ON e.transaction_id = t.transaction_id " +
+                        "WHERE t.account_id = ? AND e.created_at BETWEEN ? AND ? " +
+                        "ORDER BY e.created_at DESC LIMIT ? OFFSET ?";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, accountId);
+                    stmt.setTimestamp(2, startTime != null ? Timestamp.from(startTime) : null);
+                    stmt.setTimestamp(3, endTime != null ? Timestamp.from(endTime) : null);
+                    stmt.setInt(4, limit);
+                    stmt.setInt(5, offset);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find payment events by account ID and time range", e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findStatusChangesByTransactionId(UUID transactionId) {
+        logger.debug("Finding status change events by transaction ID: {}", transactionId);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE transaction_id = ? AND event_type = 'STATUS_CHANGE' ORDER BY created_at ASC";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, transactionId);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find status change events by transaction ID", e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findByNewStatusAndTimeRange(PaymentStatus status, Instant startTime, 
+                                                              Instant endTime, int limit, int offset) {
+        logger.debug("Finding payment events by new status: {} and time range: {} to {} with limit: {} and offset: {}", 
+                status, startTime, endTime, limit, offset);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE new_status = ? AND created_at BETWEEN ? AND ? " +
+                        "ORDER BY created_at DESC LIMIT ? OFFSET ?";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setString(1, status != null ? status.name() : null);
+                    stmt.setTimestamp(2, startTime != null ? Timestamp.from(startTime) : null);
+                    stmt.setTimestamp(3, endTime != null ? Timestamp.from(endTime) : null);
+                    stmt.setInt(4, limit);
+                    stmt.setInt(5, offset);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find payment events by new status and time range", e);
+        }
+    }
+    
+    @Override
+    public long countByTransactionId(UUID transactionId) {
+        logger.debug("Counting payment events by transaction ID: {}", transactionId);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT COUNT(*) FROM " + TABLE_NAME + " WHERE transaction_id = ?";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, transactionId);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (rs.next()) {
+                            return rs.getLong(1);
+                        }
+                        return 0;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to count payment events by transaction ID", e);
+        }
+    }
+    
+    @Override
+    public PaymentEventEntity createTransactionCreatedEvent(UUID transactionId, String createdBy) {
+        logger.debug("Creating transaction created event for transaction ID: {}", transactionId);
+        
+        try {
+            PaymentEventEntity event = new PaymentEventEntity();
+            event.setEventId(UUID.randomUUID());
+            event.setTransactionId(transactionId);
+            event.setEventType("CREATED");
+            event.setNewStatus(PaymentStatus.CREATED.name());
+            event.setEventData("{\"action\":\"transaction_created\"}");
+            event.setCreatedAt(Instant.now());
+            event.setCreatedBy(createdBy);
+            
+            return create(event);
+        } catch (Exception e) {
+            throw handleException("Failed to create transaction created event", e);
+        }
+    }
+    
+    @Override
+    public PaymentEventEntity createStatusChangeEvent(UUID transactionId, PaymentStatus previousStatus, 
+                                                    PaymentStatus newStatus, String createdBy, UUID correlationId) {
+        logger.debug("Creating status change event for transaction ID: {} from status: {} to status: {}", 
+                transactionId, previousStatus, newStatus);
+        
+        // Validate the status transition
+        if (previousStatus != null && newStatus != null) {
+            PaymentStatus.validateTransition(previousStatus, newStatus);
+        }
+        
+        try {
+            PaymentEventEntity event = new PaymentEventEntity();
+            event.setEventId(UUID.randomUUID());
+            event.setTransactionId(transactionId);
+            event.setEventType("STATUS_CHANGE");
+            event.setPreviousStatus(previousStatus != null ? previousStatus.name() : null);
+            event.setNewStatus(newStatus != null ? newStatus.name() : null);
+            
+            String eventData = String.format(
+                    "{\"action\":\"status_change\",\"previous\":\"%s\",\"new\":\"%s\"}",
+                    previousStatus != null ? previousStatus.name() : "null",
+                    newStatus != null ? newStatus.name() : "null"
+            );
+            event.setEventData(eventData);
+            
+            event.setCreatedAt(Instant.now());
+            event.setCreatedBy(createdBy);
+            event.setCorrelationId(correlationId);
+            
+            return create(event);
+        } catch (IllegalStateException e) {
+            throw e; // Rethrow validation exceptions
+        } catch (Exception e) {
+            throw handleException("Failed to create status change event", e);
+        }
+    }
+    
+    @Override
+    public PaymentEventEntity createCaptureEvent(UUID transactionId, String captureAmount, 
+                                               String createdBy, UUID correlationId) {
+        logger.debug("Creating capture event for transaction ID: {} with amount: {}", 
+                transactionId, captureAmount);
+        
+        try {
+            PaymentEventEntity event = new PaymentEventEntity();
+            event.setEventId(UUID.randomUUID());
+            event.setTransactionId(transactionId);
+            event.setEventType("CAPTURE");
+            event.setPreviousStatus(PaymentStatus.AUTHORIZED.name());
+            event.setNewStatus(PaymentStatus.CAPTURED.name());
+            
+            String eventData = String.format(
+                    "{\"action\":\"capture\",\"amount\":\"%s\"}",
+                    captureAmount
+            );
+            event.setEventData(eventData);
+            
+            event.setCreatedAt(Instant.now());
+            event.setCreatedBy(createdBy);
+            event.setCorrelationId(correlationId);
+            
+            return create(event);
+        } catch (Exception e) {
+            throw handleException("Failed to create capture event", e);
+        }
+    }
+    
+    @Override
+    public PaymentEventEntity createRefundEvent(UUID transactionId, String refundAmount, 
+                                              String reason, String createdBy, UUID correlationId) {
+        logger.debug("Creating refund event for transaction ID: {} with amount: {} and reason: {}", 
+                transactionId, refundAmount, reason);
+        
+        try {
+            PaymentEventEntity event = new PaymentEventEntity();
+            event.setEventId(UUID.randomUUID());
+            event.setTransactionId(transactionId);
+            event.setEventType("REFUND");
+            event.setPreviousStatus(PaymentStatus.CAPTURED.name());
+            event.setNewStatus(PaymentStatus.REFUNDED.name());
+            
+            String eventData = String.format(
+                    "{\"action\":\"refund\",\"amount\":\"%s\",\"reason\":\"%s\"}",
+                    refundAmount,
+                    reason != null ? reason.replace("\"", "\\\"") : ""
+            );
+            event.setEventData(eventData);
+            
+            event.setCreatedAt(Instant.now());
+            event.setCreatedBy(createdBy);
+            event.setCorrelationId(correlationId);
+            
+            return create(event);
+        } catch (Exception e) {
+            throw handleException("Failed to create refund event", e);
+        }
+    }
+    
+    @Override
+    public PaymentEventEntity createVoidEvent(UUID transactionId, String reason, 
+                                            String createdBy, UUID correlationId) {
+        logger.debug("Creating void event for transaction ID: {} with reason: {}", 
+                transactionId, reason);
+        
+        try {
+            PaymentEventEntity event = new PaymentEventEntity();
+            event.setEventId(UUID.randomUUID());
+            event.setTransactionId(transactionId);
+            event.setEventType("VOID");
+            event.setPreviousStatus(PaymentStatus.AUTHORIZED.name());
+            event.setNewStatus(PaymentStatus.VOIDED.name());
+            
+            String eventData = String.format(
+                    "{\"action\":\"void\",\"reason\":\"%s\"}",
+                    reason != null ? reason.replace("\"", "\\\"") : ""
+            );
+            event.setEventData(eventData);
+            
+            event.setCreatedAt(Instant.now());
+            event.setCreatedBy(createdBy);
+            event.setCorrelationId(correlationId);
+            
+            return create(event);
+        } catch (Exception e) {
+            throw handleException("Failed to create void event", e);
+        }
+    }
+    
+    @Override
+    public PaymentEventEntity createErrorEvent(UUID transactionId, String errorCode, 
+                                             String errorMessage, String createdBy, UUID correlationId) {
+        logger.debug("Creating error event for transaction ID: {} with error code: {} and message: {}", 
+                transactionId, errorCode, errorMessage);
+        
+        try {
+            PaymentEventEntity event = new PaymentEventEntity();
+            event.setEventId(UUID.randomUUID());
+            event.setTransactionId(transactionId);
+            event.setEventType("ERROR");
+            
+            String eventData = String.format(
+                    "{\"action\":\"error\",\"code\":\"%s\",\"message\":\"%s\"}",
+                    errorCode != null ? errorCode : "",
+                    errorMessage != null ? errorMessage.replace("\"", "\\\"") : ""
+            );
+            event.setEventData(eventData);
+            
+            event.setCreatedAt(Instant.now());
+            event.setCreatedBy(createdBy);
+            event.setCorrelationId(correlationId);
+            
+            return create(event);
+        } catch (Exception e) {
+            throw handleException("Failed to create error event", e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> findByEventDataContent(String key, String value, int limit, int offset) {
+        logger.debug("Finding payment events by event data content with key: {} and value: {}", key, value);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                // Using PostgreSQL JSONB containment operator @> for searching within JSON
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE event_data::jsonb @> ?::jsonb " +
+                        "ORDER BY created_at DESC LIMIT ? OFFSET ?";
+                
+                String jsonPattern = String.format("{\"%s\":\"%s\"}", 
+                        key != null ? key : "", 
+                        value != null ? value : "");
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setString(1, jsonPattern);
+                    stmt.setInt(2, limit);
+                    stmt.setInt(3, offset);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to find payment events by event data content", e);
+        }
+    }
+    
+    @Override
+    public List<PaymentEventEntity> getTransactionTimeline(UUID transactionId, int limit, int offset) {
+        logger.debug("Getting transaction timeline for transaction ID: {} with limit: {} and offset: {}", 
+                transactionId, limit, offset);
+        
+        try {
+            Connection connection = connectionManager.getConnection();
+            try {
+                String sql = "SELECT " + ALL_COLUMNS + " FROM " + TABLE_NAME + 
+                        " WHERE transaction_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?";
+                
+                try (PreparedStatement stmt = prepareStatement(connection, sql)) {
+                    stmt.setObject(1, transactionId);
+                    stmt.setInt(2, limit);
+                    stmt.setInt(3, offset);
+                    
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        List<PaymentEventEntity> results = new ArrayList<>();
+                        while (rs.next()) {
+                            results.add(mapResultSetToEntity(rs));
+                        }
+                        return results;
+                    }
+                }
+            } finally {
+                connectionManager.releaseConnection(connection);
+            }
+        } catch (Exception e) {
+            throw handleException("Failed to get transaction timeline", e);
+        }
+    }
+    
+    /**
+     * Maps a result set row to a PaymentEventEntity.
      *
      * @param rs the result set
-     * @return the mapped PaymentEvent
-     * @throws SQLException if a database access error occurs
+     * @return the mapped entity
+     * @throws SQLException if a database error occurs
      */
-    @Override
-    protected PaymentEvent mapRow(ResultSet rs) throws SQLException {
-        UUID eventId = (UUID) rs.getObject("event_id");
-        UUID transactionId = (UUID) rs.getObject("transaction_id");
-        String eventType = rs.getString("event_type");
-        String previousStatus = rs.getString("previous_status");
-        String newStatus = rs.getString("new_status");
-        String eventData = rs.getString("event_data");
-        Timestamp createdAtTs = rs.getTimestamp("created_at");
-        Instant createdAt = createdAtTs != null ? createdAtTs.toInstant() : null;
-        String createdBy = rs.getString("created_by");
-        UUID correlationId = (UUID) rs.getObject("correlation_id");
+    private PaymentEventEntity mapResultSetToEntity(ResultSet rs) throws SQLException {
+        PaymentEventEntity entity = new PaymentEventEntity();
         
-        return new PaymentEvent(
-            eventId, 
-            transactionId, 
-            eventType, 
-            previousStatus, 
-            newStatus, 
-            eventData, 
-            createdAt, 
-            createdBy, 
-            correlationId
-        );
-    }
-
-    /**
-     * Validates a PaymentEvent entity before database operations.
-     *
-     * @param event the event to validate
-     * @throws ValidationException if the event fails validation
-     */
-    @Override
-    protected void validateEntity(PaymentEvent event) throws ValidationException {
-        try {
-            event.validate();
-        } catch (IllegalArgumentException e) {
-            throw new ValidationException("Invalid payment event: " + e.getMessage(), e);
-        }
-    }
-
-    /**
-     * Builds a query for finding a payment event by ID.
-     *
-     * @param id the event ID
-     * @return the SQL query
-     */
-    @Override
-    protected String buildFindByIdQuery(UUID id) {
-        return "SELECT " + String.join(", ", ALL_COLUMNS) + 
-               " FROM " + TABLE_NAME + 
-               " WHERE event_id = ?";
-    }
-
-    /**
-     * Builds a query for filtering payment events.
-     *
-     * @param filterParams the filter parameters
-     * @return the query builder
-     */
-    @Override
-    protected PaymentQueryBuilder buildFilterQuery(PaymentFilterParams filterParams) {
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e");
+        entity.setEventId((UUID) rs.getObject("event_id"));
+        entity.setTransactionId((UUID) rs.getObject("transaction_id"));
+        entity.setEventType(rs.getString("event_type"));
+        entity.setPreviousStatus(rs.getString("previous_status"));
+        entity.setNewStatus(rs.getString("new_status"));
+        entity.setEventData(rs.getString("event_data"));
         
-        if (filterParams != null) {
-            // Apply organization and account filters if provided
-            if (filterParams.getOrganizationId() != null) {
-                builder.innerJoin("payment_transaction t", "e.transaction_id = t.transaction_id")
-                       .and("t.organization_id = ?")
-                       .addParameter(filterParams.getOrganizationId());
-            }
-            
-            if (filterParams.getAccountId() != null) {
-                if (!builder.getQueryString().contains("payment_transaction t")) {
-                    builder.innerJoin("payment_transaction t", "e.transaction_id = t.transaction_id");
-                }
-                builder.and("t.account_id = ?")
-                       .addParameter(filterParams.getAccountId());
-            }
-            
-            // Apply date range filter
-            if (filterParams.getDateRange() != null) {
-                builder.dateRange("e.created_at", 
-                        filterParams.getDateRange().getStartDate() != null ? 
-                                filterParams.getDateRange().getStartDate().atZone(java.time.ZoneId.systemDefault()).toLocalDateTime() : null,
-                        filterParams.getDateRange().getEndDate() != null ? 
-                                filterParams.getDateRange().getEndDate().atZone(java.time.ZoneId.systemDefault()).toLocalDateTime() : null);
-            }
-            
-            // Apply event type filter if provided in search term
-            if (filterParams.getSearchTerm() != null && !filterParams.getSearchTerm().isEmpty()) {
-                builder.and("(e.event_type LIKE ? OR e.event_data LIKE ?)")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%");
-            }
-            
-            // Apply sorting
-            if (filterParams.getSortCriteria() != null && !filterParams.getSortCriteria().isEmpty()) {
-                for (PaymentFilterParams.SortCriteria criteria : filterParams.getSortCriteria()) {
-                    String column = criteria.getColumn();
-                    // Prefix column with alias if not already prefixed
-                    if (!column.contains(".")) {
-                        column = "e." + column;
-                    }
-                    builder.orderBy(column + " " + criteria.getDirection());
-                }
-            } else {
-                // Default sort by created_at descending
-                builder.orderBy("e.created_at DESC");
-            }
-            
-            // Apply pagination
-            if (filterParams.getPagination() != null) {
-                builder.paginate(filterParams.getPagination().getLimit(), filterParams.getPagination().getOffset());
-            }
+        Timestamp createdAt = rs.getTimestamp("created_at");
+        if (createdAt != null) {
+            entity.setCreatedAt(createdAt.toInstant());
         }
         
-        return builder;
-    }
-
-    /**
-     * Builds a count query for payment events.
-     *
-     * @param filterParams the filter parameters
-     * @return the query builder
-     */
-    @Override
-    protected PaymentQueryBuilder buildCountQuery(PaymentFilterParams filterParams) {
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .count("*")
-            .from(TABLE_NAME + " e");
+        entity.setCreatedBy(rs.getString("created_by"));
+        entity.setCorrelationId((UUID) rs.getObject("correlation_id"));
         
-        if (filterParams != null) {
-            // Apply organization and account filters if provided
-            if (filterParams.getOrganizationId() != null) {
-                builder.innerJoin("payment_transaction t", "e.transaction_id = t.transaction_id")
-                       .and("t.organization_id = ?")
-                       .addParameter(filterParams.getOrganizationId());
-            }
-            
-            if (filterParams.getAccountId() != null) {
-                if (!builder.getQueryString().contains("payment_transaction t")) {
-                    builder.innerJoin("payment_transaction t", "e.transaction_id = t.transaction_id");
-                }
-                builder.and("t.account_id = ?")
-                       .addParameter(filterParams.getAccountId());
-            }
-            
-            // Apply date range filter
-            if (filterParams.getDateRange() != null) {
-                builder.dateRange("e.created_at", 
-                        filterParams.getDateRange().getStartDate() != null ? 
-                                filterParams.getDateRange().getStartDate().atZone(java.time.ZoneId.systemDefault()).toLocalDateTime() : null,
-                        filterParams.getDateRange().getEndDate() != null ? 
-                                filterParams.getDateRange().getEndDate().atZone(java.time.ZoneId.systemDefault()).toLocalDateTime() : null);
-            }
-            
-            // Apply event type filter if provided in search term
-            if (filterParams.getSearchTerm() != null && !filterParams.getSearchTerm().isEmpty()) {
-                builder.and("(e.event_type LIKE ? OR e.event_data LIKE ?)")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%");
-            }
-        }
-        
-        return builder;
-    }
-
-    /**
-     * Builds an insert query for a payment event.
-     *
-     * @param event the event to insert
-     * @return the SQL query
-     */
-    @Override
-    protected String buildInsertQuery(PaymentEvent event) {
-        return "INSERT INTO " + TABLE_NAME + 
-               " (event_id, transaction_id, event_type, previous_status, new_status, " +
-               "event_data, created_at, created_by, correlation_id) " +
-               "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
-    }
-
-    /**
-     * Builds an update query for a payment event.
-     * Note: Events should generally be immutable, but this is provided for completeness.
-     *
-     * @param event the event to update
-     * @return the SQL query
-     */
-    @Override
-    protected String buildUpdateQuery(PaymentEvent event) {
-        return "UPDATE " + TABLE_NAME + 
-               " SET transaction_id = ?, event_type = ?, previous_status = ?, " +
-               "new_status = ?, event_data = ?, created_at = ?, created_by = ?, " +
-               "correlation_id = ? " +
-               "WHERE event_id = ?";
-    }
-
-    /**
-     * Builds a delete query for a payment event.
-     * Note: Events should generally not be deleted, but this is provided for completeness.
-     *
-     * @param id the event ID
-     * @return the SQL query
-     */
-    @Override
-    protected String buildDeleteQuery(UUID id) {
-        return "DELETE FROM " + TABLE_NAME + " WHERE event_id = ?";
-    }
-
-    /**
-     * Gets the parameters for an insert query.
-     *
-     * @param event the event to insert
-     * @return the query parameters
-     */
-    @Override
-    protected Object[] getInsertParameters(PaymentEvent event) {
-        return new Object[] {
-            event.getEventId(),
-            event.getTransactionId(),
-            event.getEventType(),
-            event.getPreviousStatus(),
-            event.getNewStatus(),
-            event.getEventData(),
-            event.getCreatedAt() != null ? Timestamp.from(event.getCreatedAt()) : null,
-            event.getCreatedBy(),
-            event.getCorrelationId()
-        };
-    }
-
-    /**
-     * Gets the parameters for an update query.
-     *
-     * @param event the event to update
-     * @return the query parameters
-     */
-    @Override
-    protected Object[] getUpdateParameters(PaymentEvent event) {
-        return new Object[] {
-            event.getTransactionId(),
-            event.getEventType(),
-            event.getPreviousStatus(),
-            event.getNewStatus(),
-            event.getEventData(),
-            event.getCreatedAt() != null ? Timestamp.from(event.getCreatedAt()) : null,
-            event.getCreatedBy(),
-            event.getCorrelationId(),
-            event.getEventId() // WHERE clause parameter
-        };
-    }
-
-    /**
-     * Gets the parameters for a delete query.
-     *
-     * @param id the event ID
-     * @return the query parameters
-     */
-    @Override
-    protected Object[] getDeleteParameters(UUID id) {
-        return new Object[] { id };
-    }
-
-    /**
-     * Finds all events for a specific transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @return List of events for the specified transaction, ordered chronologically
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByTransactionId(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID cannot be null");
-        }
-        
-        String sql = "SELECT " + String.join(", ", ALL_COLUMNS) + 
-                     " FROM " + TABLE_NAME + 
-                     " WHERE transaction_id = ? " +
-                     "ORDER BY created_at ASC";
-        
-        return executeQuery(sql, this::mapRows, transactionId);
-    }
-
-    /**
-     * Finds all events for a specific transaction with filtering parameters.
-     *
-     * @param transactionId The transaction identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of events for the specified transaction, filtered and ordered according to parameters
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByTransactionId(UUID transactionId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID cannot be null");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.transaction_id = ?")
-            .addParameter(transactionId);
-        
-        if (filterParams != null) {
-            // Apply date range filter
-            if (filterParams.getDateRange() != null) {
-                builder.dateRange("e.created_at", 
-                        filterParams.getDateRange().getStartDate() != null ? 
-                                filterParams.getDateRange().getStartDate().atZone(java.time.ZoneId.systemDefault()).toLocalDateTime() : null,
-                        filterParams.getDateRange().getEndDate() != null ? 
-                                filterParams.getDateRange().getEndDate().atZone(java.time.ZoneId.systemDefault()).toLocalDateTime() : null);
-            }
-            
-            // Apply event type filter if provided in search term
-            if (filterParams.getSearchTerm() != null && !filterParams.getSearchTerm().isEmpty()) {
-                builder.and("(e.event_type LIKE ? OR e.event_data LIKE ?)")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%");
-            }
-            
-            // Apply sorting
-            if (filterParams.getSortCriteria() != null && !filterParams.getSortCriteria().isEmpty()) {
-                for (PaymentFilterParams.SortCriteria criteria : filterParams.getSortCriteria()) {
-                    String column = criteria.getColumn();
-                    // Prefix column with alias if not already prefixed
-                    if (!column.contains(".")) {
-                        column = "e." + column;
-                    }
-                    builder.orderBy(column + " " + criteria.getDirection());
-                }
-            } else {
-                // Default sort by created_at ascending for chronological order
-                builder.orderBy("e.created_at ASC");
-            }
-            
-            // Apply pagination
-            if (filterParams.getPagination() != null) {
-                builder.paginate(filterParams.getPagination().getLimit(), filterParams.getPagination().getOffset());
-            }
-        } else {
-            // Default sort by created_at ascending for chronological order
-            builder.orderBy("e.created_at ASC");
-        }
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds events by event type.
-     *
-     * @param eventType The type of event to find
-     * @param filterParams Additional filtering parameters
-     * @return List of events of the specified type
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByEventType(String eventType, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (eventType == null || eventType.isEmpty()) {
-            throw new IllegalArgumentException("Event type cannot be null or empty");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.event_type = ?")
-            .addParameter(eventType);
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds events by multiple event types.
-     *
-     * @param eventTypes List of event types to find
-     * @param filterParams Additional filtering parameters
-     * @return List of events matching any of the specified types
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByEventTypeIn(List<String> eventTypes, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (eventTypes == null || eventTypes.isEmpty()) {
-            throw new IllegalArgumentException("Event types list cannot be null or empty");
-        }
-        
-        StringBuilder placeholders = new StringBuilder();
-        for (int i = 0; i < eventTypes.size(); i++) {
-            if (i > 0) {
-                placeholders.append(", ");
-            }
-            placeholders.append("?");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.event_type IN (" + placeholders + ")");
-        
-        // Add event type parameters
-        for (String eventType : eventTypes) {
-            builder.addParameter(eventType);
-        }
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds events created within a specific time range.
-     *
-     * @param startTime The start of the time range (inclusive)
-     * @param endTime The end of the time range (inclusive)
-     * @param filterParams Additional filtering parameters
-     * @return List of events created within the specified time range
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByCreatedAtBetween(Instant startTime, Instant endTime, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (startTime == null && endTime == null) {
-            throw new IllegalArgumentException("At least one of startTime or endTime must be provided");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e");
-        
-        if (startTime != null && endTime != null) {
-            builder.where("e.created_at BETWEEN ? AND ?")
-                   .addParameter(Timestamp.from(startTime))
-                   .addParameter(Timestamp.from(endTime));
-        } else if (startTime != null) {
-            builder.where("e.created_at >= ?")
-                   .addParameter(Timestamp.from(startTime));
-        } else {
-            builder.where("e.created_at <= ?")
-                   .addParameter(Timestamp.from(endTime));
-        }
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds events created by a specific user or system.
-     *
-     * @param createdBy The identifier of the user or system that created the events
-     * @param filterParams Additional filtering parameters
-     * @return List of events created by the specified user or system
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByCreatedBy(String createdBy, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (createdBy == null || createdBy.isEmpty()) {
-            throw new IllegalArgumentException("Created by cannot be null or empty");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.created_by = ?")
-            .addParameter(createdBy);
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds events with a specific correlation ID.
-     *
-     * @param correlationId The correlation identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of events with the specified correlation ID
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByCorrelationId(UUID correlationId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (correlationId == null) {
-            throw new IllegalArgumentException("Correlation ID cannot be null");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.correlation_id = ?")
-            .addParameter(correlationId);
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds status change events for a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of status change events for the specified transaction
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findStatusChangeEvents(UUID transactionId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID cannot be null");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.transaction_id = ?")
-            .and("e.event_type = ?")
-            .addParameter(transactionId)
-            .addParameter("STATUS_CHANGE");
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds error events for a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of error events for the specified transaction
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findErrorEvents(UUID transactionId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID cannot be null");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.transaction_id = ?")
-            .and("e.event_type = ?")
-            .addParameter(transactionId)
-            .addParameter("ERROR");
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds the most recent event for a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @return The most recent event for the specified transaction
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public PaymentEvent findMostRecentEvent(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID cannot be null");
-        }
-        
-        String sql = "SELECT " + String.join(", ", ALL_COLUMNS) + 
-                     " FROM " + TABLE_NAME + 
-                     " WHERE transaction_id = ? " +
-                     "ORDER BY created_at DESC " +
-                     "LIMIT 1";
-        
-        return executeQuery(sql, rs -> {
-            if (rs.next()) {
-                return mapRow(rs);
-            }
-            return null;
-        }, transactionId);
-    }
-
-    /**
-     * Finds the most recent event of a specific type for a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @param eventType The type of event to find
-     * @return The most recent event of the specified type for the transaction
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public PaymentEvent findMostRecentEventByType(UUID transactionId, String eventType) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID cannot be null");
-        }
-        
-        if (eventType == null || eventType.isEmpty()) {
-            throw new IllegalArgumentException("Event type cannot be null or empty");
-        }
-        
-        String sql = "SELECT " + String.join(", ", ALL_COLUMNS) + 
-                     " FROM " + TABLE_NAME + 
-                     " WHERE transaction_id = ? AND event_type = ? " +
-                     "ORDER BY created_at DESC " +
-                     "LIMIT 1";
-        
-        return executeQuery(sql, rs -> {
-            if (rs.next()) {
-                return mapRow(rs);
-            }
-            return null;
-        }, transactionId, eventType);
-    }
-
-    /**
-     * Creates a status change event for a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @param previousStatus The previous status
-     * @param newStatus The new status
-     * @param createdBy The identifier of the user or system creating the event
-     * @return The created event
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public PaymentEvent createStatusChangeEvent(UUID transactionId, String previousStatus, String newStatus, String createdBy) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID cannot be null");
-        }
-        
-        if (createdBy == null || createdBy.isEmpty()) {
-            throw new IllegalArgumentException("Created by cannot be null or empty");
-        }
-        
-        PaymentEvent event = new PaymentEvent();
-        event.setEventId(UUID.randomUUID());
-        event.setTransactionId(transactionId);
-        event.setEventType("STATUS_CHANGE");
-        event.setPreviousStatus(previousStatus);
-        event.setNewStatus(newStatus);
-        event.setCreatedAt(Instant.now());
-        event.setCreatedBy(createdBy);
-        
-        return create(event);
-    }
-
-    /**
-     * Creates an error event for a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @param errorCode The error code
-     * @param errorMessage The error message
-     * @param createdBy The identifier of the system reporting the error
-     * @return The created event
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public PaymentEvent createErrorEvent(UUID transactionId, String errorCode, String errorMessage, String createdBy) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID cannot be null");
-        }
-        
-        if (createdBy == null || createdBy.isEmpty()) {
-            throw new IllegalArgumentException("Created by cannot be null or empty");
-        }
-        
-        PaymentEvent event = new PaymentEvent();
-        event.setEventId(UUID.randomUUID());
-        event.setTransactionId(transactionId);
-        event.setEventType("ERROR");
-        event.setEventData(String.format("{\"errorCode\":\"%s\",\"errorMessage\":\"%s\"}", 
-                                         errorCode != null ? errorCode : "", 
-                                         errorMessage != null ? errorMessage.replace("\"", "\\\"") : ""));
-        event.setCreatedAt(Instant.now());
-        event.setCreatedBy(createdBy);
-        
-        return create(event);
-    }
-
-    /**
-     * Finds events for multiple transactions.
-     *
-     * @param transactionIds List of transaction identifiers
-     * @param filterParams Additional filtering parameters
-     * @return List of events for the specified transactions
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByTransactionIdIn(List<UUID> transactionIds, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionIds == null || transactionIds.isEmpty()) {
-            throw new IllegalArgumentException("Transaction IDs list cannot be null or empty");
-        }
-        
-        StringBuilder placeholders = new StringBuilder();
-        for (int i = 0; i < transactionIds.size(); i++) {
-            if (i > 0) {
-                placeholders.append(", ");
-            }
-            placeholders.append("?");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.transaction_id IN (" + placeholders + ")");
-        
-        // Add transaction ID parameters
-        for (UUID transactionId : transactionIds) {
-            builder.addParameter(transactionId);
-        }
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Counts events by type for a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @return Map of event type to count
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public Map<String, Long> countEventsByType(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID cannot be null");
-        }
-        
-        String sql = "SELECT event_type, COUNT(*) as event_count " +
-                     "FROM " + TABLE_NAME + 
-                     " WHERE transaction_id = ? " +
-                     "GROUP BY event_type";
-        
-        return executeQuery(sql, rs -> {
-            Map<String, Long> counts = new HashMap<>();
-            while (rs.next()) {
-                String eventType = rs.getString("event_type");
-                long count = rs.getLong("event_count");
-                counts.put(eventType, count);
-            }
-            return counts;
-        }, transactionId);
-    }
-
-    /**
-     * Finds events for transactions belonging to a specific organization.
-     *
-     * @param organizationId The organization identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of events for transactions belonging to the specified organization
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByOrganizationId(UUID organizationId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (organizationId == null) {
-            throw new IllegalArgumentException("Organization ID cannot be null");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .innerJoin("payment_transaction t", "e.transaction_id = t.transaction_id")
-            .where("t.organization_id = ?")
-            .addParameter(organizationId);
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds events for transactions belonging to a specific account.
-     *
-     * @param organizationId The organization identifier
-     * @param accountId The account identifier
-     * @param filterParams Additional filtering parameters
-     * @return List of events for transactions belonging to the specified account
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByOrganizationIdAndAccountId(UUID organizationId, UUID accountId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (organizationId == null) {
-            throw new IllegalArgumentException("Organization ID cannot be null");
-        }
-        
-        if (accountId == null) {
-            throw new IllegalArgumentException("Account ID cannot be null");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .innerJoin("payment_transaction t", "e.transaction_id = t.transaction_id")
-            .where("t.organization_id = ?")
-            .and("t.account_id = ?")
-            .addParameter(organizationId)
-            .addParameter(accountId);
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds events related to status transitions to a specific status.
-     *
-     * @param status The target status
-     * @param filterParams Additional filtering parameters
-     * @return List of events representing transitions to the specified status
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByNewStatus(String status, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (status == null || status.isEmpty()) {
-            throw new IllegalArgumentException("Status cannot be null or empty");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.event_type = ?")
-            .and("e.new_status = ?")
-            .addParameter("STATUS_CHANGE")
-            .addParameter(status);
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds events related to status transitions from a specific status.
-     *
-     * @param status The source status
-     * @param filterParams Additional filtering parameters
-     * @return List of events representing transitions from the specified status
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByPreviousStatus(String status, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (status == null || status.isEmpty()) {
-            throw new IllegalArgumentException("Status cannot be null or empty");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.event_type = ?")
-            .and("e.previous_status = ?")
-            .addParameter("STATUS_CHANGE")
-            .addParameter(status);
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Finds events containing specific data in the event_data JSON field.
-     *
-     * @param jsonPath The JSON path expression
-     * @param value The value to match
-     * @param filterParams Additional filtering parameters
-     * @return List of events matching the JSON criteria
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> findByEventDataContains(String jsonPath, String value, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (jsonPath == null || jsonPath.isEmpty()) {
-            throw new IllegalArgumentException("JSON path cannot be null or empty");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.event_data::jsonb @> ?::jsonb")
-            .addParameter("{\"" + jsonPath + "\":\"" + value + "\"}");
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Gets the complete timeline of events for a transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @return List of events ordered chronologically
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> getTransactionTimeline(UUID transactionId) 
-            throws ConnectionException, QueryExecutionException {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID cannot be null");
-        }
-        
-        String sql = "SELECT " + String.join(", ", ALL_COLUMNS) + 
-                     " FROM " + TABLE_NAME + 
-                     " WHERE transaction_id = ? " +
-                     "ORDER BY created_at ASC";
-        
-        return executeQuery(sql, this::mapRows, transactionId);
-    }
-
-    /**
-     * Gets the audit trail for a specific time period.
-     *
-     * @param startTime The start of the time period
-     * @param endTime The end of the time period
-     * @param filterParams Additional filtering parameters
-     * @return List of events within the specified time period
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> getAuditTrail(Instant startTime, Instant endTime, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (startTime == null && endTime == null) {
-            throw new IllegalArgumentException("At least one of startTime or endTime must be provided");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e");
-        
-        if (startTime != null && endTime != null) {
-            builder.where("e.created_at BETWEEN ? AND ?")
-                   .addParameter(Timestamp.from(startTime))
-                   .addParameter(Timestamp.from(endTime));
-        } else if (startTime != null) {
-            builder.where("e.created_at >= ?")
-                   .addParameter(Timestamp.from(startTime));
-        } else {
-            builder.where("e.created_at <= ?")
-                   .addParameter(Timestamp.from(endTime));
-        }
-        
-        // Apply organization and account filters if provided
-        if (filterParams != null) {
-            if (filterParams.getOrganizationId() != null) {
-                builder.innerJoin("payment_transaction t", "e.transaction_id = t.transaction_id")
-                       .and("t.organization_id = ?")
-                       .addParameter(filterParams.getOrganizationId());
-            }
-            
-            if (filterParams.getAccountId() != null) {
-                if (!builder.getQueryString().contains("payment_transaction t")) {
-                    builder.innerJoin("payment_transaction t", "e.transaction_id = t.transaction_id");
-                }
-                builder.and("t.account_id = ?")
-                       .addParameter(filterParams.getAccountId());
-            }
-            
-            // Apply sorting
-            if (filterParams.getSortCriteria() != null && !filterParams.getSortCriteria().isEmpty()) {
-                for (PaymentFilterParams.SortCriteria criteria : filterParams.getSortCriteria()) {
-                    String column = criteria.getColumn();
-                    // Prefix column with alias if not already prefixed
-                    if (!column.contains(".")) {
-                        column = "e." + column;
-                    }
-                    builder.orderBy(column + " " + criteria.getDirection());
-                }
-            } else {
-                // Default sort by created_at ascending for chronological order
-                builder.orderBy("e.created_at ASC");
-            }
-            
-            // Apply pagination
-            if (filterParams.getPagination() != null) {
-                builder.paginate(filterParams.getPagination().getLimit(), filterParams.getPagination().getOffset());
-            }
-        } else {
-            // Default sort by created_at ascending for chronological order
-            builder.orderBy("e.created_at ASC");
-        }
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Gets the user activity log for a specific user.
-     *
-     * @param userId The user identifier
-     * @param startTime The start of the time period
-     * @param endTime The end of the time period
-     * @param filterParams Additional filtering parameters
-     * @return List of events created by the specified user within the time period
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     */
-    @Override
-    public List<PaymentEvent> getUserActivityLog(String userId, Instant startTime, Instant endTime, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (userId == null || userId.isEmpty()) {
-            throw new IllegalArgumentException("User ID cannot be null or empty");
-        }
-        
-        if (startTime == null && endTime == null) {
-            throw new IllegalArgumentException("At least one of startTime or endTime must be provided");
-        }
-        
-        PaymentQueryBuilder builder = PaymentQueryBuilder.create()
-            .select(prefixColumns("e", ALL_COLUMNS))
-            .from(TABLE_NAME + " e")
-            .where("e.created_by = ?")
-            .addParameter(userId);
-        
-        if (startTime != null && endTime != null) {
-            builder.and("e.created_at BETWEEN ? AND ?")
-                   .addParameter(Timestamp.from(startTime))
-                   .addParameter(Timestamp.from(endTime));
-        } else if (startTime != null) {
-            builder.and("e.created_at >= ?")
-                   .addParameter(Timestamp.from(startTime));
-        } else {
-            builder.and("e.created_at <= ?")
-                   .addParameter(Timestamp.from(endTime));
-        }
-        
-        applyCommonFilters(builder, filterParams);
-        
-        return executeQuery(builder, this::mapRows);
-    }
-
-    /**
-     * Applies common filters to a query builder.
-     *
-     * @param builder The query builder
-     * @param filterParams The filter parameters
-     */
-    private void applyCommonFilters(PaymentQueryBuilder builder, PaymentFilterParams filterParams) {
-        if (filterParams != null) {
-            // Apply organization and account filters if provided
-            if (filterParams.getOrganizationId() != null) {
-                builder.innerJoin("payment_transaction t", "e.transaction_id = t.transaction_id")
-                       .and("t.organization_id = ?")
-                       .addParameter(filterParams.getOrganizationId());
-            }
-            
-            if (filterParams.getAccountId() != null) {
-                if (!builder.getQueryString().contains("payment_transaction t")) {
-                    builder.innerJoin("payment_transaction t", "e.transaction_id = t.transaction_id");
-                }
-                builder.and("t.account_id = ?")
-                       .addParameter(filterParams.getAccountId());
-            }
-            
-            // Apply date range filter
-            if (filterParams.getDateRange() != null) {
-                builder.dateRange("e.created_at", 
-                        filterParams.getDateRange().getStartDate() != null ? 
-                                filterParams.getDateRange().getStartDate().atZone(java.time.ZoneId.systemDefault()).toLocalDateTime() : null,
-                        filterParams.getDateRange().getEndDate() != null ? 
-                                filterParams.getDateRange().getEndDate().atZone(java.time.ZoneId.systemDefault()).toLocalDateTime() : null);
-            }
-            
-            // Apply event type filter if provided in search term
-            if (filterParams.getSearchTerm() != null && !filterParams.getSearchTerm().isEmpty()) {
-                builder.and("(e.event_type LIKE ? OR e.event_data LIKE ?)")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%")
-                       .addParameter("%" + filterParams.getSearchTerm() + "%");
-            }
-            
-            // Apply sorting
-            if (filterParams.getSortCriteria() != null && !filterParams.getSortCriteria().isEmpty()) {
-                for (PaymentFilterParams.SortCriteria criteria : filterParams.getSortCriteria()) {
-                    String column = criteria.getColumn();
-                    // Prefix column with alias if not already prefixed
-                    if (!column.contains(".")) {
-                        column = "e." + column;
-                    }
-                    builder.orderBy(column + " " + criteria.getDirection());
-                }
-            } else {
-                // Default sort by created_at ascending for chronological order
-                builder.orderBy("e.created_at ASC");
-            }
-            
-            // Apply pagination
-            if (filterParams.getPagination() != null) {
-                builder.paginate(filterParams.getPagination().getLimit(), filterParams.getPagination().getOffset());
-            }
-        } else {
-            // Default sort by created_at ascending for chronological order
-            builder.orderBy("e.created_at ASC");
-        }
-    }
-
-    /**
-     * Prefixes column names with an alias.
-     *
-     * @param alias The alias to prefix
-     * @param columns The column names
-     * @return The prefixed column names
-     */
-    private String[] prefixColumns(String alias, String[] columns) {
-        String[] prefixed = new String[columns.length];
-        for (int i = 0; i < columns.length; i++) {
-            prefixed[i] = alias + "." + columns[i];
-        }
-        return prefixed;
+        return entity;
     }
 }

@@ -1,40 +1,47 @@
-import React from 'react';
 import { Outlet } from 'react-router-dom';
-import '@fontsource/geist-sans/400.css';
-import '@fontsource/geist-sans/500.css';
-import '@fontsource/geist-sans/600.css';
-import '@fontsource/geist-sans/700.css';
-import '@fontsource/geist-mono/400.css';
-import '@fontsource/geist-mono/500.css';
+import { Provider } from 'react-redux';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { store } from '../redux/store';
 import './globals.css';
 
+// Import fonts directly for Vite instead of using Next.js font loader
+import '@fontsource/geist-sans';
+import '@fontsource/geist-mono';
+
+// Create a client for React Query
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 60 * 1000, // 1 minute
+      refetchOnWindowFocus: false,
+      retry: 1,
+    },
+  },
+});
+
 /**
- * Root layout component that provides the basic HTML structure
- * and applies global styles and fonts. This component serves as
- * the main layout wrapper for all routes in the application.
- * 
- * This replaces the Next.js-specific layout with a React Router
- * compatible version that uses the Outlet component to render
- * nested routes.
+ * Root layout component that wraps the entire application
+ * Provides Redux store, React Query client, and React Router outlet
  */
-const RootLayout: React.FC = () => {
+export default function RootLayout() {
   return (
     <html lang="en">
       <head>
-        <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="description" content="Core sample application" />
+        <meta charSet="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta name="description" content="Core sample application with payments module" />
         <title>Core Sample Application</title>
       </head>
-      <body className="antialiased">
-        {/* 
-          The Outlet component is a placeholder where React Router
-          will render the matched child route component
-        */}
-        <Outlet />
+      <body className="font-geist-sans antialiased">
+        {/* Redux Provider for global state management */}
+        <Provider store={store}>
+          {/* React Query Provider for data fetching */}
+          <QueryClientProvider client={queryClient}>
+            {/* React Router Outlet for rendering nested routes */}
+            <Outlet />
+          </QueryClientProvider>
+        </Provider>
       </body>
     </html>
   );
-};
-
-export default RootLayout;
+}

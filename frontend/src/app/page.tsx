@@ -1,14 +1,11 @@
-import React from 'react';
-import { Link } from 'react-router-dom';
-import { getPaymentRoutePath } from './routes';
+import React from "react";
+import { Link } from "react-router-dom";
 
 /**
- * Home page component
- * 
- * This component serves as the main landing page for the application.
- * It has been converted from a Next.js page to a React Router route component.
+ * Home page component that serves as the landing page for the application
+ * Provides navigation links to key features including the payments module
  */
-const Home: React.FC = () => {
+function Home() {
   return (
     <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
       <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
@@ -30,32 +27,44 @@ const Home: React.FC = () => {
           <li className="tracking-[-.01em]">
             Save and see your changes instantly.
           </li>
-          <li className="mt-2 tracking-[-.01em]">
-            Explore the new{" "}
-            <Link 
-              to={getPaymentRoutePath()} 
-              className="text-blue-600 dark:text-blue-400 hover:underline"
-            >
-              Payments Module
-            </Link>
-            {" "}for transaction management.
-          </li>
-          <li className="mt-2 tracking-[-.01em]">
-            View transactions for a specific{" "}
-            <Link 
-              to={getPaymentRoutePath('org123', 'acc456')} 
-              className="text-blue-600 dark:text-blue-400 hover:underline"
-            >
-              organization and account
-            </Link>
-            .
-          </li>
         </ol>
+
+        {/* Payment Module Navigation Section */}
+        <div className="mt-8 w-full">
+          <h2 className="text-xl font-semibold mb-4">Payment Module</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Link 
+              to="/payments" 
+              className="flex items-center p-4 border border-gray-200 rounded-md hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-800 transition-colors"
+            >
+              <div className="mr-4 p-2 bg-blue-100 dark:bg-blue-900 rounded-full">
+                <span className="text-blue-600 dark:text-blue-300 text-xl">[$]</span>
+              </div>
+              <div>
+                <h3 className="font-medium">Payment Transactions</h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400">View and manage payment transactions</p>
+              </div>
+            </Link>
+            
+            <Link 
+              to="/payments/new" 
+              className="flex items-center p-4 border border-gray-200 rounded-md hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-800 transition-colors"
+            >
+              <div className="mr-4 p-2 bg-green-100 dark:bg-green-900 rounded-full">
+                <span className="text-green-600 dark:text-green-300 text-xl">[+]</span>
+              </div>
+              <div>
+                <h3 className="font-medium">Create Payment</h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400">Initialize a new payment transaction</p>
+              </div>
+            </Link>
+          </div>
+        </div>
       </main>
       <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
       </footer>
     </div>
   );
-};
+}
 
 export default Home;

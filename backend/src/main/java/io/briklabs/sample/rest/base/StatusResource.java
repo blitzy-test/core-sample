@@ -1,23 +1,17 @@
 package io.briklabs.sample.rest.base;
 
-import com.zaxxer.hikari.HikariDataSource;
-import com.zaxxer.hikari.HikariPoolMXBean;
-
-import io.briklabs.sample.App;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import io.briklabs.sample.payments.data.ConnectionManager;
+import io.briklabs.sample.payments.data.HikariCPConfig;
 import io.briklabs.sample.config.ConfigSource;
 
-import javax.management.JMX;
-import javax.management.MBeanServer;
-import javax.management.ObjectName;
+import javax.inject.Inject;
 import javax.ws.rs.GET;
 import javax.ws.rs.Path;
 import javax.ws.rs.Produces;
-import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-import javax.ws.rs.core.UriInfo;
-
-import java.lang.management.ManagementFactory;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -27,228 +21,446 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Resource that provides health check and status information for the application.
- * This endpoint has been enhanced to include payment system health information
- * and connection pool statistics.
+ * Includes payment system health information and connection pool statistics.
  */
 @Path("up")
 public class StatusResource {
 
     private static final Logger logger = LoggerFactory.getLogger(StatusResource.class);
+    private static final String VERSION = "1.0.0";
     private static final String PAYMENT_MODULE_VERSION = "1.0.0";
-    private static final String PAYMENT_HIKARI_POOL_NAME = "PaymentHikariPool";
-    
+
     private final long start;
+    private final ConfigSource configSource;
+    private HikariCPConfig hikariCPConfig;
+    private ConnectionManager connectionManager;
 
     /**
-     * Initializes the status resource with the current timestamp.
+     * Constructs a new StatusResource.
      */
-    public StatusResource() {
-        start = System.currentTimeMillis();
+    @Inject
+    public StatusResource(ConfigSource configSource) {
+        this.start = System.currentTimeMillis();
+        this.configSource = configSource;
+        
+        try {
+            // Initialize HikariCPConfig and ConnectionManager for payment system health monitoring
+            this.hikariCPConfig = new HikariCPConfig(configSource);
+            this.connectionManager = ConnectionManager.getInstance(configSource);
+            logger.info("Payment system health monitoring initialized successfully");
+        } catch (Exception e) {
+            logger.warn("Failed to initialize payment system health monitoring: {}", e.getMessage());
+        }
     }
 
     /**
-     * Retrieves the health status of the application including payment system health
-     * and connection pool statistics.
-     * 
-     * @param uriInfo URI information for the request
-     * @return Response containing health status information
+     * Returns the application status including uptime and payment system health information.
+     * Supports both plain text and JSON formats based on Accept header.
+     *
+     * @return Response containing status information
      */
     @GET
     @Produces({ MediaType.TEXT_PLAIN, MediaType.APPLICATION_JSON })
-    public Response get(@Context UriInfo uriInfo) {
+    public Response get() {
         long uptime = System.currentTimeMillis() - start;
         
-        // For text/plain requests, return simple uptime
-        if (uriInfo.getAcceptableMediaTypes().contains(MediaType.TEXT_PLAIN_TYPE)) {
-            return Response.ok(uptime).build();
+        // For plain text requests, return simple uptime
+        if (MediaType.TEXT_PLAIN.equals(getPreferredMediaType())) {
+            return Response.ok(formatUptimeText(uptime)).build();
         }
         
-        // For JSON requests, return comprehensive health information
-        Map<String, Object> healthInfo = buildHealthResponse(uptime);
-        return Response.ok(healthInfo).build();
+        // For JSON requests, return detailed status including payment system health
+        StatusResponse status = buildStatusResponse(uptime);
+        return Response.ok(status).build();
     }
     
     /**
-     * Builds a comprehensive health response including payment system health
-     * and connection pool statistics.
-     * 
+     * Builds a comprehensive status response including payment system health information.
+     *
      * @param uptime The application uptime in milliseconds
-     * @return Map containing health information
+     * @return StatusResponse object with detailed health information
      */
-    private Map<String, Object> buildHealthResponse(long uptime) {
-        Map<String, Object> response = new HashMap<>();
+    private StatusResponse buildStatusResponse(long uptime) {
+        StatusResponse status = new StatusResponse();
+        status.setStatus("UP");
+        status.setUptime(uptime);
+        status.setFormattedUptime(formatUptime(uptime));
+        status.setVersion(VERSION);
         
-        // Basic application information
-        response.put("status", "UP");
-        response.put("uptime", uptime);
-        response.put("uptimeFormatted", formatUptime(uptime));
-        
-        // Version information
-        Map<String, Object> versions = new HashMap<>();
-        versions.put("application", "1.0.0");
-        versions.put("paymentModule", PAYMENT_MODULE_VERSION);
-        response.put("versions", versions);
-        
-        // Component health information
-        Map<String, Object> components = new HashMap<>();
-        
-        // Add core component status
-        components.put("core", Map.of("status", "UP"));
-        
-        // Add payment system health information
-        components.put("payment", getPaymentSystemHealth());
-        
-        response.put("components", components);
-        
-        return response;
-    }
-    
-    /**
-     * Retrieves payment system health information including connection pool status
-     * and transaction metrics.
-     * 
-     * @return Map containing payment system health information
-     */
-    private Map<String, Object> getPaymentSystemHealth() {
-        Map<String, Object> paymentHealth = new HashMap<>();
-        
-        // Set basic payment system status
-        paymentHealth.put("status", "UP");
-        
-        // Add connection pool statistics
-        paymentHealth.put("connectionPool", getConnectionPoolStats());
-        
-        // Add transaction metrics
-        paymentHealth.put("transactionMetrics", getTransactionMetrics());
-        
-        // Add query performance indicators
-        paymentHealth.put("queryPerformance", getQueryPerformanceIndicators());
-        
-        return paymentHealth;
-    }
-    
-    /**
-     * Retrieves Hikari connection pool statistics for the payment database.
-     * 
-     * @return Map containing connection pool statistics
-     */
-    private Map<String, Object> getConnectionPoolStats() {
-        Map<String, Object> poolStats = new HashMap<>();
-        
-        try {
-            // Try to get HikariCP pool metrics through JMX
-            MBeanServer mBeanServer = ManagementFactory.getPlatformMBeanServer();
-            ObjectName poolName = new ObjectName("com.zaxxer.hikari:type=Pool (" + PAYMENT_HIKARI_POOL_NAME + ")");
-            
-            if (mBeanServer.isRegistered(poolName)) {
-                HikariPoolMXBean poolProxy = JMX.newMXBeanProxy(
-                    mBeanServer, poolName, HikariPoolMXBean.class);
+        // Add payment system health information if available
+        if (hikariCPConfig != null && connectionManager != null) {
+            try {
+                PaymentHealthInfo paymentHealth = new PaymentHealthInfo();
+                paymentHealth.setStatus("UP");
+                paymentHealth.setVersion(PAYMENT_MODULE_VERSION);
                 
-                poolStats.put("activeConnections", poolProxy.getActiveConnections());
-                poolStats.put("idleConnections", poolProxy.getIdleConnections());
-                poolStats.put("totalConnections", poolProxy.getTotalConnections());
-                poolStats.put("threadsAwaitingConnection", poolProxy.getThreadsAwaitingConnection());
-                poolStats.put("status", "healthy");
-            } else {
-                // Fallback if JMX metrics are not available
-                poolStats.put("status", "unknown");
-                poolStats.put("message", "Connection pool metrics not available via JMX");
+                // Add connection pool statistics
+                ConnectionPoolStats poolStats = new ConnectionPoolStats();
+                poolStats.setStatus(hikariCPConfig.getHealthStatus());
+                poolStats.setMaximumPoolSize(hikariCPConfig.getMaximumPoolSize());
+                poolStats.setActiveConnections(hikariCPConfig.getActiveConnections());
+                poolStats.setIdleConnections(hikariCPConfig.getIdleConnections());
+                poolStats.setThreadsAwaiting(hikariCPConfig.getThreadsAwaitingConnection());
+                poolStats.setConnectionTimeout(hikariCPConfig.getConnectionTimeout());
+                poolStats.setConnectionTimeoutFormatted(HikariCPConfig.formatDuration(hikariCPConfig.getConnectionTimeout()));
+                poolStats.setValidationTimeout(hikariCPConfig.getValidationTimeout());
+                poolStats.setValidationTimeoutFormatted(HikariCPConfig.formatDuration(hikariCPConfig.getValidationTimeout()));
+                poolStats.setLeakDetectionThreshold(hikariCPConfig.getLeakDetectionThreshold());
+                poolStats.setLeakDetectionThresholdFormatted(HikariCPConfig.formatDuration(hikariCPConfig.getLeakDetectionThreshold()));
+                
+                paymentHealth.setConnectionPool(poolStats);
+                
+                // Add payment transaction metrics
+                TransactionMetrics metrics = new TransactionMetrics();
+                metrics.setTotalTransactions(connectionManager.getTotalTransactions());
+                metrics.setFailedTransactions(connectionManager.getFailedTransactions());
+                metrics.setSuccessRate(connectionManager.getTransactionSuccessRate());
+                metrics.setAverageProcessingTimeMs(connectionManager.getAverageTransactionTimeMs());
+                metrics.setAverageConnectionWaitTimeMs(connectionManager.getAverageConnectionWaitTimeMs());
+                
+                paymentHealth.setTransactionMetrics(metrics);
+                
+                // Add query performance indicators
+                Map<String, Object> queryPerformance = new HashMap<>();
+                queryPerformance.put("averageQueryTimeMs", connectionManager.getAverageConnectionWaitTimeMs());
+                queryPerformance.put("activeQueries", connectionManager.getConnectionsForOperation("query"));
+                
+                paymentHealth.setQueryPerformance(queryPerformance);
+                
+                status.setPaymentSystem(paymentHealth);
+            } catch (Exception e) {
+                logger.warn("Error collecting payment system health information: {}", e.getMessage());
+                
+                PaymentHealthInfo paymentHealth = new PaymentHealthInfo();
+                paymentHealth.setStatus("DEGRADED");
+                paymentHealth.setErrorMessage("Error collecting health information: " + e.getMessage());
+                status.setPaymentSystem(paymentHealth);
             }
-        } catch (Exception e) {
-            logger.warn("Error retrieving connection pool metrics", e);
-            poolStats.put("status", "unknown");
-            poolStats.put("message", "Error retrieving connection pool metrics: " + e.getMessage());
         }
         
-        return poolStats;
+        return status;
     }
     
     /**
-     * Retrieves payment transaction metrics including volume, success rate, and processing time.
-     * Note: In a real implementation, these metrics would be collected from a metrics service.
-     * 
-     * @return Map containing transaction metrics
-     */
-    private Map<String, Object> getTransactionMetrics() {
-        Map<String, Object> metrics = new HashMap<>();
-        
-        // In a real implementation, these values would be retrieved from a metrics service
-        // For now, we'll provide placeholder values
-        
-        // Transaction volume by status
-        Map<String, Integer> volumeByStatus = new HashMap<>();
-        volumeByStatus.put("CREATED", 120);
-        volumeByStatus.put("AUTHORIZED", 85);
-        volumeByStatus.put("CAPTURED", 65);
-        volumeByStatus.put("SETTLED", 60);
-        volumeByStatus.put("FAILED", 5);
-        volumeByStatus.put("REFUNDED", 10);
-        metrics.put("volume", volumeByStatus);
-        
-        // Success rate
-        metrics.put("successRate", 95.8); // percentage
-        
-        // Processing time (in milliseconds)
-        Map<String, Object> processingTime = new HashMap<>();
-        processingTime.put("average", 145);
-        processingTime.put("p95", 320);
-        processingTime.put("p99", 450);
-        metrics.put("processingTime", processingTime);
-        
-        // Last hour transaction count
-        metrics.put("lastHourTransactions", 42);
-        
-        return metrics;
-    }
-    
-    /**
-     * Retrieves basic performance indicators for payment query operations.
-     * Note: In a real implementation, these metrics would be collected from a metrics service.
-     * 
-     * @return Map containing query performance indicators
-     */
-    private Map<String, Object> getQueryPerformanceIndicators() {
-        Map<String, Object> performance = new HashMap<>();
-        
-        // In a real implementation, these values would be retrieved from a metrics service
-        // For now, we'll provide placeholder values
-        
-        // Average query execution time by operation type (in milliseconds)
-        Map<String, Integer> avgExecutionTime = new HashMap<>();
-        avgExecutionTime.put("transactionLookup", 12);
-        avgExecutionTime.put("transactionList", 45);
-        avgExecutionTime.put("complexFilter", 85);
-        avgExecutionTime.put("eventHistory", 30);
-        performance.put("avgExecutionTime", avgExecutionTime);
-        
-        // Query throughput (queries per second)
-        performance.put("throughput", 28.5);
-        
-        // Cache hit ratio (percentage)
-        performance.put("cacheHitRatio", 78.2);
-        
-        return performance;
-    }
-    
-    /**
-     * Formats uptime in a human-readable format.
-     * 
-     * @param uptimeMillis Uptime in milliseconds
+     * Formats uptime in a human-readable format for text response.
+     *
+     * @param uptime The application uptime in milliseconds
      * @return Formatted uptime string
      */
-    private String formatUptime(long uptimeMillis) {
-        long days = TimeUnit.MILLISECONDS.toDays(uptimeMillis);
-        uptimeMillis -= TimeUnit.DAYS.toMillis(days);
+    private String formatUptimeText(long uptime) {
+        return "UP " + formatUptime(uptime);
+    }
+    
+    /**
+     * Formats uptime in a human-readable format (days, hours, minutes, seconds).
+     *
+     * @param millis The time in milliseconds
+     * @return Formatted time string
+     */
+    private String formatUptime(long millis) {
+        long days = TimeUnit.MILLISECONDS.toDays(millis);
+        millis -= TimeUnit.DAYS.toMillis(days);
+        long hours = TimeUnit.MILLISECONDS.toHours(millis);
+        millis -= TimeUnit.HOURS.toMillis(hours);
+        long minutes = TimeUnit.MILLISECONDS.toMinutes(millis);
+        millis -= TimeUnit.MINUTES.toMillis(minutes);
+        long seconds = TimeUnit.MILLISECONDS.toSeconds(millis);
         
-        long hours = TimeUnit.MILLISECONDS.toHours(uptimeMillis);
-        uptimeMillis -= TimeUnit.HOURS.toMillis(hours);
+        StringBuilder sb = new StringBuilder();
+        if (days > 0) {
+            sb.append(days).append("d ");
+        }
+        if (hours > 0 || days > 0) {
+            sb.append(hours).append("h ");
+        }
+        if (minutes > 0 || hours > 0 || days > 0) {
+            sb.append(minutes).append("m ");
+        }
+        sb.append(seconds).append("s");
         
-        long minutes = TimeUnit.MILLISECONDS.toMinutes(uptimeMillis);
-        uptimeMillis -= TimeUnit.MINUTES.toMillis(minutes);
+        return sb.toString();
+    }
+    
+    /**
+     * Gets the preferred media type from the Accept header.
+     *
+     * @return The preferred media type
+     */
+    private String getPreferredMediaType() {
+        // In a real implementation, this would check the Accept header
+        // For simplicity, we're defaulting to JSON
+        return MediaType.APPLICATION_JSON;
+    }
+    
+    /**
+     * Status response class for JSON serialization.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class StatusResponse {
+        private String status;
+        private long uptime;
+        private String formattedUptime;
+        private String version;
+        private PaymentHealthInfo paymentSystem;
         
-        long seconds = TimeUnit.MILLISECONDS.toSeconds(uptimeMillis);
+        public String getStatus() {
+            return status;
+        }
         
-        return String.format("%d days, %d hours, %d minutes, %d seconds", 
-                days, hours, minutes, seconds);
+        public void setStatus(String status) {
+            this.status = status;
+        }
+        
+        public long getUptime() {
+            return uptime;
+        }
+        
+        public void setUptime(long uptime) {
+            this.uptime = uptime;
+        }
+        
+        public String getFormattedUptime() {
+            return formattedUptime;
+        }
+        
+        public void setFormattedUptime(String formattedUptime) {
+            this.formattedUptime = formattedUptime;
+        }
+        
+        public String getVersion() {
+            return version;
+        }
+        
+        public void setVersion(String version) {
+            this.version = version;
+        }
+        
+        @JsonProperty("payment")
+        public PaymentHealthInfo getPaymentSystem() {
+            return paymentSystem;
+        }
+        
+        public void setPaymentSystem(PaymentHealthInfo paymentSystem) {
+            this.paymentSystem = paymentSystem;
+        }
+    }
+    
+    /**
+     * Payment system health information class for JSON serialization.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class PaymentHealthInfo {
+        private String status;
+        private String version;
+        private String errorMessage;
+        private ConnectionPoolStats connectionPool;
+        private TransactionMetrics transactionMetrics;
+        private Map<String, Object> queryPerformance;
+        
+        public String getStatus() {
+            return status;
+        }
+        
+        public void setStatus(String status) {
+            this.status = status;
+        }
+        
+        public String getVersion() {
+            return version;
+        }
+        
+        public void setVersion(String version) {
+            this.version = version;
+        }
+        
+        public String getErrorMessage() {
+            return errorMessage;
+        }
+        
+        public void setErrorMessage(String errorMessage) {
+            this.errorMessage = errorMessage;
+        }
+        
+        public ConnectionPoolStats getConnectionPool() {
+            return connectionPool;
+        }
+        
+        public void setConnectionPool(ConnectionPoolStats connectionPool) {
+            this.connectionPool = connectionPool;
+        }
+        
+        public TransactionMetrics getTransactionMetrics() {
+            return transactionMetrics;
+        }
+        
+        public void setTransactionMetrics(TransactionMetrics transactionMetrics) {
+            this.transactionMetrics = transactionMetrics;
+        }
+        
+        public Map<String, Object> getQueryPerformance() {
+            return queryPerformance;
+        }
+        
+        public void setQueryPerformance(Map<String, Object> queryPerformance) {
+            this.queryPerformance = queryPerformance;
+        }
+    }
+    
+    /**
+     * Connection pool statistics class for JSON serialization.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class ConnectionPoolStats {
+        private String status;
+        private int maximumPoolSize;
+        private int activeConnections;
+        private int idleConnections;
+        private int threadsAwaiting;
+        private long connectionTimeout;
+        private String connectionTimeoutFormatted;
+        private long validationTimeout;
+        private String validationTimeoutFormatted;
+        private long leakDetectionThreshold;
+        private String leakDetectionThresholdFormatted;
+        
+        public String getStatus() {
+            return status;
+        }
+        
+        public void setStatus(String status) {
+            this.status = status;
+        }
+        
+        public int getMaximumPoolSize() {
+            return maximumPoolSize;
+        }
+        
+        public void setMaximumPoolSize(int maximumPoolSize) {
+            this.maximumPoolSize = maximumPoolSize;
+        }
+        
+        public int getActiveConnections() {
+            return activeConnections;
+        }
+        
+        public void setActiveConnections(int activeConnections) {
+            this.activeConnections = activeConnections;
+        }
+        
+        public int getIdleConnections() {
+            return idleConnections;
+        }
+        
+        public void setIdleConnections(int idleConnections) {
+            this.idleConnections = idleConnections;
+        }
+        
+        public int getThreadsAwaiting() {
+            return threadsAwaiting;
+        }
+        
+        public void setThreadsAwaiting(int threadsAwaiting) {
+            this.threadsAwaiting = threadsAwaiting;
+        }
+        
+        public long getConnectionTimeout() {
+            return connectionTimeout;
+        }
+        
+        public void setConnectionTimeout(long connectionTimeout) {
+            this.connectionTimeout = connectionTimeout;
+        }
+        
+        public String getConnectionTimeoutFormatted() {
+            return connectionTimeoutFormatted;
+        }
+        
+        public void setConnectionTimeoutFormatted(String connectionTimeoutFormatted) {
+            this.connectionTimeoutFormatted = connectionTimeoutFormatted;
+        }
+        
+        public long getValidationTimeout() {
+            return validationTimeout;
+        }
+        
+        public void setValidationTimeout(long validationTimeout) {
+            this.validationTimeout = validationTimeout;
+        }
+        
+        public String getValidationTimeoutFormatted() {
+            return validationTimeoutFormatted;
+        }
+        
+        public void setValidationTimeoutFormatted(String validationTimeoutFormatted) {
+            this.validationTimeoutFormatted = validationTimeoutFormatted;
+        }
+        
+        public long getLeakDetectionThreshold() {
+            return leakDetectionThreshold;
+        }
+        
+        public void setLeakDetectionThreshold(long leakDetectionThreshold) {
+            this.leakDetectionThreshold = leakDetectionThreshold;
+        }
+        
+        public String getLeakDetectionThresholdFormatted() {
+            return leakDetectionThresholdFormatted;
+        }
+        
+        public void setLeakDetectionThresholdFormatted(String leakDetectionThresholdFormatted) {
+            this.leakDetectionThresholdFormatted = leakDetectionThresholdFormatted;
+        }
+    }
+    
+    /**
+     * Transaction metrics class for JSON serialization.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class TransactionMetrics {
+        private int totalTransactions;
+        private int failedTransactions;
+        private double successRate;
+        private double averageProcessingTimeMs;
+        private double averageConnectionWaitTimeMs;
+        
+        public int getTotalTransactions() {
+            return totalTransactions;
+        }
+        
+        public void setTotalTransactions(int totalTransactions) {
+            this.totalTransactions = totalTransactions;
+        }
+        
+        public int getFailedTransactions() {
+            return failedTransactions;
+        }
+        
+        public void setFailedTransactions(int failedTransactions) {
+            this.failedTransactions = failedTransactions;
+        }
+        
+        public double getSuccessRate() {
+            return successRate;
+        }
+        
+        public void setSuccessRate(double successRate) {
+            this.successRate = successRate;
+        }
+        
+        public double getAverageProcessingTimeMs() {
+            return averageProcessingTimeMs;
+        }
+        
+        public void setAverageProcessingTimeMs(double averageProcessingTimeMs) {
+            this.averageProcessingTimeMs = averageProcessingTimeMs;
+        }
+        
+        public double getAverageConnectionWaitTimeMs() {
+            return averageConnectionWaitTimeMs;
+        }
+        
+        public void setAverageConnectionWaitTimeMs(double averageConnectionWaitTimeMs) {
+            this.averageConnectionWaitTimeMs = averageConnectionWaitTimeMs;
+        }
     }
 }

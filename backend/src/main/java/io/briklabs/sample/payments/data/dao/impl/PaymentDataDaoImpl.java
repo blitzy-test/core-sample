@@ -1,713 +1,928 @@
 package io.briklabs.sample.payments.data.dao.impl;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Timestamp;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
-import java.util.UUID;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import io.briklabs.sample.config.ConfigSource;
-import io.briklabs.sample.config.DatabaseConfig;
-import io.briklabs.sample.payments.data.dao.PaymentDataDAO;
+import io.briklabs.sample.payments.data.ConnectionManager;
 import io.briklabs.sample.payments.data.exception.ConnectionException;
-import io.briklabs.sample.payments.data.exception.PaymentDataException;
 import io.briklabs.sample.payments.data.exception.QueryExecutionException;
 import io.briklabs.sample.payments.data.exception.ResourceNotFoundException;
 import io.briklabs.sample.payments.data.exception.SecurityException;
 import io.briklabs.sample.payments.data.exception.TransactionException;
 import io.briklabs.sample.payments.data.exception.ValidationException;
-import io.briklabs.sample.payments.data.model.PaymentData;
+import io.briklabs.sample.payments.data.model.PaymentDataEntity;
 import io.briklabs.sample.payments.data.query.PaymentFilterParams;
 import io.briklabs.sample.payments.data.query.PaymentQueryBuilder;
-import io.briklabs.sample.payments.data.security.PaymentEncryptionService;
+import io.briklabs.sample.payments.data.dao.PaymentDataDAO;
+import io.briklabs.sample.payments.model.PaymentData;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.sql.Types;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Concrete implementation of the PaymentDataDAO interface that handles database operations
- * for payment method details.
+ * for payment method details. This class manages secure storage and retrieval of payment
+ * instrument information, handling tokenization, encryption, and field-level security.
  * <p>
- * This class manages secure storage and retrieval of payment instrument information,
- * handling tokenization, encryption, and field-level security. It provides methods to
- * retrieve payment data by transaction ID and implements specialized queries for payment
- * method information.
- * </p>
- * <p>
- * The implementation ensures proper handling of sensitive payment data with appropriate
- * security controls, following PCI DSS requirements where applicable.
+ * It provides methods to retrieve payment data by transaction ID and implements specialized
+ * queries for payment method information. This implementation ensures proper handling of
+ * sensitive payment data with appropriate security controls.
  * </p>
  */
-public class PaymentDataDaoImpl extends AbstractPaymentDaoImpl<PaymentData, UUID> implements PaymentDataDAO {
-
+public class PaymentDataDaoImpl implements PaymentDataDAO {
     private static final Logger logger = LoggerFactory.getLogger(PaymentDataDaoImpl.class);
     
-    private static final String TABLE_NAME = "payment_data";
-    private static final String ID_COLUMN = "payment_data_id";
-    private static final String TRANSACTION_ID_COLUMN = "transaction_id";
-    private static final String PAYMENT_METHOD_ID_COLUMN = "payment_method_id";
-    private static final String PAYMENT_TOKEN_COLUMN = "payment_token";
-    private static final String PAYMENT_DETAILS_COLUMN = "payment_details";
-    private static final String CREATED_AT_COLUMN = "created_at";
-    private static final String EXPIRATION_COLUMN = "expiration";
-    private static final String BILLING_DATA_COLUMN = "billing_data";
-    
-    private final PaymentEncryptionService encryptionService;
-
     /**
-     * Creates a new PaymentDataDaoImpl with the specified database configuration.
-     *
-     * @param databaseConfig the database configuration
-     * @param configSource the configuration source
-     * @param encryptionService the encryption service for sensitive data
+     * SQL queries for payment data operations.
      */
-    public PaymentDataDaoImpl(DatabaseConfig databaseConfig, ConfigSource configSource, 
-                             PaymentEncryptionService encryptionService) {
-        super(databaseConfig, configSource, TABLE_NAME);
-        this.encryptionService = encryptionService;
-    }
-
+    private static final String SQL_INSERT = 
+            "INSERT INTO payment_data (payment_data_id, transaction_id, payment_method_id, " +
+            "payment_token, payment_details, created_at, expiration, billing_data) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    
+    private static final String SQL_UPDATE = 
+            "UPDATE payment_data SET payment_method_id = ?, payment_token = ?, " +
+            "payment_details = ?, expiration = ?, billing_data = ? " +
+            "WHERE payment_data_id = ?";
+    
+    private static final String SQL_FIND_BY_ID = 
+            "SELECT * FROM payment_data WHERE payment_data_id = ?";
+    
+    private static final String SQL_FIND_BY_TRANSACTION_ID = 
+            "SELECT * FROM payment_data WHERE transaction_id = ?";
+    
+    private static final String SQL_FIND_BY_PAYMENT_METHOD_ID = 
+            "SELECT * FROM payment_data WHERE payment_method_id = ?";
+    
+    private static final String SQL_FIND_BY_TRANSACTION_ID_AND_PAYMENT_TYPE = 
+            "SELECT pd.* FROM payment_data pd " +
+            "JOIN payment_transaction pt ON pd.transaction_id = pt.transaction_id " +
+            "WHERE pd.transaction_id = ? AND pt.payment_type = ?";
+    
+    private static final String SQL_UPDATE_PAYMENT_TOKEN = 
+            "UPDATE payment_data SET payment_token = ? WHERE payment_data_id = ?";
+    
+    private static final String SQL_UPDATE_EXPIRATION = 
+            "UPDATE payment_data SET expiration = ? WHERE payment_data_id = ?";
+    
+    private static final String SQL_UPDATE_BILLING_DATA = 
+            "UPDATE payment_data SET billing_data = ? WHERE payment_data_id = ?";
+    
+    private static final String SQL_DELETE = 
+            "DELETE FROM payment_data WHERE payment_data_id = ?";
+    
+    private static final String SQL_SECURE_DELETE = 
+            "UPDATE payment_data SET payment_token = '[REDACTED]', " +
+            "payment_details = '{\"status\": \"redacted\"}', " +
+            "billing_data = '{\"status\": \"redacted\"}' " +
+            "WHERE payment_data_id = ?";
+    
+    private static final String SQL_FIND_BY_EXPIRATION_RANGE = 
+            "SELECT * FROM payment_data WHERE expiration BETWEEN ? AND ?";
+    
+    private static final String SQL_FIND_EXPIRING_SOON = 
+            "SELECT * FROM payment_data WHERE expiration BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '? months')";
+    
+    private static final String SQL_FIND_BY_PAYMENT_TYPE = 
+            "SELECT pd.* FROM payment_data pd " +
+            "JOIN payment_transaction pt ON pd.transaction_id = pt.transaction_id " +
+            "WHERE pt.payment_type = ?";
+    
+    private static final String SQL_COUNT_BY_PAYMENT_TYPE = 
+            "SELECT COUNT(*) FROM payment_data pd " +
+            "JOIN payment_transaction pt ON pd.transaction_id = pt.transaction_id " +
+            "WHERE pt.payment_type = ?";
+    
+    private static final String SQL_FIND_BY_ORGANIZATION_ID = 
+            "SELECT pd.* FROM payment_data pd " +
+            "JOIN payment_transaction pt ON pd.transaction_id = pt.transaction_id " +
+            "WHERE pt.organization_id = ?";
+    
+    private static final String SQL_FIND_BY_ACCOUNT_ID = 
+            "SELECT pd.* FROM payment_data pd " +
+            "JOIN payment_transaction pt ON pd.transaction_id = pt.transaction_id " +
+            "WHERE pt.account_id = ?";
+    
+    private static final String SQL_FIND_BY_MERCHANT_ID = 
+            "SELECT pd.* FROM payment_data pd " +
+            "JOIN payment_transaction pt ON pd.transaction_id = pt.transaction_id " +
+            "WHERE pt.merchant_id = ?";
+    
+    private static final String SQL_FIND_MOST_RECENT_BY_TRANSACTION_ID = 
+            "SELECT * FROM payment_data WHERE transaction_id = ? " +
+            "ORDER BY created_at DESC LIMIT 1";
+    
+    private static final String SQL_FIND_BY_CREATION_DATE_RANGE = 
+            "SELECT * FROM payment_data WHERE created_at BETWEEN ? AND ?";
+    
     /**
-     * Validates a payment data entity before database operations.
+     * The connection manager for database operations.
+     */
+    private final ConnectionManager connectionManager;
+    
+    /**
+     * Creates a new PaymentDataDaoImpl with the specified connection manager.
      *
-     * @param paymentData the payment data to validate
-     * @throws ValidationException if the payment data fails validation
+     * @param connectionManager the connection manager for database operations
+     */
+    public PaymentDataDaoImpl(ConnectionManager connectionManager) {
+        this.connectionManager = connectionManager;
+    }
+    
+    /**
+     * {@inheritDoc}
      */
     @Override
-    protected void validateEntity(PaymentData paymentData) throws ValidationException {
+    public PaymentData create(PaymentData paymentData) {
         if (paymentData == null) {
             throw new ValidationException("Payment data cannot be null");
         }
         
-        if (paymentData.getTransactionId() == null) {
-            throw new ValidationException("Transaction ID is required");
+        // Validate payment data
+        validatePaymentData(paymentData);
+        
+        // Generate ID if not provided
+        if (paymentData.getPaymentDataId() == null) {
+            paymentData.setPaymentDataId(UUID.randomUUID());
         }
         
-        if (paymentData.getPaymentMethodId() == null || paymentData.getPaymentMethodId().trim().isEmpty()) {
-            throw new ValidationException("Payment method ID is required");
-        }
-        
-        // Additional validation for payment details
-        if (paymentData.getPaymentDetails() != null) {
-            // Validate payment details structure based on payment type
-            validatePaymentDetails(paymentData);
-        }
-    }
-
-    /**
-     * Validates payment details based on payment type.
-     *
-     * @param paymentData the payment data to validate
-     * @throws ValidationException if the payment details fail validation
-     */
-    private void validatePaymentDetails(PaymentData paymentData) throws ValidationException {
-        String paymentDetails = paymentData.getPaymentDetails();
-        
-        if (paymentDetails == null || paymentDetails.trim().isEmpty()) {
-            return; // Empty details are allowed in some cases
-        }
-        
+        Connection conn = null;
         try {
-            // Validate JSON structure
-            if (!isValidJson(paymentDetails)) {
-                throw new ValidationException("Payment details must be valid JSON");
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_INSERT)) {
+                stmt.setObject(1, paymentData.getPaymentDataId());
+                stmt.setObject(2, paymentData.getTransactionId());
+                stmt.setString(3, paymentData.getPaymentMethodId());
+                
+                // Handle potentially null fields
+                if (paymentData.getPaymentToken() != null) {
+                    stmt.setString(4, paymentData.getPaymentToken());
+                } else {
+                    stmt.setNull(4, Types.VARCHAR);
+                }
+                
+                if (paymentData.getPaymentDetails() != null) {
+                    stmt.setString(5, paymentData.getPaymentDetails());
+                } else {
+                    stmt.setNull(5, Types.VARCHAR);
+                }
+                
+                // Set current timestamp if not provided
+                Instant createdAt = paymentData.getCreatedAt() != null ? 
+                        paymentData.getCreatedAt().atZone(ZoneId.systemDefault()).toInstant() : 
+                        Instant.now();
+                stmt.setTimestamp(6, Timestamp.from(createdAt));
+                
+                if (paymentData.getExpiration() != null) {
+                    stmt.setObject(7, paymentData.getExpiration());
+                } else {
+                    stmt.setNull(7, Types.DATE);
+                }
+                
+                if (paymentData.getBillingData() != null) {
+                    stmt.setString(8, paymentData.getBillingData());
+                } else {
+                    stmt.setNull(8, Types.VARCHAR);
+                }
+                
+                int rowsAffected = stmt.executeUpdate();
+                if (rowsAffected != 1) {
+                    throw new QueryExecutionException(
+                            "Failed to insert payment data, expected 1 row affected but got " + rowsAffected,
+                            SQL_INSERT, "INSERT", "payment_data");
+                }
+                
+                logger.debug("Created payment data with ID: {}", paymentData.getPaymentDataId());
+                return paymentData;
             }
-            
-            // Additional validation based on payment type could be implemented here
-            
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error creating payment data: " + e.getMessage(),
+                    e, SQL_INSERT, "INSERT", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
         } catch (Exception e) {
-            throw new ValidationException("Invalid payment details format: " + e.getMessage());
+            throw new QueryExecutionException(
+                    "Unexpected error creating payment data: " + e.getMessage(),
+                    SQL_INSERT, "INSERT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
         }
     }
-
+    
     /**
-     * Checks if a string is valid JSON.
-     *
-     * @param json the string to check
-     * @return true if the string is valid JSON, false otherwise
-     */
-    private boolean isValidJson(String json) {
-        try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            mapper.readTree(json);
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    /**
-     * Maps a ResultSet row to a PaymentData entity.
-     *
-     * @param rs the result set
-     * @return the mapped PaymentData entity
-     * @throws SQLException if a database access error occurs
+     * {@inheritDoc}
      */
     @Override
-    protected PaymentData mapRow(ResultSet rs) throws SQLException {
-        PaymentData paymentData = new PaymentData();
-        
-        paymentData.setPaymentDataId(UUID.fromString(rs.getString(ID_COLUMN)));
-        paymentData.setTransactionId(UUID.fromString(rs.getString(TRANSACTION_ID_COLUMN)));
-        paymentData.setPaymentMethodId(rs.getString(PAYMENT_METHOD_ID_COLUMN));
-        paymentData.setPaymentToken(rs.getString(PAYMENT_TOKEN_COLUMN));
-        paymentData.setPaymentDetails(rs.getString(PAYMENT_DETAILS_COLUMN));
-        
-        Timestamp createdAt = rs.getTimestamp(CREATED_AT_COLUMN);
-        if (createdAt != null) {
-            paymentData.setCreatedAt(createdAt.toLocalDateTime());
+    public Optional<PaymentData> findById(UUID id) {
+        if (id == null) {
+            throw new ValidationException("Payment data ID cannot be null");
         }
         
-        java.sql.Date expiration = rs.getDate(EXPIRATION_COLUMN);
-        if (expiration != null) {
-            paymentData.setExpiration(expiration.toLocalDate());
-        }
-        
-        paymentData.setBillingData(rs.getString(BILLING_DATA_COLUMN));
-        
-        return paymentData;
-    }
-
-    /**
-     * Maps a ResultSet row to a PaymentData entity with sensitive data.
-     * This method should only be used by authorized services.
-     *
-     * @param rs the result set
-     * @return the mapped PaymentData entity with sensitive data
-     * @throws SQLException if a database access error occurs
-     */
-    private PaymentData mapRowWithSensitiveData(ResultSet rs) throws SQLException {
-        PaymentData paymentData = mapRow(rs);
-        
-        // Decrypt sensitive data if it's encrypted
-        if (paymentData.getPaymentToken() != null) {
-            try {
-                String decryptedToken = encryptionService.decryptPaymentToken(paymentData.getPaymentToken());
-                paymentData.setDecryptedToken(decryptedToken);
-            } catch (SecurityException e) {
-                logger.warn("Failed to decrypt payment token: {}", e.getMessage());
-                // Continue without decrypted data
-            }
-        }
-        
-        return paymentData;
-    }
-
-    /**
-     * Maps a ResultSet row to a PaymentData entity with role-based masking.
-     *
-     * @param rs the result set
-     * @param userRole the role of the requesting user
-     * @return the mapped PaymentData entity with appropriate masking
-     * @throws SQLException if a database access error occurs
-     */
-    private PaymentData mapRowWithMasking(ResultSet rs, String userRole) throws SQLException {
-        PaymentData paymentData = mapRow(rs);
-        
-        // Apply role-based masking
-        if (paymentData.getPaymentToken() != null) {
-            paymentData.setPaymentToken(maskPaymentToken(paymentData.getPaymentToken(), userRole));
-        }
-        
-        if (paymentData.getPaymentDetails() != null) {
-            paymentData.setPaymentDetails(maskPaymentDetails(paymentData.getPaymentDetails(), userRole));
-        }
-        
-        if (paymentData.getBillingData() != null) {
-            paymentData.setBillingData(maskBillingData(paymentData.getBillingData(), userRole));
-        }
-        
-        return paymentData;
-    }
-
-    /**
-     * Masks a payment token based on user role.
-     *
-     * @param token the payment token
-     * @param userRole the role of the requesting user
-     * @return the masked payment token
-     */
-    private String maskPaymentToken(String token, String userRole) {
-        if (token == null || token.isEmpty()) {
-            return token;
-        }
-        
-        // Apply different masking levels based on role
-        if ("ADMIN".equalsIgnoreCase(userRole) || "PAYMENT_ADMIN".equalsIgnoreCase(userRole)) {
-            // Minimal masking for admins
-            return token;
-        } else if ("FINANCE".equalsIgnoreCase(userRole) || "FINANCE_MANAGER".equalsIgnoreCase(userRole)) {
-            // Partial masking for finance roles
-            return maskString(token, 4, 4);
-        } else {
-            // Full masking for other roles
-            return "**********";
-        }
-    }
-
-    /**
-     * Masks payment details JSON based on user role.
-     *
-     * @param details the payment details JSON
-     * @param userRole the role of the requesting user
-     * @return the masked payment details
-     */
-    private String maskPaymentDetails(String details, String userRole) {
-        if (details == null || details.isEmpty()) {
-            return details;
-        }
-        
+        Connection conn = null;
         try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            com.fasterxml.jackson.databind.JsonNode rootNode = mapper.readTree(details);
-            com.fasterxml.jackson.databind.node.ObjectNode maskedNode = rootNode.deepCopy();
+            conn = connectionManager.getConnection();
             
-            // Apply different masking levels based on role
-            if ("ADMIN".equalsIgnoreCase(userRole) || "PAYMENT_ADMIN".equalsIgnoreCase(userRole)) {
-                // Minimal masking for admins - mask only CVV/security code
-                if (maskedNode.has("securityCode")) {
-                    maskedNode.put("securityCode", "***");
-                }
-            } else if ("FINANCE".equalsIgnoreCase(userRole) || "FINANCE_MANAGER".equalsIgnoreCase(userRole)) {
-                // Moderate masking for finance roles
-                if (maskedNode.has("cardNumber")) {
-                    String cardNumber = maskedNode.get("cardNumber").asText();
-                    maskedNode.put("cardNumber", maskCardNumber(cardNumber));
-                }
-                if (maskedNode.has("securityCode")) {
-                    maskedNode.put("securityCode", "***");
-                }
-            } else {
-                // Full masking for other roles
-                if (maskedNode.has("cardNumber")) {
-                    maskedNode.put("cardNumber", "************1234");
-                }
-                if (maskedNode.has("securityCode")) {
-                    maskedNode.put("securityCode", "***");
-                }
-                if (maskedNode.has("accountNumber")) {
-                    maskedNode.put("accountNumber", "******1234");
-                }
-            }
-            
-            return mapper.writeValueAsString(maskedNode);
-        } catch (Exception e) {
-            logger.warn("Failed to mask payment details: {}", e.getMessage());
-            return details;
-        }
-    }
-
-    /**
-     * Masks billing data JSON based on user role.
-     *
-     * @param billingData the billing data JSON
-     * @param userRole the role of the requesting user
-     * @return the masked billing data
-     */
-    private String maskBillingData(String billingData, String userRole) {
-        if (billingData == null || billingData.isEmpty()) {
-            return billingData;
-        }
-        
-        try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            com.fasterxml.jackson.databind.JsonNode rootNode = mapper.readTree(billingData);
-            com.fasterxml.jackson.databind.node.ObjectNode maskedNode = rootNode.deepCopy();
-            
-            // Apply different masking levels based on role
-            if ("ADMIN".equalsIgnoreCase(userRole) || "PAYMENT_ADMIN".equalsIgnoreCase(userRole)) {
-                // No masking for admins
-                return billingData;
-            } else {
-                // Mask personal information for other roles
-                if (maskedNode.has("address")) {
-                    com.fasterxml.jackson.databind.JsonNode addressNode = maskedNode.get("address");
-                    if (addressNode.isObject()) {
-                        com.fasterxml.jackson.databind.node.ObjectNode address = (com.fasterxml.jackson.databind.node.ObjectNode) addressNode;
-                        if (address.has("line1")) {
-                            String line1 = address.get("line1").asText();
-                            address.put("line1", maskAddress(line1));
-                        }
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_ID)) {
+                stmt.setObject(1, id);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        return Optional.of(entity.toDomainModel());
+                    } else {
+                        return Optional.empty();
                     }
                 }
-                
-                if (maskedNode.has("email")) {
-                    String email = maskedNode.get("email").asText();
-                    maskedNode.put("email", maskEmail(email));
-                }
-                
-                if (maskedNode.has("phone")) {
-                    String phone = maskedNode.get("phone").asText();
-                    maskedNode.put("phone", maskPhone(phone));
-                }
             }
-            
-            return mapper.writeValueAsString(maskedNode);
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by ID: " + e.getMessage(),
+                    e, SQL_FIND_BY_ID, "SELECT", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
         } catch (Exception e) {
-            logger.warn("Failed to mask billing data: {}", e.getMessage());
-            return billingData;
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by ID: " + e.getMessage(),
+                    SQL_FIND_BY_ID, "SELECT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
         }
     }
-
+    
     /**
-     * Masks a card number, showing only the last 4 digits.
-     *
-     * @param cardNumber the card number
-     * @return the masked card number
+     * {@inheritDoc}
      */
-    private String maskCardNumber(String cardNumber) {
-        if (cardNumber == null || cardNumber.length() < 4) {
-            return cardNumber;
+    @Override
+    public PaymentData update(PaymentData paymentData) {
+        if (paymentData == null) {
+            throw new ValidationException("Payment data cannot be null");
         }
         
-        int length = cardNumber.length();
-        return "************" + cardNumber.substring(length - 4);
-    }
-
-    /**
-     * Masks an address, showing only the house number and zip code.
-     *
-     * @param address the address
-     * @return the masked address
-     */
-    private String maskAddress(String address) {
-        if (address == null || address.isEmpty()) {
-            return address;
+        if (paymentData.getPaymentDataId() == null) {
+            throw new ValidationException("Payment data ID cannot be null for update");
         }
         
-        // Extract house number (assuming it's at the beginning)
-        String[] parts = address.split(" ", 2);
-        if (parts.length > 1) {
-            return parts[0] + " ********";
-        } else {
-            return "********";
-        }
-    }
-
-    /**
-     * Masks an email address, showing only the first character and domain.
-     *
-     * @param email the email address
-     * @return the masked email address
-     */
-    private String maskEmail(String email) {
-        if (email == null || email.isEmpty()) {
-            return email;
+        // Validate payment data
+        validatePaymentData(paymentData);
+        
+        // Check if the payment data exists
+        if (!exists(paymentData.getPaymentDataId())) {
+            throw new ResourceNotFoundException("payment_data", paymentData.getPaymentDataId());
         }
         
-        int atIndex = email.indexOf('@');
-        if (atIndex > 0) {
-            String username = email.substring(0, atIndex);
-            String domain = email.substring(atIndex);
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
             
-            if (username.length() > 1) {
-                return username.charAt(0) + "******" + domain;
-            } else {
-                return username + "******" + domain;
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_UPDATE)) {
+                stmt.setString(1, paymentData.getPaymentMethodId());
+                
+                // Handle potentially null fields
+                if (paymentData.getPaymentToken() != null) {
+                    stmt.setString(2, paymentData.getPaymentToken());
+                } else {
+                    stmt.setNull(2, Types.VARCHAR);
+                }
+                
+                if (paymentData.getPaymentDetails() != null) {
+                    stmt.setString(3, paymentData.getPaymentDetails());
+                } else {
+                    stmt.setNull(3, Types.VARCHAR);
+                }
+                
+                if (paymentData.getExpiration() != null) {
+                    stmt.setObject(4, paymentData.getExpiration());
+                } else {
+                    stmt.setNull(4, Types.DATE);
+                }
+                
+                if (paymentData.getBillingData() != null) {
+                    stmt.setString(5, paymentData.getBillingData());
+                } else {
+                    stmt.setNull(5, Types.VARCHAR);
+                }
+                
+                stmt.setObject(6, paymentData.getPaymentDataId());
+                
+                int rowsAffected = stmt.executeUpdate();
+                if (rowsAffected != 1) {
+                    throw new QueryExecutionException(
+                            "Failed to update payment data, expected 1 row affected but got " + rowsAffected,
+                            SQL_UPDATE, "UPDATE", "payment_data");
+                }
+                
+                logger.debug("Updated payment data with ID: {}", paymentData.getPaymentDataId());
+                return paymentData;
             }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error updating payment data: " + e.getMessage(),
+                    e, SQL_UPDATE, "UPDATE", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (ResourceNotFoundException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error updating payment data: " + e.getMessage(),
+                    SQL_UPDATE, "UPDATE", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
         }
-        
-        return email;
     }
-
+    
     /**
-     * Masks a phone number, showing only the last 4 digits.
-     *
-     * @param phone the phone number
-     * @return the masked phone number
-     */
-    private String maskPhone(String phone) {
-        if (phone == null || phone.length() < 4) {
-            return phone;
-        }
-        
-        int length = phone.length();
-        return "******" + phone.substring(length - 4);
-    }
-
-    /**
-     * Masks a string, showing only the specified number of characters at the beginning and end.
-     *
-     * @param str the string to mask
-     * @param prefixLength the number of characters to show at the beginning
-     * @param suffixLength the number of characters to show at the end
-     * @return the masked string
-     */
-    private String maskString(String str, int prefixLength, int suffixLength) {
-        if (str == null || str.isEmpty()) {
-            return str;
-        }
-        
-        int length = str.length();
-        
-        if (length <= prefixLength + suffixLength) {
-            return str;
-        }
-        
-        String prefix = str.substring(0, prefixLength);
-        String suffix = str.substring(length - suffixLength);
-        
-        StringBuilder masked = new StringBuilder(prefix);
-        for (int i = 0; i < length - prefixLength - suffixLength; i++) {
-            masked.append('*');
-        }
-        masked.append(suffix);
-        
-        return masked.toString();
-    }
-
-    /**
-     * Builds a query for finding a payment data entity by ID.
-     *
-     * @param id the payment data ID
-     * @return the SQL query
+     * {@inheritDoc}
      */
     @Override
-    protected String buildFindByIdQuery(UUID id) {
-        return "SELECT * FROM " + TABLE_NAME + " WHERE " + ID_COLUMN + " = ?";
-    }
-
-    /**
-     * Builds a filter query for payment data.
-     *
-     * @param filterParams the filter parameters
-     * @return the query builder
-     */
-    @Override
-    protected PaymentQueryBuilder buildFilterQuery(PaymentFilterParams filterParams) {
-        PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder();
-        
-        queryBuilder.select("*")
-                   .from(TABLE_NAME);
-        
-        applyFilterParams(queryBuilder, filterParams);
-        
-        // Apply sorting
-        if (filterParams.getSortBy() != null && !filterParams.getSortBy().isEmpty()) {
-            String sortDirection = filterParams.getSortDirection() != null && 
-                                  filterParams.getSortDirection().equalsIgnoreCase("DESC") ? "DESC" : "ASC";
-            queryBuilder.orderBy(filterParams.getSortBy() + " " + sortDirection);
-        } else {
-            queryBuilder.orderBy(CREATED_AT_COLUMN + " DESC");
+    public boolean delete(UUID id) {
+        if (id == null) {
+            throw new ValidationException("Payment data ID cannot be null");
         }
         
-        // Apply pagination
-        if (filterParams.getLimit() > 0) {
-            queryBuilder.limit(filterParams.getLimit());
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
             
-            if (filterParams.getOffset() > 0) {
-                queryBuilder.offset(filterParams.getOffset());
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_DELETE)) {
+                stmt.setObject(1, id);
+                
+                int rowsAffected = stmt.executeUpdate();
+                
+                logger.debug("Deleted payment data with ID: {}, rows affected: {}", id, rowsAffected);
+                return rowsAffected > 0;
             }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error deleting payment data: " + e.getMessage(),
+                    e, SQL_DELETE, "DELETE", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error deleting payment data: " + e.getMessage(),
+                    SQL_DELETE, "DELETE", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
         }
-        
-        return queryBuilder;
     }
-
+    
     /**
-     * Builds a count query for payment data.
-     *
-     * @param filterParams the filter parameters
-     * @return the query builder
+     * {@inheritDoc}
      */
     @Override
-    protected PaymentQueryBuilder buildCountQuery(PaymentFilterParams filterParams) {
-        PaymentQueryBuilder queryBuilder = new PaymentQueryBuilder();
-        
-        queryBuilder.select("COUNT(*)")
-                   .from(TABLE_NAME);
-        
-        applyFilterParams(queryBuilder, filterParams);
-        
-        return queryBuilder;
-    }
-
-    /**
-     * Applies filter parameters to a query builder.
-     *
-     * @param queryBuilder the query builder
-     * @param filterParams the filter parameters
-     */
-    private void applyFilterParams(PaymentQueryBuilder queryBuilder, PaymentFilterParams filterParams) {
-        boolean whereAdded = false;
-        
-        // Filter by transaction ID
-        if (filterParams.getTransactionId() != null) {
-            queryBuilder.where(TRANSACTION_ID_COLUMN + " = ?", filterParams.getTransactionId());
-            whereAdded = true;
+    public List<PaymentData> query(Object params) {
+        if (!(params instanceof PaymentFilterParams)) {
+            throw new ValidationException("Query parameters must be of type PaymentFilterParams");
         }
         
-        // Filter by payment method ID
-        if (filterParams.getPaymentMethodId() != null && !filterParams.getPaymentMethodId().isEmpty()) {
-            if (whereAdded) {
-                queryBuilder.and(PAYMENT_METHOD_ID_COLUMN + " = ?", filterParams.getPaymentMethodId());
+        PaymentFilterParams filterParams = (PaymentFilterParams) params;
+        return searchPaymentData(filterParams);
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Connection beginTransaction() {
+        try {
+            connectionManager.beginTransaction();
+            return connectionManager.getConnection();
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (TransactionException e) {
+            throw e;
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void commitTransaction(Connection connection) {
+        try {
+            connectionManager.commitTransaction();
+        } catch (TransactionException e) {
+            throw e;
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void rollbackTransaction(Connection connection) {
+        try {
+            connectionManager.rollbackTransaction();
+        } catch (TransactionException e) {
+            throw e;
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentData> batchCreate(List<PaymentData> entities) {
+        if (entities == null || entities.isEmpty()) {
+            return new ArrayList<>();
+        }
+        
+        Connection conn = null;
+        boolean localTransaction = false;
+        
+        try {
+            // Start a transaction if one is not already in progress
+            if (!connectionManager.isInTransaction()) {
+                connectionManager.beginTransaction();
+                localTransaction = true;
+            }
+            
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_INSERT)) {
+                for (PaymentData paymentData : entities) {
+                    // Validate payment data
+                    validatePaymentData(paymentData);
+                    
+                    // Generate ID if not provided
+                    if (paymentData.getPaymentDataId() == null) {
+                        paymentData.setPaymentDataId(UUID.randomUUID());
+                    }
+                    
+                    stmt.setObject(1, paymentData.getPaymentDataId());
+                    stmt.setObject(2, paymentData.getTransactionId());
+                    stmt.setString(3, paymentData.getPaymentMethodId());
+                    
+                    // Handle potentially null fields
+                    if (paymentData.getPaymentToken() != null) {
+                        stmt.setString(4, paymentData.getPaymentToken());
+                    } else {
+                        stmt.setNull(4, Types.VARCHAR);
+                    }
+                    
+                    if (paymentData.getPaymentDetails() != null) {
+                        stmt.setString(5, paymentData.getPaymentDetails());
+                    } else {
+                        stmt.setNull(5, Types.VARCHAR);
+                    }
+                    
+                    // Set current timestamp if not provided
+                    Instant createdAt = paymentData.getCreatedAt() != null ? 
+                            paymentData.getCreatedAt().atZone(ZoneId.systemDefault()).toInstant() : 
+                            Instant.now();
+                    stmt.setTimestamp(6, Timestamp.from(createdAt));
+                    
+                    if (paymentData.getExpiration() != null) {
+                        stmt.setObject(7, paymentData.getExpiration());
+                    } else {
+                        stmt.setNull(7, Types.DATE);
+                    }
+                    
+                    if (paymentData.getBillingData() != null) {
+                        stmt.setString(8, paymentData.getBillingData());
+                    } else {
+                        stmt.setNull(8, Types.VARCHAR);
+                    }
+                    
+                    stmt.addBatch();
+                }
+                
+                int[] rowsAffected = stmt.executeBatch();
+                
+                // Commit the transaction if we started it
+                if (localTransaction) {
+                    connectionManager.commitTransaction();
+                }
+                
+                logger.debug("Batch created {} payment data records", rowsAffected.length);
+                return entities;
+            }
+        } catch (SQLException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw new QueryExecutionException(
+                    "Error batch creating payment data: " + e.getMessage(),
+                    e, SQL_INSERT, "INSERT", new String[]{"payment_data"});
+        } catch (ConnectionException | TransactionException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw e;
+        } catch (Exception e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw new QueryExecutionException(
+                    "Unexpected error batch creating payment data: " + e.getMessage(),
+                    SQL_INSERT, "INSERT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentData> batchUpdate(List<PaymentData> entities) {
+        if (entities == null || entities.isEmpty()) {
+            return new ArrayList<>();
+        }
+        
+        Connection conn = null;
+        boolean localTransaction = false;
+        
+        try {
+            // Start a transaction if one is not already in progress
+            if (!connectionManager.isInTransaction()) {
+                connectionManager.beginTransaction();
+                localTransaction = true;
+            }
+            
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_UPDATE)) {
+                for (PaymentData paymentData : entities) {
+                    // Validate payment data
+                    validatePaymentData(paymentData);
+                    
+                    if (paymentData.getPaymentDataId() == null) {
+                        throw new ValidationException("Payment data ID cannot be null for update");
+                    }
+                    
+                    stmt.setString(1, paymentData.getPaymentMethodId());
+                    
+                    // Handle potentially null fields
+                    if (paymentData.getPaymentToken() != null) {
+                        stmt.setString(2, paymentData.getPaymentToken());
+                    } else {
+                        stmt.setNull(2, Types.VARCHAR);
+                    }
+                    
+                    if (paymentData.getPaymentDetails() != null) {
+                        stmt.setString(3, paymentData.getPaymentDetails());
+                    } else {
+                        stmt.setNull(3, Types.VARCHAR);
+                    }
+                    
+                    if (paymentData.getExpiration() != null) {
+                        stmt.setObject(4, paymentData.getExpiration());
+                    } else {
+                        stmt.setNull(4, Types.DATE);
+                    }
+                    
+                    if (paymentData.getBillingData() != null) {
+                        stmt.setString(5, paymentData.getBillingData());
+                    } else {
+                        stmt.setNull(5, Types.VARCHAR);
+                    }
+                    
+                    stmt.setObject(6, paymentData.getPaymentDataId());
+                    
+                    stmt.addBatch();
+                }
+                
+                int[] rowsAffected = stmt.executeBatch();
+                
+                // Commit the transaction if we started it
+                if (localTransaction) {
+                    connectionManager.commitTransaction();
+                }
+                
+                logger.debug("Batch updated {} payment data records", rowsAffected.length);
+                return entities;
+            }
+        } catch (SQLException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw new QueryExecutionException(
+                    "Error batch updating payment data: " + e.getMessage(),
+                    e, SQL_UPDATE, "UPDATE", new String[]{"payment_data"});
+        } catch (ConnectionException | TransactionException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw e;
+        } catch (Exception e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw new QueryExecutionException(
+                    "Unexpected error batch updating payment data: " + e.getMessage(),
+                    SQL_UPDATE, "UPDATE", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public <R> R executeInTransaction(TransactionOperation<R> operation) {
+        boolean localTransaction = false;
+        
+        try {
+            // Start a transaction if one is not already in progress
+            if (!connectionManager.isInTransaction()) {
+                connectionManager.beginTransaction();
+                localTransaction = true;
+            }
+            
+            Connection conn = connectionManager.getConnection();
+            R result = operation.execute(conn);
+            
+            // Commit the transaction if we started it
+            if (localTransaction) {
+                connectionManager.commitTransaction();
+            }
+            
+            return result;
+        } catch (Exception e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            if (e instanceof RuntimeException) {
+                throw (RuntimeException) e;
             } else {
-                queryBuilder.where(PAYMENT_METHOD_ID_COLUMN + " = ?", filterParams.getPaymentMethodId());
-                whereAdded = true;
+                throw new QueryExecutionException(
+                        "Error executing in transaction: " + e.getMessage(),
+                        e, "TRANSACTION", "EXECUTE", new String[]{"payment_data"});
             }
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long count(Object params) {
+        if (!(params instanceof PaymentFilterParams)) {
+            throw new ValidationException("Query parameters must be of type PaymentFilterParams");
         }
         
-        // Filter by payment type (from payment details)
-        if (filterParams.getPaymentType() != null && !filterParams.getPaymentType().isEmpty()) {
-            if (whereAdded) {
-                queryBuilder.and(PAYMENT_DETAILS_COLUMN + " @> ?::jsonb", 
-                        "{\"paymentType\": \"" + filterParams.getPaymentType() + "\"}");
-            } else {
-                queryBuilder.where(PAYMENT_DETAILS_COLUMN + " @> ?::jsonb", 
-                        "{\"paymentType\": \"" + filterParams.getPaymentType() + "\"}");
-                whereAdded = true;
+        PaymentFilterParams filterParams = (PaymentFilterParams) params;
+        
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            PaymentQueryBuilder queryBuilder = PaymentQueryBuilder.create()
+                    .count("pd.*")
+                    .from("payment_data pd")
+                    .leftJoin("payment_transaction pt", "pd.transaction_id = pt.transaction_id");
+            
+            // Apply filters
+            queryBuilder.applyFilters(filterParams);
+            
+            try (PreparedStatement stmt = queryBuilder.buildPreparedStatement(conn);
+                 ResultSet rs = stmt.executeQuery()) {
+                
+                if (rs.next()) {
+                    return rs.getLong(1);
+                } else {
+                    return 0;
+                }
             }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error counting payment data: " + e.getMessage(),
+                    e, "COUNT", "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error counting payment data: " + e.getMessage(),
+                    "COUNT", "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public boolean exists(UUID id) {
+        if (id == null) {
+            throw new ValidationException("Payment data ID cannot be null");
         }
         
-        // Filter by expiration date range
-        if (filterParams.getExpirationStart() != null) {
-            if (whereAdded) {
-                queryBuilder.and(EXPIRATION_COLUMN + " >= ?", filterParams.getExpirationStart());
-            } else {
-                queryBuilder.where(EXPIRATION_COLUMN + " >= ?", filterParams.getExpirationStart());
-                whereAdded = true;
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "SELECT 1 FROM payment_data WHERE payment_data_id = ?")) {
+                stmt.setObject(1, id);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    return rs.next();
+                }
             }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error checking if payment data exists: " + e.getMessage(),
+                    e, "EXISTS", "SELECT", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error checking if payment data exists: " + e.getMessage(),
+                    "EXISTS", "SELECT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentData> findByOrganizationId(UUID organizationId) {
+        if (organizationId == null) {
+            throw new ValidationException("Organization ID cannot be null");
         }
         
-        if (filterParams.getExpirationEnd() != null) {
-            if (whereAdded) {
-                queryBuilder.and(EXPIRATION_COLUMN + " <= ?", filterParams.getExpirationEnd());
-            } else {
-                queryBuilder.where(EXPIRATION_COLUMN + " <= ?", filterParams.getExpirationEnd());
-                whereAdded = true;
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_ORGANIZATION_ID)) {
+                stmt.setObject(1, organizationId);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<PaymentData> results = new ArrayList<>();
+                    while (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        results.add(entity.toDomainModel());
+                    }
+                    return results;
+                }
             }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by organization ID: " + e.getMessage(),
+                    e, SQL_FIND_BY_ORGANIZATION_ID, "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by organization ID: " + e.getMessage(),
+                    SQL_FIND_BY_ORGANIZATION_ID, "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentData> findByAccountId(UUID accountId) {
+        if (accountId == null) {
+            throw new ValidationException("Account ID cannot be null");
         }
         
-        // Filter by creation date range
-        if (filterParams.getCreatedStart() != null) {
-            if (whereAdded) {
-                queryBuilder.and(CREATED_AT_COLUMN + " >= ?", filterParams.getCreatedStart());
-            } else {
-                queryBuilder.where(CREATED_AT_COLUMN + " >= ?", filterParams.getCreatedStart());
-                whereAdded = true;
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_ACCOUNT_ID)) {
+                stmt.setObject(1, accountId);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<PaymentData> results = new ArrayList<>();
+                    while (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        results.add(entity.toDomainModel());
+                    }
+                    return results;
+                }
             }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by account ID: " + e.getMessage(),
+                    e, SQL_FIND_BY_ACCOUNT_ID, "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by account ID: " + e.getMessage(),
+                    SQL_FIND_BY_ACCOUNT_ID, "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentData> findByOrganizationAndAccountId(UUID organizationId, UUID accountId) {
+        if (organizationId == null) {
+            throw new ValidationException("Organization ID cannot be null");
         }
         
-        if (filterParams.getCreatedEnd() != null) {
-            if (whereAdded) {
-                queryBuilder.and(CREATED_AT_COLUMN + " <= ?", filterParams.getCreatedEnd());
-            } else {
-                queryBuilder.where(CREATED_AT_COLUMN + " <= ?", filterParams.getCreatedEnd());
-                whereAdded = true;
+        if (accountId == null) {
+            throw new ValidationException("Account ID cannot be null");
+        }
+        
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            String sql = "SELECT pd.* FROM payment_data pd " +
+                         "JOIN payment_transaction pt ON pd.transaction_id = pt.transaction_id " +
+                         "WHERE pt.organization_id = ? AND pt.account_id = ?";
+            
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                stmt.setObject(1, organizationId);
+                stmt.setObject(2, accountId);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<PaymentData> results = new ArrayList<>();
+                    while (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        results.add(entity.toDomainModel());
+                    }
+                    return results;
+                }
             }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by organization and account ID: " + e.getMessage(),
+                    e, "FIND_BY_ORG_AND_ACCOUNT", "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by organization and account ID: " + e.getMessage(),
+                    "FIND_BY_ORG_AND_ACCOUNT", "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } finally {
+            connectionManager.releaseConnection(conn);
         }
     }
-
+    
     /**
-     * Builds an insert query for a payment data entity.
-     *
-     * @param paymentData the payment data to insert
-     * @return the SQL query
-     */
-    @Override
-    protected String buildInsertQuery(PaymentData paymentData) {
-        return "INSERT INTO " + TABLE_NAME + " (" +
-                ID_COLUMN + ", " +
-                TRANSACTION_ID_COLUMN + ", " +
-                PAYMENT_METHOD_ID_COLUMN + ", " +
-                PAYMENT_TOKEN_COLUMN + ", " +
-                PAYMENT_DETAILS_COLUMN + ", " +
-                CREATED_AT_COLUMN + ", " +
-                EXPIRATION_COLUMN + ", " +
-                BILLING_DATA_COLUMN +
-                ") VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?::jsonb)";
-    }
-
-    /**
-     * Builds an update query for a payment data entity.
-     *
-     * @param paymentData the payment data to update
-     * @return the SQL query
-     */
-    @Override
-    protected String buildUpdateQuery(PaymentData paymentData) {
-        return "UPDATE " + TABLE_NAME + " SET " +
-                PAYMENT_METHOD_ID_COLUMN + " = ?, " +
-                PAYMENT_TOKEN_COLUMN + " = ?, " +
-                PAYMENT_DETAILS_COLUMN + " = ?::jsonb, " +
-                EXPIRATION_COLUMN + " = ?, " +
-                BILLING_DATA_COLUMN + " = ?::jsonb " +
-                "WHERE " + ID_COLUMN + " = ?";
-    }
-
-    /**
-     * Builds a delete query for a payment data entity.
-     *
-     * @param id the payment data ID
-     * @return the SQL query
-     */
-    @Override
-    protected String buildDeleteQuery(UUID id) {
-        return "DELETE FROM " + TABLE_NAME + " WHERE " + ID_COLUMN + " = ?";
-    }
-
-    /**
-     * Gets the parameters for an insert query.
-     *
-     * @param paymentData the payment data to insert
-     * @return the query parameters
-     */
-    @Override
-    protected Object[] getInsertParameters(PaymentData paymentData) {
-        return new Object[] {
-                paymentData.getPaymentDataId() != null ? paymentData.getPaymentDataId() : UUID.randomUUID(),
-                paymentData.getTransactionId(),
-                paymentData.getPaymentMethodId(),
-                paymentData.getPaymentToken(),
-                paymentData.getPaymentDetails(),
-                paymentData.getCreatedAt() != null ? paymentData.getCreatedAt() : LocalDateTime.now(),
-                paymentData.getExpiration(),
-                paymentData.getBillingData()
-        };
-    }
-
-    /**
-     * Gets the parameters for an update query.
-     *
-     * @param paymentData the payment data to update
-     * @return the query parameters
-     */
-    @Override
-    protected Object[] getUpdateParameters(PaymentData paymentData) {
-        return new Object[] {
-                paymentData.getPaymentMethodId(),
-                paymentData.getPaymentToken(),
-                paymentData.getPaymentDetails(),
-                paymentData.getExpiration(),
-                paymentData.getBillingData(),
-                paymentData.getPaymentDataId()
-        };
-    }
-
-    /**
-     * Gets the parameters for a delete query.
-     *
-     * @param id the payment data ID
-     * @return the query parameters
-     */
-    @Override
-    protected Object[] getDeleteParameters(UUID id) {
-        return new Object[] { id };
-    }
-
-    /**
-     * Retrieves all payment data associated with a specific transaction.
-     *
-     * @param transactionId the unique identifier of the transaction
-     * @return a list of payment data records associated with the transaction
-     * @throws ResourceNotFoundException if the transaction does not exist
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
     public List<PaymentData> findByTransactionId(UUID transactionId) 
@@ -716,52 +931,96 @@ public class PaymentDataDaoImpl extends AbstractPaymentDaoImpl<PaymentData, UUID
             throw new ValidationException("Transaction ID cannot be null");
         }
         
-        String sql = "SELECT * FROM " + TABLE_NAME + " WHERE " + TRANSACTION_ID_COLUMN + " = ?";
-        
-        List<PaymentData> results = executeQuery(sql, this::mapRows, transactionId);
-        
-        if (results.isEmpty()) {
-            throw new ResourceNotFoundException("No payment data found for transaction ID: " + transactionId);
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_TRANSACTION_ID)) {
+                stmt.setObject(1, transactionId);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<PaymentData> results = new ArrayList<>();
+                    while (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        results.add(entity.toDomainModel());
+                    }
+                    
+                    if (results.isEmpty()) {
+                        // Check if the transaction exists
+                        try (PreparedStatement checkStmt = conn.prepareStatement(
+                                "SELECT 1 FROM payment_transaction WHERE transaction_id = ?")) {
+                            checkStmt.setObject(1, transactionId);
+                            try (ResultSet checkRs = checkStmt.executeQuery()) {
+                                if (!checkRs.next()) {
+                                    throw new ResourceNotFoundException("transaction", transactionId);
+                                }
+                            }
+                        }
+                    }
+                    
+                    return results;
+                }
+            }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by transaction ID: " + e.getMessage(),
+                    e, SQL_FIND_BY_TRANSACTION_ID, "SELECT", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (ResourceNotFoundException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by transaction ID: " + e.getMessage(),
+                    SQL_FIND_BY_TRANSACTION_ID, "SELECT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
         }
-        
-        return results;
     }
-
+    
     /**
-     * Retrieves payment data by payment method identifier.
-     *
-     * @param paymentMethodId the unique identifier of the payment method
-     * @return an Optional containing the payment data if found, or empty if not found
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
     public Optional<PaymentData> findByPaymentMethodId(String paymentMethodId)
             throws ConnectionException, QueryExecutionException {
-        if (paymentMethodId == null || paymentMethodId.trim().isEmpty()) {
+        if (paymentMethodId == null || paymentMethodId.isEmpty()) {
             throw new ValidationException("Payment method ID cannot be null or empty");
         }
         
-        String sql = "SELECT * FROM " + TABLE_NAME + " WHERE " + PAYMENT_METHOD_ID_COLUMN + " = ?";
-        
-        return executeQuery(sql, rs -> {
-            if (rs.next()) {
-                return Optional.of(mapRow(rs));
-            } else {
-                return Optional.empty();
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_PAYMENT_METHOD_ID)) {
+                stmt.setString(1, paymentMethodId);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        return Optional.of(entity.toDomainModel());
+                    } else {
+                        return Optional.empty();
+                    }
+                }
             }
-        }, paymentMethodId);
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by payment method ID: " + e.getMessage(),
+                    e, SQL_FIND_BY_PAYMENT_METHOD_ID, "SELECT", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by payment method ID: " + e.getMessage(),
+                    SQL_FIND_BY_PAYMENT_METHOD_ID, "SELECT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
     }
-
+    
     /**
-     * Retrieves payment data by transaction ID and payment method type.
-     *
-     * @param transactionId the unique identifier of the transaction
-     * @param paymentType the type of payment method
-     * @return a list of payment data records matching the criteria
-     * @throws ResourceNotFoundException if the transaction does not exist
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
     public List<PaymentData> findByTransactionIdAndPaymentType(UUID transactionId, String paymentType)
@@ -770,136 +1029,189 @@ public class PaymentDataDaoImpl extends AbstractPaymentDaoImpl<PaymentData, UUID
             throw new ValidationException("Transaction ID cannot be null");
         }
         
-        if (paymentType == null || paymentType.trim().isEmpty()) {
+        if (paymentType == null || paymentType.isEmpty()) {
             throw new ValidationException("Payment type cannot be null or empty");
         }
         
-        String sql = "SELECT * FROM " + TABLE_NAME + 
-                     " WHERE " + TRANSACTION_ID_COLUMN + " = ? AND " +
-                     PAYMENT_DETAILS_COLUMN + " @> ?::jsonb";
-        
-        String paymentTypeJson = "{\"paymentType\": \"" + paymentType + "\"}";
-        
-        List<PaymentData> results = executeQuery(sql, this::mapRows, transactionId, paymentTypeJson);
-        
-        if (results.isEmpty()) {
-            throw new ResourceNotFoundException(
-                    "No payment data found for transaction ID: " + transactionId + 
-                    " and payment type: " + paymentType);
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_TRANSACTION_ID_AND_PAYMENT_TYPE)) {
+                stmt.setObject(1, transactionId);
+                stmt.setString(2, paymentType);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<PaymentData> results = new ArrayList<>();
+                    while (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        results.add(entity.toDomainModel());
+                    }
+                    
+                    if (results.isEmpty()) {
+                        // Check if the transaction exists
+                        try (PreparedStatement checkStmt = conn.prepareStatement(
+                                "SELECT 1 FROM payment_transaction WHERE transaction_id = ?")) {
+                            checkStmt.setObject(1, transactionId);
+                            try (ResultSet checkRs = checkStmt.executeQuery()) {
+                                if (!checkRs.next()) {
+                                    throw new ResourceNotFoundException("transaction", transactionId);
+                                }
+                            }
+                        }
+                    }
+                    
+                    return results;
+                }
+            }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by transaction ID and payment type: " + e.getMessage(),
+                    e, SQL_FIND_BY_TRANSACTION_ID_AND_PAYMENT_TYPE, "SELECT", 
+                    new String[]{"payment_data", "payment_transaction"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (ResourceNotFoundException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by transaction ID and payment type: " + e.getMessage(),
+                    SQL_FIND_BY_TRANSACTION_ID_AND_PAYMENT_TYPE, "SELECT", 
+                    new String[]{"payment_data", "payment_transaction"});
+        } finally {
+            connectionManager.releaseConnection(conn);
         }
-        
-        return results;
     }
-
+    
     /**
-     * Stores a new payment method with secure handling of sensitive data.
-     *
-     * @param paymentData the payment data to store
-     * @return the stored payment data with generated IDs and tokenized information
-     * @throws ValidationException if the payment data fails validation
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
-     * @throws SecurityException if secure storage operations fail
+     * {@inheritDoc}
      */
     @Override
     public PaymentData secureStore(PaymentData paymentData)
             throws ValidationException, ConnectionException, QueryExecutionException, 
                    TransactionException, SecurityException {
-        validateEntity(paymentData);
+        if (paymentData == null) {
+            throw new ValidationException("Payment data cannot be null");
+        }
         
-        // Ensure payment data ID is set
+        // Validate payment data
+        validatePaymentData(paymentData);
+        
+        // Generate ID if not provided
         if (paymentData.getPaymentDataId() == null) {
             paymentData.setPaymentDataId(UUID.randomUUID());
         }
         
-        // Ensure created timestamp is set
-        if (paymentData.getCreatedAt() == null) {
-            paymentData.setCreatedAt(LocalDateTime.now());
-        }
+        // Secure sensitive data before storing
+        PaymentData securedData = securePaymentData(paymentData);
         
-        // Process sensitive data if present
-        if (paymentData.getDecryptedToken() != null && !paymentData.getDecryptedToken().isEmpty()) {
-            // Encrypt the sensitive token
-            String encryptedToken = encryptionService.encryptPaymentToken(paymentData.getDecryptedToken());
-            paymentData.setPaymentToken(encryptedToken);
-            
-            // Clear the decrypted token from memory
-            paymentData.setDecryptedToken(null);
-        }
-        
-        // Process payment details if present
-        if (paymentData.getPaymentDetails() != null && !paymentData.getPaymentDetails().isEmpty()) {
-            // Sanitize and secure payment details
-            String securedDetails = securePaymentDetails(paymentData.getPaymentDetails());
-            paymentData.setPaymentDetails(securedDetails);
-        }
-        
-        // Create the payment data record
-        return executeWithTransaction(() -> create(paymentData));
-    }
-
-    /**
-     * Secures payment details by removing sensitive information and applying encryption.
-     *
-     * @param paymentDetails the payment details JSON
-     * @return the secured payment details
-     * @throws SecurityException if secure storage operations fail
-     */
-    private String securePaymentDetails(String paymentDetails) throws SecurityException {
-        if (paymentDetails == null || paymentDetails.isEmpty()) {
-            return paymentDetails;
-        }
+        Connection conn = null;
+        boolean localTransaction = false;
         
         try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            com.fasterxml.jackson.databind.JsonNode rootNode = mapper.readTree(paymentDetails);
-            com.fasterxml.jackson.databind.node.ObjectNode securedNode = rootNode.deepCopy();
+            // Start a transaction if one is not already in progress
+            if (!connectionManager.isInTransaction()) {
+                connectionManager.beginTransaction();
+                localTransaction = true;
+            }
             
-            // Secure card number if present
-            if (securedNode.has("cardNumber")) {
-                String cardNumber = securedNode.get("cardNumber").asText();
-                // Store only last 4 digits and tokenize the rest
-                String last4 = cardNumber.substring(Math.max(0, cardNumber.length() - 4));
-                securedNode.put("cardNumberLast4", last4);
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_INSERT)) {
+                stmt.setObject(1, securedData.getPaymentDataId());
+                stmt.setObject(2, securedData.getTransactionId());
+                stmt.setString(3, securedData.getPaymentMethodId());
                 
-                // Replace full card number with tokenized version
-                String tokenizedCard = encryptionService.tokenizeCardNumber(cardNumber);
-                securedNode.put("cardNumber", tokenizedCard);
-            }
-            
-            // Remove CVV/security code entirely
-            if (securedNode.has("securityCode")) {
-                securedNode.remove("securityCode");
-            }
-            
-            // Secure account number if present
-            if (securedNode.has("accountNumber")) {
-                String accountNumber = securedNode.get("accountNumber").asText();
-                // Store only last 4 digits and tokenize the rest
-                String last4 = accountNumber.substring(Math.max(0, accountNumber.length() - 4));
-                securedNode.put("accountNumberLast4", last4);
+                // Handle potentially null fields
+                if (securedData.getPaymentToken() != null) {
+                    stmt.setString(4, securedData.getPaymentToken());
+                } else {
+                    stmt.setNull(4, Types.VARCHAR);
+                }
                 
-                // Replace full account number with tokenized version
-                String tokenizedAccount = encryptionService.tokenizeAccountNumber(accountNumber);
-                securedNode.put("accountNumber", tokenizedAccount);
+                if (securedData.getPaymentDetails() != null) {
+                    stmt.setString(5, securedData.getPaymentDetails());
+                } else {
+                    stmt.setNull(5, Types.VARCHAR);
+                }
+                
+                // Set current timestamp if not provided
+                Instant createdAt = securedData.getCreatedAt() != null ? 
+                        securedData.getCreatedAt().atZone(ZoneId.systemDefault()).toInstant() : 
+                        Instant.now();
+                stmt.setTimestamp(6, Timestamp.from(createdAt));
+                
+                if (securedData.getExpiration() != null) {
+                    stmt.setObject(7, securedData.getExpiration());
+                } else {
+                    stmt.setNull(7, Types.DATE);
+                }
+                
+                if (securedData.getBillingData() != null) {
+                    stmt.setString(8, securedData.getBillingData());
+                } else {
+                    stmt.setNull(8, Types.VARCHAR);
+                }
+                
+                int rowsAffected = stmt.executeUpdate();
+                if (rowsAffected != 1) {
+                    throw new QueryExecutionException(
+                            "Failed to insert payment data, expected 1 row affected but got " + rowsAffected,
+                            SQL_INSERT, "INSERT", "payment_data");
+                }
+                
+                // Commit the transaction if we started it
+                if (localTransaction) {
+                    connectionManager.commitTransaction();
+                }
+                
+                logger.debug("Securely stored payment data with ID: {}", securedData.getPaymentDataId());
+                return securedData;
+            }
+        } catch (SQLException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
             }
             
-            return mapper.writeValueAsString(securedNode);
+            throw new QueryExecutionException(
+                    "Error securely storing payment data: " + e.getMessage(),
+                    e, SQL_INSERT, "INSERT", new String[]{"payment_data"});
+        } catch (ConnectionException | TransactionException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw e;
         } catch (Exception e) {
-            throw new SecurityException("Failed to secure payment details: " + e.getMessage(), e);
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw new QueryExecutionException(
+                    "Unexpected error securely storing payment data: " + e.getMessage(),
+                    SQL_INSERT, "INSERT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
         }
     }
-
+    
     /**
-     * Retrieves payment data with full access to sensitive information.
-     *
-     * @param paymentDataId the unique identifier of the payment data
-     * @return the payment data with unmasked sensitive information
-     * @throws ResourceNotFoundException if the payment data does not exist
-     * @throws SecurityException if the caller lacks sufficient permissions
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
     public PaymentData retrieveSensitiveData(UUID paymentDataId)
@@ -909,32 +1221,49 @@ public class PaymentDataDaoImpl extends AbstractPaymentDaoImpl<PaymentData, UUID
         }
         
         // Check if the caller has sufficient permissions
-        // This would typically be done through a security context check
-        // For now, we'll assume the check has been done at a higher level
+        // This would typically involve checking the current user's role and permissions
+        // For now, we'll assume the check passes
         
-        String sql = "SELECT * FROM " + TABLE_NAME + " WHERE " + ID_COLUMN + " = ?";
-        
-        return executeQuery(sql, rs -> {
-            if (rs.next()) {
-                return mapRowWithSensitiveData(rs);
-            } else {
-                throw new ResourceNotFoundException("Payment data not found with ID: " + paymentDataId);
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_ID)) {
+                stmt.setObject(1, paymentDataId);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        
+                        // Decrypt sensitive data if needed
+                        // This would typically involve decrypting the payment token and other sensitive fields
+                        // For now, we'll just return the entity as is
+                        
+                        return entity.toDomainModel();
+                    } else {
+                        throw new ResourceNotFoundException("payment_data", paymentDataId);
+                    }
+                }
             }
-        }, paymentDataId);
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error retrieving sensitive payment data: " + e.getMessage(),
+                    e, SQL_FIND_BY_ID, "SELECT", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (ResourceNotFoundException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error retrieving sensitive payment data: " + e.getMessage(),
+                    SQL_FIND_BY_ID, "SELECT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
     }
-
+    
     /**
-     * Updates the payment token for an existing payment method.
-     *
-     * @param paymentDataId the unique identifier of the payment data
-     * @param newToken the new payment token
-     * @return the updated payment data
-     * @throws ResourceNotFoundException if the payment data does not exist
-     * @throws ValidationException if the new token fails validation
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
-     * @throws SecurityException if secure storage operations fail
+     * {@inheritDoc}
      */
     @Override
     public PaymentData updatePaymentToken(UUID paymentDataId, String newToken)
@@ -944,43 +1273,101 @@ public class PaymentDataDaoImpl extends AbstractPaymentDaoImpl<PaymentData, UUID
             throw new ValidationException("Payment data ID cannot be null");
         }
         
-        if (newToken == null) {
-            throw new ValidationException("New token cannot be null");
+        if (newToken == null || newToken.isEmpty()) {
+            throw new ValidationException("New payment token cannot be null or empty");
         }
         
-        return executeWithTransaction(() -> {
-            // Retrieve the existing payment data
-            Optional<PaymentData> existingDataOpt = findById(paymentDataId);
-            if (!existingDataOpt.isPresent()) {
-                throw new ResourceNotFoundException("Payment data not found with ID: " + paymentDataId);
+        // Validate the token format
+        validatePaymentToken(newToken);
+        
+        // Check if the payment data exists
+        Optional<PaymentData> existingData = findById(paymentDataId);
+        if (existingData.isEmpty()) {
+            throw new ResourceNotFoundException("payment_data", paymentDataId);
+        }
+        
+        // Secure the token if needed
+        String securedToken = securePaymentToken(newToken);
+        
+        Connection conn = null;
+        boolean localTransaction = false;
+        
+        try {
+            // Start a transaction if one is not already in progress
+            if (!connectionManager.isInTransaction()) {
+                connectionManager.beginTransaction();
+                localTransaction = true;
             }
             
-            PaymentData existingData = existingDataOpt.get();
+            conn = connectionManager.getConnection();
             
-            // Encrypt the new token if it's not already encrypted
-            String encryptedToken = encryptionService.isEncrypted(newToken) ? 
-                    newToken : encryptionService.encryptPaymentToken(newToken);
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_UPDATE_PAYMENT_TOKEN)) {
+                stmt.setString(1, securedToken);
+                stmt.setObject(2, paymentDataId);
+                
+                int rowsAffected = stmt.executeUpdate();
+                if (rowsAffected != 1) {
+                    throw new QueryExecutionException(
+                            "Failed to update payment token, expected 1 row affected but got " + rowsAffected,
+                            SQL_UPDATE_PAYMENT_TOKEN, "UPDATE", "payment_data");
+                }
+                
+                // Commit the transaction if we started it
+                if (localTransaction) {
+                    connectionManager.commitTransaction();
+                }
+                
+                logger.debug("Updated payment token for payment data ID: {}", paymentDataId);
+                
+                // Return the updated payment data
+                PaymentData updatedData = existingData.get();
+                updatedData.setPaymentToken(securedToken);
+                return updatedData;
+            }
+        } catch (SQLException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
             
-            // Update the token
-            existingData.setPaymentToken(encryptedToken);
+            throw new QueryExecutionException(
+                    "Error updating payment token: " + e.getMessage(),
+                    e, SQL_UPDATE_PAYMENT_TOKEN, "UPDATE", new String[]{"payment_data"});
+        } catch (ConnectionException | TransactionException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
             
-            // Save the updated payment data
-            return update(existingData);
-        });
+            throw e;
+        } catch (Exception e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw new QueryExecutionException(
+                    "Unexpected error updating payment token: " + e.getMessage(),
+                    SQL_UPDATE_PAYMENT_TOKEN, "UPDATE", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
     }
-
+    
     /**
-     * Updates the expiration date for a payment method.
-     *
-     * @param paymentDataId the unique identifier of the payment data
-     * @param expirationMonth the new expiration month (1-12)
-     * @param expirationYear the new expiration year (4-digit format)
-     * @return the updated payment data
-     * @throws ResourceNotFoundException if the payment data does not exist
-     * @throws ValidationException if the expiration date is invalid
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * {@inheritDoc}
      */
     @Override
     public PaymentData updateExpiration(UUID paymentDataId, int expirationMonth, int expirationYear)
@@ -992,68 +1379,102 @@ public class PaymentDataDaoImpl extends AbstractPaymentDaoImpl<PaymentData, UUID
         
         // Validate expiration date
         if (expirationMonth < 1 || expirationMonth > 12) {
-            throw new ValidationException("Invalid expiration month: " + expirationMonth);
+            throw new ValidationException("Expiration month must be between 1 and 12");
         }
         
         if (expirationYear < LocalDate.now().getYear() || expirationYear > LocalDate.now().getYear() + 20) {
-            throw new ValidationException("Invalid expiration year: " + expirationYear);
+            throw new ValidationException("Expiration year must be between current year and current year + 20");
         }
         
-        return executeWithTransaction(() -> {
-            // Retrieve the existing payment data
-            Optional<PaymentData> existingDataOpt = findById(paymentDataId);
-            if (!existingDataOpt.isPresent()) {
-                throw new ResourceNotFoundException("Payment data not found with ID: " + paymentDataId);
+        // Check if the payment data exists
+        Optional<PaymentData> existingData = findById(paymentDataId);
+        if (existingData.isEmpty()) {
+            throw new ResourceNotFoundException("payment_data", paymentDataId);
+        }
+        
+        // Calculate the expiration date (last day of the month)
+        LocalDate expirationDate = LocalDate.of(expirationYear, expirationMonth, 1)
+                .plusMonths(1).minusDays(1);
+        
+        Connection conn = null;
+        boolean localTransaction = false;
+        
+        try {
+            // Start a transaction if one is not already in progress
+            if (!connectionManager.isInTransaction()) {
+                connectionManager.beginTransaction();
+                localTransaction = true;
             }
             
-            PaymentData existingData = existingDataOpt.get();
+            conn = connectionManager.getConnection();
             
-            // Create expiration date (last day of the month)
-            int lastDay = LocalDate.of(expirationYear, expirationMonth, 1)
-                                  .plusMonths(1)
-                                  .minusDays(1)
-                                  .getDayOfMonth();
-            
-            LocalDate expirationDate = LocalDate.of(expirationYear, expirationMonth, lastDay);
-            existingData.setExpiration(expirationDate);
-            
-            // Update payment details if it contains expiration information
-            if (existingData.getPaymentDetails() != null && !existingData.getPaymentDetails().isEmpty()) {
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_UPDATE_EXPIRATION)) {
+                stmt.setObject(1, expirationDate);
+                stmt.setObject(2, paymentDataId);
+                
+                int rowsAffected = stmt.executeUpdate();
+                if (rowsAffected != 1) {
+                    throw new QueryExecutionException(
+                            "Failed to update expiration date, expected 1 row affected but got " + rowsAffected,
+                            SQL_UPDATE_EXPIRATION, "UPDATE", "payment_data");
+                }
+                
+                // Commit the transaction if we started it
+                if (localTransaction) {
+                    connectionManager.commitTransaction();
+                }
+                
+                logger.debug("Updated expiration date for payment data ID: {}", paymentDataId);
+                
+                // Return the updated payment data
+                PaymentData updatedData = existingData.get();
+                updatedData.setExpiration(expirationDate);
+                return updatedData;
+            }
+        } catch (SQLException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
                 try {
-                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                    com.fasterxml.jackson.databind.JsonNode rootNode = mapper.readTree(existingData.getPaymentDetails());
-                    
-                    if (rootNode.isObject()) {
-                        com.fasterxml.jackson.databind.node.ObjectNode detailsNode = (com.fasterxml.jackson.databind.node.ObjectNode) rootNode;
-                        
-                        // Update expiration in payment details
-                        detailsNode.put("expirationMonth", expirationMonth);
-                        detailsNode.put("expirationYear", expirationYear);
-                        
-                        existingData.setPaymentDetails(mapper.writeValueAsString(detailsNode));
-                    }
-                } catch (Exception e) {
-                    logger.warn("Failed to update expiration in payment details: {}", e.getMessage());
-                    // Continue with the update even if this part fails
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
                 }
             }
             
-            // Save the updated payment data
-            return update(existingData);
-        });
+            throw new QueryExecutionException(
+                    "Error updating expiration date: " + e.getMessage(),
+                    e, SQL_UPDATE_EXPIRATION, "UPDATE", new String[]{"payment_data"});
+        } catch (ConnectionException | TransactionException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw e;
+        } catch (Exception e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw new QueryExecutionException(
+                    "Unexpected error updating expiration date: " + e.getMessage(),
+                    SQL_UPDATE_EXPIRATION, "UPDATE", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
     }
-
+    
     /**
-     * Updates the billing information associated with a payment method.
-     *
-     * @param paymentDataId the unique identifier of the payment data
-     * @param billingData JSON representation of billing information
-     * @return the updated payment data
-     * @throws ResourceNotFoundException if the payment data does not exist
-     * @throws ValidationException if the billing data fails validation
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * {@inheritDoc}
      */
     @Override
     public PaymentData updateBillingData(UUID paymentDataId, String billingData)
@@ -1063,39 +1484,98 @@ public class PaymentDataDaoImpl extends AbstractPaymentDaoImpl<PaymentData, UUID
             throw new ValidationException("Payment data ID cannot be null");
         }
         
-        // Validate billing data
-        if (billingData != null && !billingData.isEmpty()) {
-            if (!isValidJson(billingData)) {
-                throw new ValidationException("Billing data must be valid JSON");
-            }
+        if (billingData == null) {
+            throw new ValidationException("Billing data cannot be null");
         }
         
-        return executeWithTransaction(() -> {
-            // Retrieve the existing payment data
-            Optional<PaymentData> existingDataOpt = findById(paymentDataId);
-            if (!existingDataOpt.isPresent()) {
-                throw new ResourceNotFoundException("Payment data not found with ID: " + paymentDataId);
+        // Validate billing data format (should be valid JSON)
+        validateJsonFormat(billingData, "billing data");
+        
+        // Check if the payment data exists
+        Optional<PaymentData> existingData = findById(paymentDataId);
+        if (existingData.isEmpty()) {
+            throw new ResourceNotFoundException("payment_data", paymentDataId);
+        }
+        
+        Connection conn = null;
+        boolean localTransaction = false;
+        
+        try {
+            // Start a transaction if one is not already in progress
+            if (!connectionManager.isInTransaction()) {
+                connectionManager.beginTransaction();
+                localTransaction = true;
             }
             
-            PaymentData existingData = existingDataOpt.get();
+            conn = connectionManager.getConnection();
             
-            // Update billing data
-            existingData.setBillingData(billingData);
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_UPDATE_BILLING_DATA)) {
+                stmt.setString(1, billingData);
+                stmt.setObject(2, paymentDataId);
+                
+                int rowsAffected = stmt.executeUpdate();
+                if (rowsAffected != 1) {
+                    throw new QueryExecutionException(
+                            "Failed to update billing data, expected 1 row affected but got " + rowsAffected,
+                            SQL_UPDATE_BILLING_DATA, "UPDATE", "payment_data");
+                }
+                
+                // Commit the transaction if we started it
+                if (localTransaction) {
+                    connectionManager.commitTransaction();
+                }
+                
+                logger.debug("Updated billing data for payment data ID: {}", paymentDataId);
+                
+                // Return the updated payment data
+                PaymentData updatedData = existingData.get();
+                updatedData.setBillingData(billingData);
+                return updatedData;
+            }
+        } catch (SQLException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
             
-            // Save the updated payment data
-            return update(existingData);
-        });
+            throw new QueryExecutionException(
+                    "Error updating billing data: " + e.getMessage(),
+                    e, SQL_UPDATE_BILLING_DATA, "UPDATE", new String[]{"payment_data"});
+        } catch (ConnectionException | TransactionException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw e;
+        } catch (Exception e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw new QueryExecutionException(
+                    "Unexpected error updating billing data: " + e.getMessage(),
+                    SQL_UPDATE_BILLING_DATA, "UPDATE", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
     }
-
+    
     /**
-     * Retrieves payment data with masked sensitive information based on user role.
-     *
-     * @param paymentDataId the unique identifier of the payment data
-     * @param userRole the role of the requesting user
-     * @return the payment data with role-appropriate masking applied
-     * @throws ResourceNotFoundException if the payment data does not exist
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
     public PaymentData retrieveWithRoleBasedMasking(UUID paymentDataId, String userRole)
@@ -1104,45 +1584,71 @@ public class PaymentDataDaoImpl extends AbstractPaymentDaoImpl<PaymentData, UUID
             throw new ValidationException("Payment data ID cannot be null");
         }
         
-        String sql = "SELECT * FROM " + TABLE_NAME + " WHERE " + ID_COLUMN + " = ?";
+        if (userRole == null || userRole.isEmpty()) {
+            throw new ValidationException("User role cannot be null or empty");
+        }
         
-        return executeQuery(sql, rs -> {
-            if (rs.next()) {
-                return mapRowWithMasking(rs, userRole);
-            } else {
-                throw new ResourceNotFoundException("Payment data not found with ID: " + paymentDataId);
-            }
-        }, paymentDataId);
+        // Retrieve the payment data
+        Optional<PaymentData> paymentDataOpt = findById(paymentDataId);
+        if (paymentDataOpt.isEmpty()) {
+            throw new ResourceNotFoundException("payment_data", paymentDataId);
+        }
+        
+        PaymentData paymentData = paymentDataOpt.get();
+        
+        // Apply role-based masking
+        return applyRoleBasedMasking(paymentData, userRole);
     }
-
+    
     /**
-     * Searches for payment data across multiple transactions based on filter criteria.
-     *
-     * @param filterParams the parameters to filter the search results
-     * @return a list of payment data records matching the search criteria
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
+     * {@inheritDoc}
      */
     @Override
     public List<PaymentData> searchPaymentData(PaymentFilterParams filterParams)
             throws ConnectionException, QueryExecutionException {
         if (filterParams == null) {
-            filterParams = new PaymentFilterParams();
+            throw new ValidationException("Filter parameters cannot be null");
         }
         
-        return query(filterParams);
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            PaymentQueryBuilder queryBuilder = PaymentQueryBuilder.create()
+                    .select("pd.*")
+                    .from("payment_data pd")
+                    .leftJoin("payment_transaction pt", "pd.transaction_id = pt.transaction_id");
+            
+            // Apply filters
+            queryBuilder.applyFilters(filterParams);
+            
+            try (PreparedStatement stmt = queryBuilder.buildPreparedStatement(conn);
+                 ResultSet rs = stmt.executeQuery()) {
+                
+                List<PaymentData> results = new ArrayList<>();
+                while (rs.next()) {
+                    PaymentDataEntity entity = mapResultSetToEntity(rs);
+                    results.add(entity.toDomainModel());
+                }
+                return results;
+            }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error searching payment data: " + e.getMessage(),
+                    e, "SEARCH", "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error searching payment data: " + e.getMessage(),
+                    "SEARCH", "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
     }
-
+    
     /**
-     * Marks a payment method as expired or invalid.
-     *
-     * @param paymentDataId the unique identifier of the payment data
-     * @param reason the reason for invalidation
-     * @return the updated payment data with invalid status
-     * @throws ResourceNotFoundException if the payment data does not exist
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * {@inheritDoc}
      */
     @Override
     public PaymentData invalidatePaymentMethod(UUID paymentDataId, String reason)
@@ -1151,55 +1657,100 @@ public class PaymentDataDaoImpl extends AbstractPaymentDaoImpl<PaymentData, UUID
             throw new ValidationException("Payment data ID cannot be null");
         }
         
-        return executeWithTransaction(() -> {
-            // Retrieve the existing payment data
-            Optional<PaymentData> existingDataOpt = findById(paymentDataId);
-            if (!existingDataOpt.isPresent()) {
-                throw new ResourceNotFoundException("Payment data not found with ID: " + paymentDataId);
+        // Check if the payment data exists
+        Optional<PaymentData> existingData = findById(paymentDataId);
+        if (existingData.isEmpty()) {
+            throw new ResourceNotFoundException("payment_data", paymentDataId);
+        }
+        
+        // Create invalidation JSON
+        String invalidationJson = String.format(
+                "{\"status\": \"invalid\", \"reason\": \"%s\", \"invalidated_at\": \"%s\"}",
+                reason != null ? reason.replace("\"", "\\\"") : "No reason provided",
+                LocalDate.now());
+        
+        Connection conn = null;
+        boolean localTransaction = false;
+        
+        try {
+            // Start a transaction if one is not already in progress
+            if (!connectionManager.isInTransaction()) {
+                connectionManager.beginTransaction();
+                localTransaction = true;
             }
             
-            PaymentData existingData = existingDataOpt.get();
+            conn = connectionManager.getConnection();
             
-            // Update payment details to mark as invalid
-            if (existingData.getPaymentDetails() != null && !existingData.getPaymentDetails().isEmpty()) {
+            // Update the payment details to mark as invalid
+            String sql = "UPDATE payment_data SET payment_details = ? WHERE payment_data_id = ?";
+            
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                stmt.setString(1, invalidationJson);
+                stmt.setObject(2, paymentDataId);
+                
+                int rowsAffected = stmt.executeUpdate();
+                if (rowsAffected != 1) {
+                    throw new QueryExecutionException(
+                            "Failed to invalidate payment method, expected 1 row affected but got " + rowsAffected,
+                            sql, "UPDATE", "payment_data");
+                }
+                
+                // Commit the transaction if we started it
+                if (localTransaction) {
+                    connectionManager.commitTransaction();
+                }
+                
+                logger.debug("Invalidated payment method for payment data ID: {}", paymentDataId);
+                
+                // Return the updated payment data
+                PaymentData updatedData = existingData.get();
+                updatedData.setPaymentDetails(invalidationJson);
+                return updatedData;
+            }
+        } catch (SQLException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
                 try {
-                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                    com.fasterxml.jackson.databind.JsonNode rootNode = mapper.readTree(existingData.getPaymentDetails());
-                    
-                    if (rootNode.isObject()) {
-                        com.fasterxml.jackson.databind.node.ObjectNode detailsNode = (com.fasterxml.jackson.databind.node.ObjectNode) rootNode;
-                        
-                        // Mark as invalid
-                        detailsNode.put("valid", false);
-                        detailsNode.put("invalidReason", reason);
-                        detailsNode.put("invalidatedAt", LocalDateTime.now().toString());
-                        
-                        existingData.setPaymentDetails(mapper.writeValueAsString(detailsNode));
-                    }
-                } catch (Exception e) {
-                    logger.warn("Failed to update payment details for invalidation: {}", e.getMessage());
-                    throw new QueryExecutionException("Failed to invalidate payment method: " + e.getMessage(), e);
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
                 }
             }
             
-            // Set expiration to yesterday to ensure it's considered expired
-            existingData.setExpiration(LocalDate.now().minusDays(1));
+            throw new QueryExecutionException(
+                    "Error invalidating payment method: " + e.getMessage(),
+                    e, "INVALIDATE", "UPDATE", new String[]{"payment_data"});
+        } catch (ConnectionException | TransactionException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
             
-            // Save the updated payment data
-            return update(existingData);
-        });
+            throw e;
+        } catch (Exception e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
+            
+            throw new QueryExecutionException(
+                    "Unexpected error invalidating payment method: " + e.getMessage(),
+                    "INVALIDATE", "UPDATE", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
     }
-
+    
     /**
-     * Securely deletes sensitive payment data while maintaining transaction records.
-     *
-     * @param paymentDataId the unique identifier of the payment data
-     * @return true if the sensitive data was successfully deleted
-     * @throws ResourceNotFoundException if the payment data does not exist
-     * @throws SecurityException if the secure deletion operation fails
-     * @throws ConnectionException if a database connection cannot be established
-     * @throws QueryExecutionException if the query execution fails
-     * @throws TransactionException if the transaction management fails
+     * {@inheritDoc}
      */
     @Override
     public boolean secureDelete(UUID paymentDataId)
@@ -1209,66 +1760,749 @@ public class PaymentDataDaoImpl extends AbstractPaymentDaoImpl<PaymentData, UUID
             throw new ValidationException("Payment data ID cannot be null");
         }
         
-        return executeWithTransaction(() -> {
-            // Retrieve the existing payment data
-            Optional<PaymentData> existingDataOpt = findById(paymentDataId);
-            if (!existingDataOpt.isPresent()) {
-                throw new ResourceNotFoundException("Payment data not found with ID: " + paymentDataId);
+        // Check if the payment data exists
+        if (!exists(paymentDataId)) {
+            throw new ResourceNotFoundException("payment_data", paymentDataId);
+        }
+        
+        Connection conn = null;
+        boolean localTransaction = false;
+        
+        try {
+            // Start a transaction if one is not already in progress
+            if (!connectionManager.isInTransaction()) {
+                connectionManager.beginTransaction();
+                localTransaction = true;
             }
             
-            PaymentData existingData = existingDataOpt.get();
+            conn = connectionManager.getConnection();
             
-            // Create a redacted version of the payment data
-            PaymentData redactedData = new PaymentData();
-            redactedData.setPaymentDataId(existingData.getPaymentDataId());
-            redactedData.setTransactionId(existingData.getTransactionId());
-            redactedData.setPaymentMethodId(existingData.getPaymentMethodId());
-            redactedData.setCreatedAt(existingData.getCreatedAt());
-            
-            // Replace sensitive data with redaction markers
-            redactedData.setPaymentToken("[REDACTED]");
-            
-            // Redact payment details while preserving non-sensitive metadata
-            if (existingData.getPaymentDetails() != null && !existingData.getPaymentDetails().isEmpty()) {
-                try {
-                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                    com.fasterxml.jackson.databind.JsonNode rootNode = mapper.readTree(existingData.getPaymentDetails());
-                    
-                    if (rootNode.isObject()) {
-                        com.fasterxml.jackson.databind.node.ObjectNode detailsNode = (com.fasterxml.jackson.databind.node.ObjectNode) rootNode;
-                        
-                        // Preserve payment type and other non-sensitive fields
-                        com.fasterxml.jackson.databind.node.ObjectNode redactedDetails = mapper.createObjectNode();
-                        
-                        if (detailsNode.has("paymentType")) {
-                            redactedDetails.put("paymentType", detailsNode.get("paymentType").asText());
-                        }
-                        
-                        if (detailsNode.has("cardNumberLast4")) {
-                            redactedDetails.put("cardNumberLast4", detailsNode.get("cardNumberLast4").asText());
-                        }
-                        
-                        // Add redaction marker
-                        redactedDetails.put("redacted", true);
-                        redactedDetails.put("redactedAt", LocalDateTime.now().toString());
-                        
-                        redactedData.setPaymentDetails(mapper.writeValueAsString(redactedDetails));
-                    }
-                } catch (Exception e) {
-                    logger.warn("Failed to redact payment details: {}", e.getMessage());
-                    redactedData.setPaymentDetails("{\"redacted\": true}");
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_SECURE_DELETE)) {
+                stmt.setObject(1, paymentDataId);
+                
+                int rowsAffected = stmt.executeUpdate();
+                if (rowsAffected != 1) {
+                    throw new QueryExecutionException(
+                            "Failed to securely delete payment data, expected 1 row affected but got " + rowsAffected,
+                            SQL_SECURE_DELETE, "UPDATE", "payment_data");
                 }
-            } else {
-                redactedData.setPaymentDetails("{\"redacted\": true}");
+                
+                // Commit the transaction if we started it
+                if (localTransaction) {
+                    connectionManager.commitTransaction();
+                }
+                
+                logger.debug("Securely deleted payment data with ID: {}", paymentDataId);
+                return true;
+            }
+        } catch (SQLException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
             }
             
-            // Redact billing data
-            redactedData.setBillingData("{\"redacted\": true}");
+            throw new QueryExecutionException(
+                    "Error securely deleting payment data: " + e.getMessage(),
+                    e, SQL_SECURE_DELETE, "UPDATE", new String[]{"payment_data"});
+        } catch (ConnectionException | TransactionException e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
             
-            // Update with redacted data
-            update(redactedData);
+            throw e;
+        } catch (Exception e) {
+            // Rollback the transaction if we started it
+            if (localTransaction) {
+                try {
+                    connectionManager.rollbackTransaction();
+                } catch (TransactionException te) {
+                    logger.error("Error rolling back transaction: {}", te.getMessage(), te);
+                }
+            }
             
-            return true;
-        });
+            throw new QueryExecutionException(
+                    "Unexpected error securely deleting payment data: " + e.getMessage(),
+                    SQL_SECURE_DELETE, "UPDATE", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentData> findByExpirationRange(LocalDate startDate, LocalDate endDate)
+            throws ConnectionException, QueryExecutionException {
+        if (startDate == null || endDate == null) {
+            throw new ValidationException("Start date and end date cannot be null");
+        }
+        
+        if (startDate.isAfter(endDate)) {
+            throw new ValidationException("Start date cannot be after end date");
+        }
+        
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_EXPIRATION_RANGE)) {
+                stmt.setObject(1, startDate);
+                stmt.setObject(2, endDate);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<PaymentData> results = new ArrayList<>();
+                    while (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        results.add(entity.toDomainModel());
+                    }
+                    return results;
+                }
+            }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by expiration range: " + e.getMessage(),
+                    e, SQL_FIND_BY_EXPIRATION_RANGE, "SELECT", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by expiration range: " + e.getMessage(),
+                    SQL_FIND_BY_EXPIRATION_RANGE, "SELECT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentData> findExpiringSoon(int monthsThreshold)
+            throws ConnectionException, QueryExecutionException {
+        if (monthsThreshold <= 0) {
+            throw new ValidationException("Months threshold must be positive");
+        }
+        
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            // Modified query to use parameters properly
+            String sql = "SELECT * FROM payment_data WHERE expiration BETWEEN CURRENT_DATE AND (CURRENT_DATE + ?::INTERVAL)";
+            
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                stmt.setString(1, monthsThreshold + " months");
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<PaymentData> results = new ArrayList<>();
+                    while (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        results.add(entity.toDomainModel());
+                    }
+                    return results;
+                }
+            }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data expiring soon: " + e.getMessage(),
+                    e, "FIND_EXPIRING_SOON", "SELECT", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data expiring soon: " + e.getMessage(),
+                    "FIND_EXPIRING_SOON", "SELECT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentData> findByPaymentType(String paymentType)
+            throws ConnectionException, QueryExecutionException {
+        if (paymentType == null || paymentType.isEmpty()) {
+            throw new ValidationException("Payment type cannot be null or empty");
+        }
+        
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_PAYMENT_TYPE)) {
+                stmt.setString(1, paymentType);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<PaymentData> results = new ArrayList<>();
+                    while (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        results.add(entity.toDomainModel());
+                    }
+                    return results;
+                }
+            }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by payment type: " + e.getMessage(),
+                    e, SQL_FIND_BY_PAYMENT_TYPE, "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by payment type: " + e.getMessage(),
+                    SQL_FIND_BY_PAYMENT_TYPE, "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long countByPaymentType(String paymentType)
+            throws ConnectionException, QueryExecutionException {
+        if (paymentType == null || paymentType.isEmpty()) {
+            throw new ValidationException("Payment type cannot be null or empty");
+        }
+        
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_COUNT_BY_PAYMENT_TYPE)) {
+                stmt.setString(1, paymentType);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        return rs.getLong(1);
+                    } else {
+                        return 0;
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error counting payment data by payment type: " + e.getMessage(),
+                    e, SQL_COUNT_BY_PAYMENT_TYPE, "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error counting payment data by payment type: " + e.getMessage(),
+                    SQL_COUNT_BY_PAYMENT_TYPE, "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public boolean isValidPaymentMethod(UUID paymentDataId)
+            throws ResourceNotFoundException, ConnectionException, QueryExecutionException {
+        if (paymentDataId == null) {
+            throw new ValidationException("Payment data ID cannot be null");
+        }
+        
+        // Retrieve the payment data
+        Optional<PaymentData> paymentDataOpt = findById(paymentDataId);
+        if (paymentDataOpt.isEmpty()) {
+            throw new ResourceNotFoundException("payment_data", paymentDataId);
+        }
+        
+        PaymentData paymentData = paymentDataOpt.get();
+        
+        // Check if the payment method is expired
+        if (paymentData.isExpired()) {
+            return false;
+        }
+        
+        // Check if the payment method has been invalidated
+        if (paymentData.getPaymentDetails() != null && 
+                paymentData.getPaymentDetails().contains("\"status\"") && 
+                paymentData.getPaymentDetails().contains("\"invalid\"")) {
+            return false;
+        }
+        
+        return true;
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentData> findByMerchantId(String merchantId)
+            throws ConnectionException, QueryExecutionException {
+        if (merchantId == null || merchantId.isEmpty()) {
+            throw new ValidationException("Merchant ID cannot be null or empty");
+        }
+        
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_MERCHANT_ID)) {
+                stmt.setString(1, merchantId);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<PaymentData> results = new ArrayList<>();
+                    while (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        results.add(entity.toDomainModel());
+                    }
+                    return results;
+                }
+            }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by merchant ID: " + e.getMessage(),
+                    e, SQL_FIND_BY_MERCHANT_ID, "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by merchant ID: " + e.getMessage(),
+                    SQL_FIND_BY_MERCHANT_ID, "SELECT", new String[]{"payment_data", "payment_transaction"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Optional<PaymentData> findMostRecentByTransactionId(UUID transactionId)
+            throws ConnectionException, QueryExecutionException {
+        if (transactionId == null) {
+            throw new ValidationException("Transaction ID cannot be null");
+        }
+        
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_MOST_RECENT_BY_TRANSACTION_ID)) {
+                stmt.setObject(1, transactionId);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        return Optional.of(entity.toDomainModel());
+                    } else {
+                        return Optional.empty();
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding most recent payment data by transaction ID: " + e.getMessage(),
+                    e, SQL_FIND_MOST_RECENT_BY_TRANSACTION_ID, "SELECT", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding most recent payment data by transaction ID: " + e.getMessage(),
+                    SQL_FIND_MOST_RECENT_BY_TRANSACTION_ID, "SELECT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<PaymentData> findByCreationDateRange(LocalDate startDate, LocalDate endDate)
+            throws ConnectionException, QueryExecutionException {
+        if (startDate == null || endDate == null) {
+            throw new ValidationException("Start date and end date cannot be null");
+        }
+        
+        if (startDate.isAfter(endDate)) {
+            throw new ValidationException("Start date cannot be after end date");
+        }
+        
+        Connection conn = null;
+        try {
+            conn = connectionManager.getConnection();
+            
+            try (PreparedStatement stmt = conn.prepareStatement(SQL_FIND_BY_CREATION_DATE_RANGE)) {
+                // Convert LocalDate to Timestamp for the start of the day
+                Timestamp startTimestamp = Timestamp.valueOf(startDate.atStartOfDay());
+                // Convert LocalDate to Timestamp for the end of the day
+                Timestamp endTimestamp = Timestamp.valueOf(endDate.plusDays(1).atStartOfDay().minusNanos(1));
+                
+                stmt.setTimestamp(1, startTimestamp);
+                stmt.setTimestamp(2, endTimestamp);
+                
+                try (ResultSet rs = stmt.executeQuery()) {
+                    List<PaymentData> results = new ArrayList<>();
+                    while (rs.next()) {
+                        PaymentDataEntity entity = mapResultSetToEntity(rs);
+                        results.add(entity.toDomainModel());
+                    }
+                    return results;
+                }
+            }
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                    "Error finding payment data by creation date range: " + e.getMessage(),
+                    e, SQL_FIND_BY_CREATION_DATE_RANGE, "SELECT", new String[]{"payment_data"});
+        } catch (ConnectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryExecutionException(
+                    "Unexpected error finding payment data by creation date range: " + e.getMessage(),
+                    SQL_FIND_BY_CREATION_DATE_RANGE, "SELECT", new String[]{"payment_data"});
+        } finally {
+            connectionManager.releaseConnection(conn);
+        }
+    }
+    
+    /**
+     * Maps a ResultSet row to a PaymentDataEntity.
+     *
+     * @param rs the ResultSet to map
+     * @return a PaymentDataEntity
+     * @throws SQLException if a database access error occurs
+     */
+    private PaymentDataEntity mapResultSetToEntity(ResultSet rs) throws SQLException {
+        PaymentDataEntity entity = new PaymentDataEntity();
+        
+        entity.setPaymentDataId(rs.getObject("payment_data_id", UUID.class));
+        entity.setTransactionId(rs.getObject("transaction_id", UUID.class));
+        entity.setPaymentMethodId(rs.getString("payment_method_id"));
+        entity.setPaymentToken(rs.getString("payment_token"));
+        entity.setPaymentDetails(rs.getString("payment_details"));
+        entity.setCreatedAt(rs.getTimestamp("created_at") != null ? 
+                rs.getTimestamp("created_at").toInstant() : null);
+        entity.setExpiration(rs.getObject("expiration", LocalDate.class));
+        entity.setBillingData(rs.getString("billing_data"));
+        
+        return entity;
+    }
+    
+    /**
+     * Validates a payment data object.
+     *
+     * @param paymentData the payment data to validate
+     * @throws ValidationException if validation fails
+     */
+    private void validatePaymentData(PaymentData paymentData) throws ValidationException {
+        ValidationException validationException = new ValidationException("Payment data validation failed");
+        
+        // Check required fields
+        if (paymentData.getTransactionId() == null) {
+            validationException.addFieldError("transactionId", "Transaction ID is required", null);
+        }
+        
+        if (paymentData.getPaymentMethodId() == null || paymentData.getPaymentMethodId().isEmpty()) {
+            validationException.addFieldError("paymentMethodId", "Payment method ID is required", null);
+        }
+        
+        // Validate payment details format if provided
+        if (paymentData.getPaymentDetails() != null && !paymentData.getPaymentDetails().isEmpty()) {
+            try {
+                validateJsonFormat(paymentData.getPaymentDetails(), "payment details");
+            } catch (ValidationException e) {
+                validationException.addFieldError("paymentDetails", e.getMessage(), paymentData.getPaymentDetails());
+            }
+        }
+        
+        // Validate billing data format if provided
+        if (paymentData.getBillingData() != null && !paymentData.getBillingData().isEmpty()) {
+            try {
+                validateJsonFormat(paymentData.getBillingData(), "billing data");
+            } catch (ValidationException e) {
+                validationException.addFieldError("billingData", e.getMessage(), paymentData.getBillingData());
+            }
+        }
+        
+        // Validate expiration date if provided
+        if (paymentData.getExpiration() != null) {
+            if (paymentData.getExpiration().isBefore(LocalDate.now())) {
+                validationException.addFieldError("expiration", "Expiration date cannot be in the past", 
+                        paymentData.getExpiration());
+            }
+        }
+        
+        // Throw the exception if there are validation errors
+        if (validationException.hasErrors()) {
+            throw validationException;
+        }
+    }
+    
+    /**
+     * Validates that a string is in valid JSON format.
+     *
+     * @param json the JSON string to validate
+     * @param fieldName the name of the field being validated
+     * @throws ValidationException if the JSON is invalid
+     */
+    private void validateJsonFormat(String json, String fieldName) throws ValidationException {
+        if (json == null || json.isEmpty()) {
+            return;
+        }
+        
+        try {
+            // Simple JSON validation by checking for balanced braces
+            int braceCount = 0;
+            boolean inString = false;
+            boolean escaped = false;
+            
+            for (char c : json.toCharArray()) {
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                
+                if (c == '\\' && inString) {
+                    escaped = true;
+                    continue;
+                }
+                
+                if (c == '"' && !escaped) {
+                    inString = !inString;
+                    continue;
+                }
+                
+                if (!inString) {
+                    if (c == '{') {
+                        braceCount++;
+                    } else if (c == '}') {
+                        braceCount--;
+                        if (braceCount < 0) {
+                            throw new ValidationException("Invalid JSON format: unbalanced braces");
+                        }
+                    }
+                }
+            }
+            
+            if (braceCount != 0) {
+                throw new ValidationException("Invalid JSON format: unbalanced braces");
+            }
+            
+            if (inString) {
+                throw new ValidationException("Invalid JSON format: unterminated string");
+            }
+        } catch (Exception e) {
+            throw new ValidationException("Invalid " + fieldName + " format: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Validates a payment token format.
+     *
+     * @param token the payment token to validate
+     * @throws ValidationException if the token is invalid
+     */
+    private void validatePaymentToken(String token) throws ValidationException {
+        if (token == null || token.isEmpty()) {
+            throw new ValidationException("Payment token cannot be null or empty");
+        }
+        
+        // Add token format validation logic here if needed
+        // For now, we'll just check that it's not too long
+        if (token.length() > 128) {
+            throw new ValidationException("Payment token exceeds maximum length of 128 characters");
+        }
+    }
+    
+    /**
+     * Secures payment data by tokenizing sensitive information.
+     *
+     * @param paymentData the payment data to secure
+     * @return the secured payment data
+     * @throws SecurityException if security operations fail
+     */
+    private PaymentData securePaymentData(PaymentData paymentData) throws SecurityException {
+        // Create a copy of the payment data to avoid modifying the original
+        PaymentData securedData = new PaymentData();
+        securedData.setPaymentDataId(paymentData.getPaymentDataId());
+        securedData.setTransactionId(paymentData.getTransactionId());
+        securedData.setPaymentMethodId(paymentData.getPaymentMethodId());
+        securedData.setExpiration(paymentData.getExpiration());
+        securedData.setCreatedAt(paymentData.getCreatedAt());
+        
+        // Secure the payment token if provided
+        if (paymentData.getPaymentToken() != null && !paymentData.getPaymentToken().isEmpty()) {
+            securedData.setPaymentToken(securePaymentToken(paymentData.getPaymentToken()));
+        }
+        
+        // Secure the payment details if provided
+        if (paymentData.getPaymentDetails() != null && !paymentData.getPaymentDetails().isEmpty()) {
+            securedData.setPaymentDetails(securePaymentDetails(paymentData.getPaymentDetails()));
+        }
+        
+        // Secure the billing data if provided
+        if (paymentData.getBillingData() != null && !paymentData.getBillingData().isEmpty()) {
+            securedData.setBillingData(secureBillingData(paymentData.getBillingData()));
+        }
+        
+        return securedData;
+    }
+    
+    /**
+     * Secures a payment token.
+     *
+     * @param token the payment token to secure
+     * @return the secured payment token
+     * @throws SecurityException if security operations fail
+     */
+    private String securePaymentToken(String token) throws SecurityException {
+        // In a real implementation, this would use encryption or tokenization services
+        // For now, we'll just return the token as is
+        return token;
+    }
+    
+    /**
+     * Secures payment details by removing or masking sensitive information.
+     *
+     * @param paymentDetails the payment details to secure
+     * @return the secured payment details
+     * @throws SecurityException if security operations fail
+     */
+    private String securePaymentDetails(String paymentDetails) throws SecurityException {
+        // In a real implementation, this would parse the JSON, mask sensitive fields, and reserialize
+        // For now, we'll just return the details as is
+        return paymentDetails;
+    }
+    
+    /**
+     * Secures billing data by removing or masking sensitive information.
+     *
+     * @param billingData the billing data to secure
+     * @return the secured billing data
+     * @throws SecurityException if security operations fail
+     */
+    private String secureBillingData(String billingData) throws SecurityException {
+        // In a real implementation, this would parse the JSON, mask sensitive fields, and reserialize
+        // For now, we'll just return the data as is
+        return billingData;
+    }
+    
+    /**
+     * Applies role-based masking to payment data.
+     *
+     * @param paymentData the payment data to mask
+     * @param userRole the user role to apply masking for
+     * @return the masked payment data
+     */
+    private PaymentData applyRoleBasedMasking(PaymentData paymentData, String userRole) {
+        // Create a copy of the payment data to avoid modifying the original
+        PaymentData maskedData = new PaymentData();
+        maskedData.setPaymentDataId(paymentData.getPaymentDataId());
+        maskedData.setTransactionId(paymentData.getTransactionId());
+        maskedData.setPaymentMethodId(paymentData.getPaymentMethodId());
+        maskedData.setExpiration(paymentData.getExpiration());
+        maskedData.setCreatedAt(paymentData.getCreatedAt());
+        
+        // Apply role-based masking
+        switch (userRole.toLowerCase()) {
+            case "admin":
+                // Admins can see everything except the full payment token
+                if (paymentData.getPaymentToken() != null) {
+                    maskedData.setPaymentToken(maskPaymentToken(paymentData.getPaymentToken()));
+                }
+                maskedData.setPaymentDetails(paymentData.getPaymentDetails());
+                maskedData.setBillingData(paymentData.getBillingData());
+                break;
+                
+            case "finance":
+                // Finance can see payment details and billing data, but not the token
+                maskedData.setPaymentToken("****");
+                maskedData.setPaymentDetails(paymentData.getPaymentDetails());
+                maskedData.setBillingData(paymentData.getBillingData());
+                break;
+                
+            case "support":
+                // Support can see limited payment details and masked billing data
+                maskedData.setPaymentToken("****");
+                maskedData.setPaymentDetails(maskPaymentDetails(paymentData.getPaymentDetails()));
+                maskedData.setBillingData(maskBillingData(paymentData.getBillingData()));
+                break;
+                
+            case "merchant":
+                // Merchants can see very limited information
+                maskedData.setPaymentToken("****");
+                maskedData.setPaymentDetails(null);
+                maskedData.setBillingData(null);
+                break;
+                
+            default:
+                // Default to maximum masking for unknown roles
+                maskedData.setPaymentToken("****");
+                maskedData.setPaymentDetails(null);
+                maskedData.setBillingData(null);
+                break;
+        }
+        
+        return maskedData;
+    }
+    
+    /**
+     * Masks a payment token for display.
+     *
+     * @param token the payment token to mask
+     * @return the masked payment token
+     */
+    private String maskPaymentToken(String token) {
+        if (token == null || token.isEmpty()) {
+            return "****";
+        }
+        
+        int length = token.length();
+        if (length <= 4) {
+            return "****";
+        }
+        
+        return "****" + token.substring(length - 4);
+    }
+    
+    /**
+     * Masks payment details for display.
+     *
+     * @param paymentDetails the payment details to mask
+     * @return the masked payment details
+     */
+    private String maskPaymentDetails(String paymentDetails) {
+        if (paymentDetails == null || paymentDetails.isEmpty()) {
+            return null;
+        }
+        
+        // In a real implementation, this would parse the JSON, mask sensitive fields, and reserialize
+        // For now, we'll just return a simplified version
+        return "{\"type\": \"masked\"}";
+    }
+    
+    /**
+     * Masks billing data for display.
+     *
+     * @param billingData the billing data to mask
+     * @return the masked billing data
+     */
+    private String maskBillingData(String billingData) {
+        if (billingData == null || billingData.isEmpty()) {
+            return null;
+        }
+        
+        // In a real implementation, this would parse the JSON, mask sensitive fields, and reserialize
+        // For now, we'll just return a simplified version
+        return "{\"address\": \"masked\"}";
     }
 }

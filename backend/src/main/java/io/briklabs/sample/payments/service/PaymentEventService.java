@@ -1,8 +1,8 @@
 package io.briklabs.sample.payments.service;
 
 import io.briklabs.sample.payments.model.PaymentEvent;
-import io.briklabs.sample.payments.model.PaymentStatus;
 import io.briklabs.sample.payments.model.PaymentTransaction;
+import io.briklabs.sample.payments.model.PaymentTransaction.PaymentStatus;
 
 import java.time.Instant;
 import java.util.List;
@@ -11,224 +11,386 @@ import java.util.UUID;
 
 /**
  * Service interface for tracking and managing payment lifecycle events.
- * This service provides methods for recording, retrieving, and analyzing
- * events throughout a payment transaction's lifecycle, creating a comprehensive
- * audit trail for all payment operations.
+ * <p>
+ * This service provides methods for recording events at each stage of the payment
+ * transaction lifecycle, retrieving event history, and constructing event timelines.
+ * It serves as a comprehensive audit trail for all payment operations, essential for
+ * troubleshooting, compliance, and understanding transaction history.
+ * </p>
  */
 public interface PaymentEventService {
 
     /**
-     * Records a new event for a payment transaction.
+     * Records a general event for a payment transaction.
      *
-     * @param event The event to record
-     * @return The recorded event with generated ID and timestamp
-     * @throws IllegalArgumentException if the event data is invalid
+     * @param transactionId The unique identifier of the transaction
+     * @param eventType The type of event (e.g., CREATED, PROCESSED, CAPTURE_INITIATED)
+     * @param eventData Additional data about the event in JSON format
+     * @param createdBy Identifier of the user or system component creating the event
+     * @return The created payment event
+     * @throws IllegalArgumentException if any required parameters are invalid
      */
-    PaymentEvent recordEvent(PaymentEvent event);
+    PaymentEvent recordEvent(UUID transactionId, String eventType, String eventData, String createdBy);
+
+    /**
+     * Records a general event for a payment transaction with correlation tracking.
+     *
+     * @param transactionId The unique identifier of the transaction
+     * @param eventType The type of event
+     * @param eventData Additional data about the event in JSON format
+     * @param createdBy Identifier of the user or system component creating the event
+     * @param correlationId ID to track related events across a request or operation
+     * @return The created payment event
+     * @throws IllegalArgumentException if any required parameters are invalid
+     */
+    PaymentEvent recordEvent(UUID transactionId, String eventType, String eventData, 
+                            String createdBy, UUID correlationId);
 
     /**
      * Records a status change event for a payment transaction.
      *
-     * @param transaction The transaction being updated
-     * @param newStatus The new status being applied
-     * @param userId The identifier of the user making the change
-     * @return The recorded event
-     * @throws IllegalArgumentException if the status transition is invalid
+     * @param transactionId The unique identifier of the transaction
+     * @param previousStatus The status before the change
+     * @param newStatus The status after the change
+     * @param eventData Additional data about the status change
+     * @param createdBy Identifier of the user or system component creating the event
+     * @return The created payment event
+     * @throws IllegalArgumentException if any required parameters are invalid
      */
-    PaymentEvent recordStatusChangeEvent(PaymentTransaction transaction, PaymentStatus newStatus, String userId);
+    PaymentEvent recordStatusChangeEvent(UUID transactionId, PaymentStatus previousStatus, 
+                                        PaymentStatus newStatus, String eventData, String createdBy);
+
+    /**
+     * Records a status change event for a payment transaction with correlation tracking.
+     *
+     * @param transactionId The unique identifier of the transaction
+     * @param previousStatus The status before the change
+     * @param newStatus The status after the change
+     * @param eventData Additional data about the status change
+     * @param createdBy Identifier of the user or system component creating the event
+     * @param correlationId ID to track related events across a request or operation
+     * @return The created payment event
+     * @throws IllegalArgumentException if any required parameters are invalid
+     */
+    PaymentEvent recordStatusChangeEvent(UUID transactionId, PaymentStatus previousStatus, 
+                                        PaymentStatus newStatus, String eventData, 
+                                        String createdBy, UUID correlationId);
+
+    /**
+     * Records an error event for a payment transaction.
+     *
+     * @param transactionId The unique identifier of the transaction
+     * @param errorMessage User-friendly error message
+     * @param errorDetails Technical details about the error in JSON format
+     * @param createdBy Identifier of the system component reporting the error
+     * @return The created payment event
+     * @throws IllegalArgumentException if any required parameters are invalid
+     */
+    PaymentEvent recordErrorEvent(UUID transactionId, String errorMessage, 
+                                 String errorDetails, String createdBy);
+
+    /**
+     * Records an error event for a payment transaction with correlation tracking.
+     *
+     * @param transactionId The unique identifier of the transaction
+     * @param errorMessage User-friendly error message
+     * @param errorDetails Technical details about the error in JSON format
+     * @param createdBy Identifier of the system component reporting the error
+     * @param correlationId ID to track related events across a request or operation
+     * @return The created payment event
+     * @throws IllegalArgumentException if any required parameters are invalid
+     */
+    PaymentEvent recordErrorEvent(UUID transactionId, String errorMessage, 
+                                 String errorDetails, String createdBy, UUID correlationId);
 
     /**
      * Records a transaction creation event.
      *
      * @param transaction The newly created transaction
-     * @param userId The identifier of the user creating the transaction
-     * @return The recorded event
+     * @param createdBy Identifier of the user or system component creating the transaction
+     * @return The created payment event
+     * @throws IllegalArgumentException if any required parameters are invalid
      */
-    PaymentEvent recordTransactionCreatedEvent(PaymentTransaction transaction, String userId);
+    PaymentEvent recordTransactionCreatedEvent(PaymentTransaction transaction, String createdBy);
 
     /**
-     * Records a payment processing event.
+     * Records a capture event for a payment transaction.
      *
-     * @param transaction The transaction being processed
-     * @param userId The identifier of the user initiating the processing
-     * @param metadata Additional processing details as key-value pairs
-     * @return The recorded event
+     * @param transactionId The unique identifier of the transaction
+     * @param captureAmount The amount being captured
+     * @param captureReference Reference code for the capture operation
+     * @param isPartialCapture Whether this is a partial capture
+     * @param createdBy Identifier of the user or system component performing the capture
+     * @return The created payment event
+     * @throws IllegalArgumentException if any required parameters are invalid
      */
-    PaymentEvent recordProcessingEvent(PaymentTransaction transaction, String userId, Map<String, String> metadata);
+    PaymentEvent recordCaptureEvent(UUID transactionId, String captureAmount, 
+                                   String captureReference, boolean isPartialCapture, String createdBy);
 
     /**
-     * Records a payment capture event.
+     * Records a refund event for a payment transaction.
      *
-     * @param transaction The transaction being captured
-     * @param userId The identifier of the user initiating the capture
-     * @param amount The amount being captured
-     * @param isPartial Flag indicating if this is a partial capture
-     * @return The recorded event
+     * @param transactionId The unique identifier of the transaction
+     * @param refundAmount The amount being refunded
+     * @param refundReason The reason for the refund
+     * @param refundReference Reference code for the refund operation
+     * @param isPartialRefund Whether this is a partial refund
+     * @param createdBy Identifier of the user or system component performing the refund
+     * @return The created payment event
+     * @throws IllegalArgumentException if any required parameters are invalid
      */
-    PaymentEvent recordCaptureEvent(PaymentTransaction transaction, String userId, String amount, boolean isPartial);
+    PaymentEvent recordRefundEvent(UUID transactionId, String refundAmount, String refundReason,
+                                  String refundReference, boolean isPartialRefund, String createdBy);
 
     /**
-     * Records a payment refund event.
+     * Records a void event for a payment transaction.
      *
-     * @param transaction The transaction being refunded
-     * @param userId The identifier of the user initiating the refund
-     * @param amount The amount being refunded
-     * @param reason The reason for the refund
-     * @param isPartial Flag indicating if this is a partial refund
-     * @return The recorded event
+     * @param transactionId The unique identifier of the transaction
+     * @param voidReason The reason for voiding the transaction
+     * @param createdBy Identifier of the user or system component performing the void
+     * @return The created payment event
+     * @throws IllegalArgumentException if any required parameters are invalid
      */
-    PaymentEvent recordRefundEvent(PaymentTransaction transaction, String userId, String amount, String reason, boolean isPartial);
+    PaymentEvent recordVoidEvent(UUID transactionId, String voidReason, String createdBy);
 
     /**
-     * Records a payment void event.
+     * Gets all events for a specific transaction.
      *
-     * @param transaction The transaction being voided
-     * @param userId The identifier of the user initiating the void
-     * @param reason The reason for voiding the transaction
-     * @return The recorded event
-     */
-    PaymentEvent recordVoidEvent(PaymentTransaction transaction, String userId, String reason);
-
-    /**
-     * Records an error event for a payment transaction.
-     *
-     * @param transaction The transaction experiencing an error
-     * @param userId The identifier of the user or system reporting the error
-     * @param errorCode The error code
-     * @param errorMessage The error message
-     * @return The recorded event
-     */
-    PaymentEvent recordErrorEvent(PaymentTransaction transaction, String userId, String errorCode, String errorMessage);
-
-    /**
-     * Records a custom event type for a payment transaction.
-     *
-     * @param transaction The associated transaction
-     * @param eventType The type of event
-     * @param userId The identifier of the user creating the event
-     * @param metadata Additional event data as key-value pairs
-     * @return The recorded event
-     */
-    PaymentEvent recordCustomEvent(PaymentTransaction transaction, String eventType, String userId, Map<String, String> metadata);
-
-    /**
-     * Retrieves all events for a specific transaction.
-     *
-     * @param transactionId The transaction identifier
-     * @return A list of events ordered by creation time (newest first)
+     * @param transactionId The unique identifier of the transaction
+     * @return List of events for the transaction, ordered chronologically
+     * @throws IllegalArgumentException if the transaction ID is invalid
      */
     List<PaymentEvent> getEventsByTransactionId(UUID transactionId);
 
     /**
-     * Retrieves all events for a specific transaction within a time range.
+     * Gets events of a specific type for a transaction.
      *
-     * @param transactionId The transaction identifier
-     * @param startTime The start of the time range (inclusive)
-     * @param endTime The end of the time range (inclusive)
-     * @return A list of events ordered by creation time (newest first)
-     */
-    List<PaymentEvent> getEventsByTransactionIdAndTimeRange(UUID transactionId, Instant startTime, Instant endTime);
-
-    /**
-     * Retrieves events of a specific type for a transaction.
-     *
-     * @param transactionId The transaction identifier
+     * @param transactionId The unique identifier of the transaction
      * @param eventType The type of events to retrieve
-     * @return A list of events ordered by creation time (newest first)
+     * @return List of events of the specified type for the transaction
+     * @throws IllegalArgumentException if any parameters are invalid
      */
-    List<PaymentEvent> getEventsByTransactionIdAndType(UUID transactionId, String eventType);
+    List<PaymentEvent> getEventsByType(UUID transactionId, String eventType);
 
     /**
-     * Builds a timeline of events for a transaction.
-     * The timeline includes all events with their timestamps and details,
-     * providing a comprehensive history of the transaction's lifecycle.
+     * Gets events of multiple types for a transaction.
      *
-     * @param transactionId The transaction identifier
-     * @return A chronologically ordered list of events representing the timeline
+     * @param transactionId The unique identifier of the transaction
+     * @param eventTypes List of event types to retrieve
+     * @return List of events matching any of the specified types
+     * @throws IllegalArgumentException if any parameters are invalid
      */
-    List<PaymentEvent> buildTransactionTimeline(UUID transactionId);
+    List<PaymentEvent> getEventsByTypes(UUID transactionId, List<String> eventTypes);
 
     /**
-     * Builds a filtered timeline of events for a transaction.
+     * Gets status change events for a transaction.
      *
-     * @param transactionId The transaction identifier
-     * @param eventTypes List of event types to include (null for all)
-     * @param startTime The start of the time range (null for no lower bound)
-     * @param endTime The end of the time range (null for no upper bound)
-     * @return A chronologically ordered list of events representing the filtered timeline
+     * @param transactionId The unique identifier of the transaction
+     * @return List of status change events for the transaction
+     * @throws IllegalArgumentException if the transaction ID is invalid
      */
-    List<PaymentEvent> buildFilteredTransactionTimeline(UUID transactionId, List<String> eventTypes, 
-                                                      Instant startTime, Instant endTime);
+    List<PaymentEvent> getStatusChangeEvents(UUID transactionId);
 
     /**
-     * Retrieves the most recent event for a transaction.
+     * Gets error events for a transaction.
      *
-     * @param transactionId The transaction identifier
-     * @return The most recent event or null if no events exist
+     * @param transactionId The unique identifier of the transaction
+     * @return List of error events for the transaction
+     * @throws IllegalArgumentException if the transaction ID is invalid
+     */
+    List<PaymentEvent> getErrorEvents(UUID transactionId);
+
+    /**
+     * Gets the most recent event for a transaction.
+     *
+     * @param transactionId The unique identifier of the transaction
+     * @return The most recent event for the transaction, or null if no events exist
+     * @throws IllegalArgumentException if the transaction ID is invalid
      */
     PaymentEvent getMostRecentEvent(UUID transactionId);
 
     /**
-     * Retrieves the most recent event of a specific type for a transaction.
+     * Gets the most recent event of a specific type for a transaction.
      *
-     * @param transactionId The transaction identifier
+     * @param transactionId The unique identifier of the transaction
      * @param eventType The type of event to retrieve
-     * @return The most recent event of the specified type or null if none exists
+     * @return The most recent event of the specified type, or null if no matching events exist
+     * @throws IllegalArgumentException if any parameters are invalid
      */
     PaymentEvent getMostRecentEventByType(UUID transactionId, String eventType);
 
     /**
-     * Counts the number of events for a transaction.
+     * Gets events created within a specific time range.
      *
-     * @param transactionId The transaction identifier
-     * @return The total number of events
+     * @param startTime The start of the time range (inclusive)
+     * @param endTime The end of the time range (inclusive)
+     * @param offset Pagination offset (0-based)
+     * @param limit Maximum number of results to return
+     * @return List of events created within the specified time range
+     * @throws IllegalArgumentException if any parameters are invalid
      */
-    int countEventsByTransactionId(UUID transactionId);
+    List<PaymentEvent> getEventsByTimeRange(Instant startTime, Instant endTime, int offset, int limit);
 
     /**
-     * Counts the number of events of a specific type for a transaction.
+     * Gets events created by a specific user or system.
      *
-     * @param transactionId The transaction identifier
-     * @param eventType The type of events to count
-     * @return The number of events of the specified type
+     * @param createdBy The identifier of the user or system that created the events
+     * @param offset Pagination offset (0-based)
+     * @param limit Maximum number of results to return
+     * @return List of events created by the specified user or system
+     * @throws IllegalArgumentException if any parameters are invalid
      */
-    int countEventsByTransactionIdAndType(UUID transactionId, String eventType);
+    List<PaymentEvent> getEventsByCreator(String createdBy, int offset, int limit);
 
     /**
-     * Checks if a transaction has any events of a specific type.
-     *
-     * @param transactionId The transaction identifier
-     * @param eventType The type of events to check for
-     * @return true if events of the specified type exist, false otherwise
-     */
-    boolean hasEventType(UUID transactionId, String eventType);
-
-    /**
-     * Retrieves events with correlation ID for cross-service tracing.
+     * Gets events with a specific correlation ID.
      *
      * @param correlationId The correlation identifier
-     * @return A list of events with the specified correlation ID
+     * @return List of events with the specified correlation ID
+     * @throws IllegalArgumentException if the correlation ID is invalid
      */
     List<PaymentEvent> getEventsByCorrelationId(UUID correlationId);
 
     /**
-     * Retrieves events created by a specific user.
+     * Gets a complete timeline of events for a transaction.
      *
-     * @param userId The identifier of the user who created the events
-     * @param limit Maximum number of events to retrieve (for pagination)
-     * @param offset Starting position for pagination
-     * @return A paginated list of events created by the specified user
+     * @param transactionId The unique identifier of the transaction
+     * @return List of events ordered chronologically with metadata
+     * @throws IllegalArgumentException if the transaction ID is invalid
      */
-    List<PaymentEvent> getEventsByUserId(String userId, int limit, int offset);
+    List<Map<String, Object>> getTransactionTimeline(UUID transactionId);
 
     /**
-     * Purges events older than the specified retention period for a transaction.
-     * This method should be used with caution and only for compliance with data
-     * retention policies.
+     * Gets a filtered timeline of events for a transaction.
      *
-     * @param transactionId The transaction identifier
-     * @param retentionPeriod The retention period in days
-     * @return The number of events purged
+     * @param transactionId The unique identifier of the transaction
+     * @param eventTypes List of event types to include (null for all types)
+     * @param startTime The start of the time range (null for no start limit)
+     * @param endTime The end of the time range (null for no end limit)
+     * @return List of events matching the filter criteria, ordered chronologically
+     * @throws IllegalArgumentException if the transaction ID is invalid
      */
-    int purgeOldEvents(UUID transactionId, int retentionPeriod);
+    List<Map<String, Object>> getFilteredTimeline(UUID transactionId, List<String> eventTypes,
+                                                Instant startTime, Instant endTime);
+
+    /**
+     * Gets a summary of events by type for a transaction.
+     *
+     * @param transactionId The unique identifier of the transaction
+     * @return Map of event type to count
+     * @throws IllegalArgumentException if the transaction ID is invalid
+     */
+    Map<String, Long> getEventCountByType(UUID transactionId);
+
+    /**
+     * Gets events for transactions belonging to a specific organization.
+     *
+     * @param organizationId The organization identifier
+     * @param offset Pagination offset (0-based)
+     * @param limit Maximum number of results to return
+     * @return List of events for transactions belonging to the specified organization
+     * @throws IllegalArgumentException if any parameters are invalid
+     */
+    List<PaymentEvent> getEventsByOrganization(UUID organizationId, int offset, int limit);
+
+    /**
+     * Gets events for transactions belonging to a specific account.
+     *
+     * @param organizationId The organization identifier
+     * @param accountId The account identifier
+     * @param offset Pagination offset (0-based)
+     * @param limit Maximum number of results to return
+     * @return List of events for transactions belonging to the specified account
+     * @throws IllegalArgumentException if any parameters are invalid
+     */
+    List<PaymentEvent> getEventsByAccount(UUID organizationId, UUID accountId, int offset, int limit);
+
+    /**
+     * Gets events related to status transitions to a specific status.
+     *
+     * @param status The target status
+     * @param offset Pagination offset (0-based)
+     * @param limit Maximum number of results to return
+     * @return List of events representing transitions to the specified status
+     * @throws IllegalArgumentException if any parameters are invalid
+     */
+    List<PaymentEvent> getEventsByNewStatus(PaymentStatus status, int offset, int limit);
+
+    /**
+     * Gets events related to status transitions from a specific status.
+     *
+     * @param status The source status
+     * @param offset Pagination offset (0-based)
+     * @param limit Maximum number of results to return
+     * @return List of events representing transitions from the specified status
+     * @throws IllegalArgumentException if any parameters are invalid
+     */
+    List<PaymentEvent> getEventsByPreviousStatus(PaymentStatus status, int offset, int limit);
+
+    /**
+     * Gets an audit trail for a specific time period.
+     *
+     * @param startTime The start of the time period
+     * @param endTime The end of the time period
+     * @param offset Pagination offset (0-based)
+     * @param limit Maximum number of results to return
+     * @return List of events within the specified time period
+     * @throws IllegalArgumentException if any parameters are invalid
+     */
+    List<PaymentEvent> getAuditTrail(Instant startTime, Instant endTime, int offset, int limit);
+
+    /**
+     * Gets a user activity log for a specific user.
+     *
+     * @param userId The user identifier
+     * @param startTime The start of the time period
+     * @param endTime The end of the time period
+     * @param offset Pagination offset (0-based)
+     * @param limit Maximum number of results to return
+     * @return List of events created by the specified user within the time period
+     * @throws IllegalArgumentException if any parameters are invalid
+     */
+    List<PaymentEvent> getUserActivityLog(String userId, Instant startTime, Instant endTime, 
+                                         int offset, int limit);
+
+    /**
+     * Builds a structured event timeline for a transaction with additional context.
+     *
+     * @param transactionId The unique identifier of the transaction
+     * @return A structured timeline with event details and contextual information
+     * @throws IllegalArgumentException if the transaction ID is invalid
+     */
+    Map<String, Object> buildEventTimeline(UUID transactionId);
+
+    /**
+     * Searches for events containing specific data in the event_data JSON field.
+     *
+     * @param jsonPath The JSON path expression
+     * @param value The value to match
+     * @param offset Pagination offset (0-based)
+     * @param limit Maximum number of results to return
+     * @return List of events matching the JSON criteria
+     * @throws IllegalArgumentException if any parameters are invalid
+     */
+    List<PaymentEvent> searchEventData(String jsonPath, String value, int offset, int limit);
+
+    /**
+     * Gets the total count of events for a transaction.
+     *
+     * @param transactionId The unique identifier of the transaction
+     * @return The total number of events for the transaction
+     * @throws IllegalArgumentException if the transaction ID is invalid
+     */
+    long countEventsByTransaction(UUID transactionId);
+
+    /**
+     * Gets the total count of events matching specific criteria.
+     *
+     * @param eventType The type of events to count (null for all types)
+     * @param startTime The start of the time range (null for no start limit)
+     * @param endTime The end of the time range (null for no end limit)
+     * @param createdBy The creator to filter by (null for all creators)
+     * @return The total count of events matching the criteria
+     */
+    long countEvents(String eventType, Instant startTime, Instant endTime, String createdBy);
 }

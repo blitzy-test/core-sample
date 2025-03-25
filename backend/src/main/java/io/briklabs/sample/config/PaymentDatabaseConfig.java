@@ -1,20 +1,24 @@
 package io.briklabs.sample.config;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Implementation of DatabaseConfig for the payment database.
- * Provides payment-specific database connection parameters and connection pool configuration
- * optimized for payment transaction processing.
+ * Implementation of DatabaseConfig for payment-specific database configuration.
+ * This class provides database connection parameters for the payments module,
+ * retrieving values from ConfigSource and making them available to payment data access components.
  */
 public class PaymentDatabaseConfig implements DatabaseConfig {
 
     private static final Logger logger = LoggerFactory.getLogger(PaymentDatabaseConfig.class);
+    
     private final ConfigSource configSource;
-
+    private final HikariConfigurationProvider hikariConfigProvider;
+    
     /**
      * Constructs a new PaymentDatabaseConfig with the specified ConfigSource.
      * 
@@ -22,175 +26,228 @@ public class PaymentDatabaseConfig implements DatabaseConfig {
      */
     public PaymentDatabaseConfig(ConfigSource configSource) {
         this.configSource = configSource;
+        this.hikariConfigProvider = new HikariConfigurationProvider(configSource);
         logger.info("Initializing payment database configuration");
         
-        // Validate payment configuration
-        if (!configSource.validatePaymentConfig()) {
-            logger.warn("Payment configuration validation failed - check configuration settings");
+        if (!configSource.isPaymentModuleEnabled()) {
+            logger.warn("Payment module is disabled in configuration - some features may not be available");
         }
     }
 
-    /**
-     * Gets the payment database URL.
-     * 
-     * @return Payment database URL string
-     */
     @Override
     public String getDatabaseURL() {
-        return configSource.getRequired("payment.database.url");
+        // First try payment-specific database URL
+        String paymentDbUrl = configSource.getPaymentConfig("database.url", null);
+        if (paymentDbUrl != null) {
+            logger.debug("Using payment-specific database URL: {}", paymentDbUrl);
+            return paymentDbUrl;
+        }
+        
+        // Fall back to main database URL if payment-specific URL is not defined
+        String mainDbUrl = configSource.getRequired("brik.database.payment.url");
+        logger.debug("Using main database URL for payments: {}", mainDbUrl);
+        return mainDbUrl;
     }
 
-    /**
-     * Gets the payment database username.
-     * 
-     * @return Payment database username
-     */
     @Override
     public String getDatabaseUsername() {
-        return configSource.getRequired("payment.database.username");
+        // First try payment-specific database username
+        String paymentDbUsername = configSource.getPaymentConfig("database.username", null);
+        if (paymentDbUsername != null) {
+            logger.debug("Using payment-specific database username");
+            return paymentDbUsername;
+        }
+        
+        // Fall back to main database username if payment-specific username is not defined
+        String mainDbUsername = configSource.getRequired("brik.database.payment.user");
+        logger.debug("Using main database username for payments");
+        return mainDbUsername;
     }
 
-    /**
-     * Gets the payment database password.
-     * 
-     * @return Payment database password
-     */
     @Override
     public String getDatabasePassword() {
-        return configSource.getRequired("payment.database.password");
+        // First try payment-specific database password
+        String paymentDbPassword = configSource.getPaymentConfig("database.password", null);
+        if (paymentDbPassword != null) {
+            logger.debug("Using payment-specific database password");
+            return paymentDbPassword;
+        }
+        
+        // Fall back to main database password if payment-specific password is not defined
+        String mainDbPassword = configSource.getRequired("brik.database.payment.password");
+        logger.debug("Using main database password for payments");
+        return mainDbPassword;
     }
 
-    /**
-     * Gets the payment database schema.
-     * 
-     * @return Payment database schema name
-     */
     @Override
     public String getDatabaseSchema() {
-        return configSource.getRequired("payment.database.schema");
+        // First try payment-specific database schema
+        String paymentDbSchema = configSource.getPaymentConfig("database.schema", null);
+        if (paymentDbSchema != null) {
+            logger.debug("Using payment-specific database schema: {}", paymentDbSchema);
+            return paymentDbSchema;
+        }
+        
+        // Fall back to default payment schema if not explicitly defined
+        logger.debug("Using default payment database schema: payment");
+        return "payment";
     }
     
-    /**
-     * Gets the connection pool configuration parameters for the payment database.
-     * Provides optimized HikariCP settings for payment transaction processing.
-     * 
-     * @return Optional containing a map of connection pool configuration parameters
-     */
     @Override
     public Optional<Map<String, Object>> getConnectionPoolConfig() {
-        // Check if connection pooling is enabled for payment database
-        if (!configSource.getPaymentConfigBoolean("database.connectionPool.enabled", true)) {
-            logger.warn("Payment database connection pooling is disabled - this is not recommended for production");
-            return Optional.empty();
+        Map<String, Object> poolConfig = new HashMap<>();
+        
+        // Check if payment module is enabled
+        if (!configSource.isPaymentModuleEnabled()) {
+            logger.warn("Payment module is disabled - using default connection pool configuration");
+            poolConfig = hikariConfigProvider.getDefaultConnectionPoolConfig();
+            return Optional.of(poolConfig);
         }
         
-        // Get payment-specific connection pool configuration with optimized defaults
-        Map<String, Object> poolConfig = configSource.getPaymentConnectionPoolConfig();
-        
-        logger.info("Configured payment database connection pool with maximumPoolSize={}, minimumIdle={}",
-                poolConfig.get("maximumPoolSize"), poolConfig.get("minimumIdle"));
-        
-        return Optional.of(poolConfig);
+        // Get payment-specific connection pool configuration
+        try {
+            poolConfig = configSource.getPaymentConnectionPoolConfig();
+            
+            // Validate minimum configuration requirements
+            validateConnectionPoolConfig(poolConfig);
+            
+            logger.info("Using payment-specific connection pool configuration: maximumPoolSize={}, minimumIdle={}",
+                    poolConfig.get("maximumPoolSize"), poolConfig.get("minimumIdle"));
+            
+            return Optional.of(poolConfig);
+        } catch (Exception e) {
+            logger.error("Failed to load payment connection pool configuration: {}", e.getMessage(), e);
+            
+            // Fall back to default payment connection pool configuration
+            logger.info("Using default payment connection pool configuration");
+            poolConfig = hikariConfigProvider.getPaymentConnectionPoolConfig();
+            return Optional.of(poolConfig);
+        }
     }
     
     /**
-     * Validates the payment database connection parameters.
-     * Extends the default implementation with payment-specific validation.
+     * Validates the connection pool configuration.
      * 
-     * @return true if connection parameters are valid, false otherwise
+     * @param poolConfig The connection pool configuration to validate
+     * @throws IllegalArgumentException if the configuration is invalid
      */
+    private void validateConnectionPoolConfig(Map<String, Object> poolConfig) {
+        // Check for required parameters
+        if (!poolConfig.containsKey("maximumPoolSize")) {
+            throw new IllegalArgumentException("Missing required connection pool parameter: maximumPoolSize");
+        }
+        
+        if (!poolConfig.containsKey("minimumIdle")) {
+            throw new IllegalArgumentException("Missing required connection pool parameter: minimumIdle");
+        }
+        
+        // Validate parameter values
+        int maxPoolSize = (int) poolConfig.get("maximumPoolSize");
+        int minIdle = (int) poolConfig.get("minimumIdle");
+        
+        if (maxPoolSize <= 0) {
+            throw new IllegalArgumentException("Invalid maximumPoolSize: " + maxPoolSize + " (must be > 0)");
+        }
+        
+        if (minIdle < 0) {
+            throw new IllegalArgumentException("Invalid minimumIdle: " + minIdle + " (must be >= 0)");
+        }
+        
+        if (minIdle > maxPoolSize) {
+            throw new IllegalArgumentException("Invalid connection pool configuration: minimumIdle (" + 
+                    minIdle + ") > maximumPoolSize (" + maxPoolSize + ")");
+        }
+    }
+    
     @Override
     public boolean validateConnectionParameters() {
-        boolean isValid = DatabaseConfig.super.validateConnectionParameters();
-        
-        if (!isValid) {
-            logger.error("Payment database connection validation failed - check connection parameters");
-        } else {
-            logger.info("Payment database connection validation successful");
+        try {
+            // Validate basic connection parameters
+            boolean basicValidation = super.validateConnectionParameters();
+            if (!basicValidation) {
+                logger.error("Basic connection parameter validation failed");
+                return false;
+            }
+            
+            // Validate payment-specific parameters if payment module is enabled
+            if (configSource.isPaymentModuleEnabled()) {
+                // Check for required payment configuration
+                if (!configSource.validatePaymentConfig()) {
+                    logger.error("Payment configuration validation failed");
+                    return false;
+                }
+                
+                // Validate connection pool configuration
+                Optional<Map<String, Object>> poolConfig = getConnectionPoolConfig();
+                if (poolConfig.isPresent()) {
+                    try {
+                        validateConnectionPoolConfig(poolConfig.get());
+                    } catch (Exception e) {
+                        logger.error("Connection pool configuration validation failed: {}", e.getMessage());
+                        return false;
+                    }
+                }
+            }
+            
+            logger.info("Payment database configuration validation successful");
+            return true;
+        } catch (Exception e) {
+            logger.error("Payment database configuration validation failed: {}", e.getMessage(), e);
+            return false;
         }
-        
-        return isValid;
     }
     
     /**
-     * Gets the PostgreSQL version required for payment processing.
+     * Gets the payment transaction table name.
      * 
-     * @return PostgreSQL version string (e.g., "17.4")
+     * @return The payment transaction table name
      */
-    public String getRequiredPostgresVersion() {
-        return configSource.getPaymentConfig("database.requiredVersion", "17.4");
+    public String getPaymentTransactionTable() {
+        return configSource.getPaymentConfig("database.tables.transaction", "payment_transaction");
     }
     
     /**
-     * Gets the maximum number of connections for the payment database pool.
+     * Gets the payment data table name.
      * 
-     * @return Maximum pool size
+     * @return The payment data table name
      */
-    public int getMaximumPoolSize() {
-        return configSource.getPaymentConfigInt("database.connectionPool.maximumPoolSize", 30);
+    public String getPaymentDataTable() {
+        return configSource.getPaymentConfig("database.tables.paymentData", "payment_data");
     }
     
     /**
-     * Gets the minimum number of idle connections for the payment database pool.
+     * Gets the payment fee table name.
      * 
-     * @return Minimum idle connections
+     * @return The payment fee table name
      */
-    public int getMinimumIdleConnections() {
-        return configSource.getPaymentConfigInt("database.connectionPool.minimumIdle", 10);
+    public String getPaymentFeeTable() {
+        return configSource.getPaymentConfig("database.tables.paymentFee", "payment_fee");
     }
     
     /**
-     * Gets the connection timeout for the payment database pool in milliseconds.
+     * Gets the payment event table name.
      * 
-     * @return Connection timeout in milliseconds
+     * @return The payment event table name
      */
-    public long getConnectionTimeoutMs() {
-        return configSource.getPaymentConfigLong("database.connectionPool.connectionTimeout", 20000);
+    public String getPaymentEventTable() {
+        return configSource.getPaymentConfig("database.tables.paymentEvent", "payment_event");
     }
     
     /**
-     * Gets the idle timeout for the payment database pool in milliseconds.
+     * Checks if the payment module is enabled.
      * 
-     * @return Idle timeout in milliseconds
+     * @return true if payment module is enabled, false otherwise
      */
-    public long getIdleTimeoutMs() {
-        return configSource.getPaymentConfigLong("database.connectionPool.idleTimeout", 300000);
+    public boolean isPaymentModuleEnabled() {
+        return configSource.isPaymentModuleEnabled();
     }
     
     /**
-     * Gets the maximum lifetime for connections in the payment database pool in milliseconds.
+     * Gets the payment feature flags.
      * 
-     * @return Maximum connection lifetime in milliseconds
+     * @return Map of payment feature flags
      */
-    public long getMaxLifetimeMs() {
-        return configSource.getPaymentConfigLong("database.connectionPool.maxLifetime", 1200000);
-    }
-    
-    /**
-     * Checks if auto-commit is enabled for payment database connections.
-     * Default is false for payment transactions to ensure proper transaction management.
-     * 
-     * @return true if auto-commit is enabled, false otherwise
-     */
-    public boolean isAutoCommitEnabled() {
-        return configSource.getPaymentConfigBoolean("database.connectionPool.autoCommit", false);
-    }
-    
-    /**
-     * Gets the leak detection threshold for the payment database pool in milliseconds.
-     * 
-     * @return Leak detection threshold in milliseconds
-     */
-    public long getLeakDetectionThresholdMs() {
-        return configSource.getPaymentConfigLong("database.connectionPool.leakDetectionThreshold", 60000);
-    }
-    
-    /**
-     * Checks if JMX monitoring is enabled for the payment database connection pool.
-     * 
-     * @return true if JMX monitoring is enabled, false otherwise
-     */
-    public boolean isJmxMonitoringEnabled() {
-        return configSource.getPaymentConfigBoolean("database.connectionPool.registerMbeans", true);
+    public Map<String, Boolean> getPaymentFeatureFlags() {
+        return configSource.getPaymentFeatureFlags();
     }
 }

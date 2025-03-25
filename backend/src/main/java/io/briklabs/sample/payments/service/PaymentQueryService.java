@@ -1,5 +1,8 @@
 package io.briklabs.sample.payments.service;
 
+import java.util.List;
+import java.util.UUID;
+
 import io.briklabs.sample.payments.data.query.AmountRangeFilter;
 import io.briklabs.sample.payments.data.query.DateRangeFilter;
 import io.briklabs.sample.payments.data.query.PaginationParams;
@@ -8,154 +11,172 @@ import io.briklabs.sample.payments.data.query.SortCriteria;
 import io.briklabs.sample.payments.data.query.StatusFilter;
 import io.briklabs.sample.payments.model.PaymentTransaction;
 
-import java.util.List;
-import java.util.UUID;
-import java.util.Optional;
-
 /**
  * Service interface for complex payment data querying operations.
- * Provides methods for filtering, sorting, and paginating payment transactions
- * to support reporting and data analysis requirements.
+ * <p>
+ * This service provides methods for advanced query capabilities including filtering,
+ * sorting, and pagination of payment transactions. It supports complex filtering scenarios
+ * with multiple criteria, dynamic sorting, and efficient pagination for large result sets.
+ * </p>
+ * <p>
+ * The interface is designed to support the requirements for payment transaction listing,
+ * reporting, and data analysis while abstracting the underlying data access implementation.
+ * </p>
  */
 public interface PaymentQueryService {
 
     /**
-     * Retrieves payment transactions based on comprehensive filter parameters.
-     * Supports complex filtering by multiple criteria including date ranges,
-     * amount ranges, status values, and merchant identifiers.
+     * Retrieves payment transactions using a comprehensive filter parameter object.
+     * <p>
+     * This method provides a unified approach to querying payment transactions with
+     * support for multiple filter criteria, sorting options, and pagination parameters.
+     * </p>
      *
-     * @param organizationId The organization ID to filter transactions by
-     * @param accountId The account ID to filter transactions by, or null for all accounts
-     * @param filterParams Complete set of filter parameters for the query
+     * @param filterParams The filter parameters containing all query criteria
      * @return List of payment transactions matching the filter criteria
      */
-    List<PaymentTransaction> findTransactions(UUID organizationId, UUID accountId, PaymentFilterParams filterParams);
-
+    List<PaymentTransaction> findTransactions(PaymentFilterParams filterParams);
+    
     /**
-     * Retrieves payment transactions with pagination support.
-     * Returns a subset of transactions based on the provided pagination parameters.
+     * Retrieves payment transactions for a specific organization.
+     * <p>
+     * This method filters transactions by organization ID with optional additional
+     * filter criteria, sorting, and pagination.
+     * </p>
      *
-     * @param organizationId The organization ID to filter transactions by
-     * @param accountId The account ID to filter transactions by, or null for all accounts
-     * @param filterParams Filter parameters for the query
-     * @param paginationParams Pagination parameters (limit, offset)
-     * @return Paginated list of payment transactions
+     * @param organizationId The organization ID to filter by
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions for the specified organization
      */
-    List<PaymentTransaction> findTransactionsPaginated(UUID organizationId, UUID accountId, 
-                                                      PaymentFilterParams filterParams,
-                                                      PaginationParams paginationParams);
-
+    List<PaymentTransaction> findTransactionsByOrganization(UUID organizationId, PaymentFilterParams filterParams);
+    
     /**
-     * Counts the total number of transactions matching the provided filter criteria.
-     * Used for pagination metadata and reporting.
+     * Retrieves payment transactions for a specific account within an organization.
+     * <p>
+     * This method filters transactions by organization ID and account ID with optional
+     * additional filter criteria, sorting, and pagination.
+     * </p>
      *
-     * @param organizationId The organization ID to filter transactions by
-     * @param accountId The account ID to filter transactions by, or null for all accounts
-     * @param filterParams Filter parameters for the query
-     * @return Total count of matching transactions
+     * @param organizationId The organization ID to filter by
+     * @param accountId The account ID to filter by
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions for the specified account
      */
-    long countTransactions(UUID organizationId, UUID accountId, PaymentFilterParams filterParams);
-
+    List<PaymentTransaction> findTransactionsByAccount(UUID organizationId, UUID accountId, PaymentFilterParams filterParams);
+    
     /**
-     * Retrieves payment transactions filtered by date range.
-     * Allows filtering transactions based on creation date, update date, or processing date.
+     * Retrieves payment transactions by status.
+     * <p>
+     * This method filters transactions by status with optional additional filter criteria,
+     * sorting, and pagination.
+     * </p>
      *
-     * @param organizationId The organization ID to filter transactions by
-     * @param accountId The account ID to filter transactions by, or null for all accounts
-     * @param dateRangeFilter Date range filter parameters
-     * @param paginationParams Optional pagination parameters
+     * @param statusFilter The status filter criteria
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions matching the status criteria
+     */
+    List<PaymentTransaction> findTransactionsByStatus(StatusFilter statusFilter, PaymentFilterParams filterParams);
+    
+    /**
+     * Retrieves payment transactions within a date range.
+     * <p>
+     * This method filters transactions by creation date range with optional additional
+     * filter criteria, sorting, and pagination.
+     * </p>
+     *
+     * @param dateRange The date range filter criteria
+     * @param filterParams Additional filter parameters (optional)
      * @return List of payment transactions within the specified date range
      */
-    List<PaymentTransaction> findTransactionsByDateRange(UUID organizationId, UUID accountId,
-                                                        DateRangeFilter dateRangeFilter,
-                                                        Optional<PaginationParams> paginationParams);
-
+    List<PaymentTransaction> findTransactionsByDateRange(DateRangeFilter dateRange, PaymentFilterParams filterParams);
+    
     /**
-     * Retrieves payment transactions filtered by amount range.
-     * Supports filtering by transaction amount with optional currency conversion.
+     * Retrieves payment transactions within an amount range.
+     * <p>
+     * This method filters transactions by amount range with optional additional filter
+     * criteria, sorting, and pagination.
+     * </p>
      *
-     * @param organizationId The organization ID to filter transactions by
-     * @param accountId The account ID to filter transactions by, or null for all accounts
-     * @param amountRangeFilter Amount range filter parameters
-     * @param paginationParams Optional pagination parameters
+     * @param amountRange The amount range filter criteria
+     * @param filterParams Additional filter parameters (optional)
      * @return List of payment transactions within the specified amount range
      */
-    List<PaymentTransaction> findTransactionsByAmountRange(UUID organizationId, UUID accountId,
-                                                          AmountRangeFilter amountRangeFilter,
-                                                          Optional<PaginationParams> paginationParams);
-
-    /**
-     * Retrieves payment transactions filtered by status.
-     * Supports filtering by multiple status values or status groups.
-     *
-     * @param organizationId The organization ID to filter transactions by
-     * @param accountId The account ID to filter transactions by, or null for all accounts
-     * @param statusFilter Status filter parameters
-     * @param paginationParams Optional pagination parameters
-     * @return List of payment transactions with the specified status(es)
-     */
-    List<PaymentTransaction> findTransactionsByStatus(UUID organizationId, UUID accountId,
-                                                     StatusFilter statusFilter,
-                                                     Optional<PaginationParams> paginationParams);
-
+    List<PaymentTransaction> findTransactionsByAmountRange(AmountRangeFilter amountRange, PaymentFilterParams filterParams);
+    
     /**
      * Retrieves payment transactions for a specific merchant.
-     * Filters transactions by merchant identifier with optional additional filtering.
+     * <p>
+     * This method filters transactions by merchant ID with optional additional filter
+     * criteria, sorting, and pagination.
+     * </p>
      *
-     * @param organizationId The organization ID to filter transactions by
-     * @param accountId The account ID to filter transactions by, or null for all accounts
-     * @param merchantId The merchant identifier to filter by
-     * @param filterParams Additional filter parameters
-     * @param paginationParams Optional pagination parameters
+     * @param merchantId The merchant ID to filter by
+     * @param filterParams Additional filter parameters (optional)
      * @return List of payment transactions for the specified merchant
      */
-    List<PaymentTransaction> findTransactionsByMerchant(UUID organizationId, UUID accountId,
-                                                       String merchantId,
-                                                       Optional<PaymentFilterParams> filterParams,
-                                                       Optional<PaginationParams> paginationParams);
-
+    List<PaymentTransaction> findTransactionsByMerchant(String merchantId, PaymentFilterParams filterParams);
+    
     /**
-     * Retrieves payment transactions sorted by specified criteria.
-     * Supports sorting by multiple fields with direction control.
+     * Retrieves payment transactions with a specific payment type.
+     * <p>
+     * This method filters transactions by payment type with optional additional filter
+     * criteria, sorting, and pagination.
+     * </p>
      *
-     * @param organizationId The organization ID to filter transactions by
-     * @param accountId The account ID to filter transactions by, or null for all accounts
-     * @param filterParams Filter parameters for the query
-     * @param sortCriteria Sorting criteria (fields and directions)
-     * @param paginationParams Optional pagination parameters
-     * @return Sorted list of payment transactions
+     * @param paymentType The payment type to filter by
+     * @param filterParams Additional filter parameters (optional)
+     * @return List of payment transactions with the specified payment type
      */
-    List<PaymentTransaction> findTransactionsSorted(UUID organizationId, UUID accountId,
-                                                   PaymentFilterParams filterParams,
-                                                   List<SortCriteria> sortCriteria,
-                                                   Optional<PaginationParams> paginationParams);
-
+    List<PaymentTransaction> findTransactionsByPaymentType(String paymentType, PaymentFilterParams filterParams);
+    
     /**
-     * Validates query parameters for correctness and security.
-     * Ensures that filter parameters meet validation rules and are safe to use.
+     * Counts the total number of payment transactions matching the filter criteria.
+     * <p>
+     * This method provides an efficient way to get the total count without retrieving
+     * the actual transaction data, useful for pagination and reporting.
+     * </p>
      *
-     * @param filterParams Filter parameters to validate
-     * @return Validated and normalized filter parameters
-     * @throws IllegalArgumentException if parameters fail validation
+     * @param filterParams The filter parameters containing query criteria
+     * @return The total count of matching transactions
      */
-    PaymentFilterParams validateAndNormalizeFilterParams(PaymentFilterParams filterParams);
-
+    long countTransactions(PaymentFilterParams filterParams);
+    
     /**
-     * Validates pagination parameters and applies defaults if needed.
-     * Ensures that pagination parameters are within allowed ranges.
+     * Applies sorting to a payment transaction query.
+     * <p>
+     * This method provides a way to sort payment transactions by various criteria
+     * with support for multiple sort fields and directions.
+     * </p>
      *
-     * @param paginationParams Pagination parameters to validate
-     * @return Validated pagination parameters with defaults applied if needed
+     * @param transactions The list of transactions to sort
+     * @param sortCriteria The sorting criteria to apply
+     * @return The sorted list of transactions
      */
-    PaginationParams validateAndNormalizePaginationParams(PaginationParams paginationParams);
-
+    List<PaymentTransaction> sortTransactions(List<PaymentTransaction> transactions, SortCriteria sortCriteria);
+    
     /**
-     * Validates sort criteria against allowed fields and applies defaults if needed.
-     * Ensures that sort fields are valid and secure to use in queries.
+     * Applies pagination to a payment transaction query result.
+     * <p>
+     * This method provides a way to paginate large result sets with support for
+     * offset-based pagination.
+     * </p>
      *
-     * @param sortCriteria Sort criteria to validate
-     * @return Validated sort criteria with defaults applied if needed
-     * @throws IllegalArgumentException if sort fields are invalid
+     * @param transactions The list of transactions to paginate
+     * @param paginationParams The pagination parameters to apply
+     * @return The paginated list of transactions
      */
-    List<SortCriteria> validateAndNormalizeSortCriteria(List<SortCriteria> sortCriteria);
+    List<PaymentTransaction> paginateTransactions(List<PaymentTransaction> transactions, PaginationParams paginationParams);
+    
+    /**
+     * Validates and normalizes query parameters for payment transaction queries.
+     * <p>
+     * This method ensures that filter parameters are valid and properly formatted
+     * before executing queries, preventing invalid query conditions.
+     * </p>
+     *
+     * @param filterParams The filter parameters to validate
+     * @return The validated and normalized filter parameters
+     * @throws IllegalArgumentException if the filter parameters are invalid
+     */
+    PaymentFilterParams validateQueryParameters(PaymentFilterParams filterParams);
 }

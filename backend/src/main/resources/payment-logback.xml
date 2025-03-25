@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- Status listener to suppress internal logback messages -->
+    <statusListener class="ch.qos.logback.core.status.NopStatusListener" />
+
+    <!-- Make JUL logging redirect to SLF4J -->
+    <contextListener class="ch.qos.logback.classic.jul.LevelChangePropagator">
+        <resetJUL>true</resetJUL>
+    </contextListener>
+
+    <!-- Include Logstash encoder for JSON formatting -->
+    <appender name="PAYMENT_JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <!-- Include MDC context in JSON output -->
+            <includeContext>true</includeContext>
+            
+            <!-- Add application identifier to all logs -->
+            <customFields>{"application":"payment-service","component":"payment-processor"}</customFields>
+            
+            <!-- Include standard payment transaction context fields -->
+            <includeMdcKeyName>transaction_id</includeMdcKeyName>
+            <includeMdcKeyName>merchant_id</includeMdcKeyName>
+            <includeMdcKeyName>organization_id</includeMdcKeyName>
+            <includeMdcKeyName>account_id</includeMdcKeyName>
+            <includeMdcKeyName>payment_status</includeMdcKeyName>
+            <includeMdcKeyName>previous_status</includeMdcKeyName>
+            <includeMdcKeyName>new_status</includeMdcKeyName>
+            <includeMdcKeyName>amount</includeMdcKeyName>
+            <includeMdcKeyName>currency</includeMdcKeyName>
+            <includeMdcKeyName>payment_type</includeMdcKeyName>
+            <includeMdcKeyName>processing_stage</includeMdcKeyName>
+            <includeMdcKeyName>correlation_id</includeMdcKeyName>
+            <includeMdcKeyName>execution_time_ms</includeMdcKeyName>
+            <includeMdcKeyName>error_code</includeMdcKeyName>
+            
+            <!-- Standardize timestamp format -->
+            <timestampPattern>yyyy-MM-dd'T'HH:mm:ss.SSSZZ</timestampPattern>
+            
+            <!-- Include exception details for error logs -->
+            <includeException>true</includeException>
+            <stackTraceFieldName>exception_stacktrace</stackTraceFieldName>
+        </encoder>
+    </appender>
+
+    <!-- Standard console appender for human-readable logs -->
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%date{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Payment transaction processing logger -->
+    <logger name="io.briklabs.sample.payments.service" level="${log.payment.service.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+
+    <!-- Payment data access layer logger -->
+    <logger name="io.briklabs.sample.payments.data" level="${log.payment.data.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+
+    <!-- Payment REST API logger -->
+    <logger name="io.briklabs.sample.payments.rest" level="${log.payment.rest.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+
+    <!-- Payment model logger -->
+    <logger name="io.briklabs.sample.payments.model" level="${log.payment.model.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+
+    <!-- Root logger for all payment components -->
+    <logger name="io.briklabs.sample.payments" level="${log.payment.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+
+    <!-- HikariCP connection pool logging -->
+    <logger name="com.zaxxer.hikari" level="${log.hikari.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+    
+    <logger name="com.zaxxer.hikari.pool.HikariPool" level="${log.hikari.pool.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+    
+    <logger name="com.zaxxer.hikari.pool.PoolBase" level="${log.hikari.pool.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+    
+    <logger name="com.zaxxer.hikari.HikariConfig" level="${log.hikari.config.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+    
+    <logger name="com.zaxxer.hikari.pool.ProxyConnection" level="${log.hikari.connection.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+
+    <!-- SQL query logging for payment operations -->
+    <logger name="io.briklabs.sample.payments.data.query" level="${log.payment.query.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+
+    <!-- Payment exception handling logger -->
+    <logger name="io.briklabs.sample.payments.data.exception" level="${log.payment.exception.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+
+    <!-- Payment DAO implementation logger -->
+    <logger name="io.briklabs.sample.payments.data.dao.impl" level="${log.payment.dao.level:-INFO}" additivity="false">
+        <appender-ref ref="PAYMENT_JSON" />
+    </logger>
+
+    <!-- Root logger configuration -->
+    <root level="${log.root.level:-INFO}">
+        <appender-ref ref="STDOUT" />
+    </root>
+</configuration>

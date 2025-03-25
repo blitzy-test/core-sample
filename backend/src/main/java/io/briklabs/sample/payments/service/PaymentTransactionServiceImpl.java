@@ -1,637 +1,721 @@
 package io.briklabs.sample.payments.service;
 
+import io.briklabs.sample.payments.data.dao.PaymentDAO;
+import io.briklabs.sample.payments.data.dao.PaymentDAOFactory;
+import io.briklabs.sample.payments.data.dao.PaymentTransactionDAO;
+import io.briklabs.sample.payments.data.exception.ConnectionException;
+import io.briklabs.sample.payments.data.exception.QueryExecutionException;
+import io.briklabs.sample.payments.data.exception.ResourceNotFoundException;
+import io.briklabs.sample.payments.data.exception.TransactionException;
+import io.briklabs.sample.payments.data.exception.ValidationException;
+import io.briklabs.sample.payments.data.query.AmountRangeFilter;
+import io.briklabs.sample.payments.data.query.DateRangeFilter;
+import io.briklabs.sample.payments.data.query.PaymentFilterParams;
+import io.briklabs.sample.payments.data.query.StatusFilter;
+import io.briklabs.sample.payments.model.PaymentEvent;
 import io.briklabs.sample.payments.model.PaymentStatus;
 import io.briklabs.sample.payments.model.PaymentTransaction;
+import io.briklabs.sample.payments.model.PaymentTransaction.PaymentStatus;
 import io.briklabs.sample.payments.model.PaymentType;
-import io.briklabs.sample.payments.data.query.PaymentFilterParams;
-import io.briklabs.sample.payments.data.dao.PaymentTransactionDAO;
-import io.briklabs.sample.payments.data.dao.PaymentEventDAO;
-import io.briklabs.sample.payments.data.dao.PaymentDAOFactory;
-import io.briklabs.sample.payments.data.exception.ResourceNotFoundException;
-import io.briklabs.sample.payments.data.exception.ValidationException;
-import io.briklabs.sample.payments.data.exception.ConcurrencyException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
-import java.util.Objects;
-import java.util.Currency;
 
 /**
- * Implementation of the PaymentTransactionService interface that handles
- * core payment transaction operations. This class contains the business logic
- * for creating, processing, and retrieving payment transactions.
+ * Implementation of the PaymentTransactionService interface that handles core payment transaction operations.
+ * This class contains the business logic for creating, processing, and retrieving payment transactions,
+ * integrating with the data access layer for persistence and the event service for lifecycle tracking.
  */
 public class PaymentTransactionServiceImpl implements PaymentTransactionService {
 
     private static final Logger logger = LoggerFactory.getLogger(PaymentTransactionServiceImpl.class);
     
     private final PaymentTransactionDAO transactionDAO;
-    private final PaymentEventDAO eventDAO;
+    private final PaymentEventService eventService;
     private final PaymentValidationService validationService;
     private final PaymentLifecycleService lifecycleService;
     
     /**
-     * Constructs a new PaymentTransactionServiceImpl with the required dependencies.
-     * 
-     * @param daoFactory The factory for creating data access objects
-     * @param validationService The service for validating payment data
-     * @param lifecycleService The service for managing payment lifecycle
+     * Creates a new PaymentTransactionServiceImpl with the required dependencies.
+     *
+     * @param daoFactory Factory for creating data access objects
+     * @param eventService Service for tracking payment events
+     * @param validationService Service for validating payment operations
+     * @param lifecycleService Service for managing payment lifecycle
      */
     public PaymentTransactionServiceImpl(
             PaymentDAOFactory daoFactory,
+            PaymentEventService eventService,
             PaymentValidationService validationService,
             PaymentLifecycleService lifecycleService) {
         this.transactionDAO = daoFactory.getPaymentTransactionDAO();
-        this.eventDAO = daoFactory.getPaymentEventDAO();
+        this.eventService = eventService;
         this.validationService = validationService;
         this.lifecycleService = lifecycleService;
-        
-        logger.info("PaymentTransactionService initialized with HikariCP connection pool");
     }
-    
+
     @Override
-    public PaymentTransaction createTransaction(
-            UUID organizationId,
-            UUID accountId,
-            BigDecimal amount,
-            String currency,
-            String merchantId,
-            PaymentType paymentType,
-            String description,
-            String transactionReference) {
-        
-        logger.debug("Creating new payment transaction for organization: {}, account: {}, amount: {} {}", 
-                organizationId, accountId, amount, currency);
+    public PaymentTransaction createTransaction(UUID organizationId, UUID accountId, 
+                                              BigDecimal amount, String currency,
+                                              String merchantId, String paymentType,
+                                              Map<String, Object> paymentData,
+                                              String description, String reference) {
+        logger.debug("Creating new payment transaction for organization: {}, account: {}", 
+                organizationId, accountId);
         
         // Validate input parameters
-        validateCreateTransactionParams(organizationId, accountId, amount, currency, merchantId, paymentType);
+        if (organizationId == null || accountId == null) {
+            throw new IllegalArgumentException("Organization ID and Account ID are required");
+        }
         
-        // Create new transaction with CREATED status
-        PaymentTransaction transaction = new PaymentTransaction();
-        transaction.setTransactionId(UUID.randomUUID());
-        transaction.setOrganizationId(organizationId);
-        transaction.setAccountId(accountId);
-        transaction.setAmount(amount);
-        transaction.setCurrency(currency);
-        transaction.setMerchantId(merchantId);
-        transaction.setPaymentType(paymentType);
-        transaction.setStatus(PaymentStatus.CREATED);
+        validationService.validateOrganizationAccess(organizationId);
+        validationService.validateAccountAccess(organizationId, accountId);
+        validationService.validateMerchantId(organizationId, merchantId);
+        validationService.validateAmount(amount, currency);
+        validationService.validateCurrency(currency);
+        
+        // Create transaction object
+        UUID transactionId = UUID.randomUUID();
+        PaymentTransaction transaction = new PaymentTransaction(
+                transactionId, 
+                organizationId, 
+                accountId, 
+                PaymentStatus.PENDING, 
+                amount, 
+                currency, 
+                merchantId, 
+                paymentType
+        );
+        
+        // Set optional fields
         transaction.setDescription(description);
-        transaction.setTransactionReference(transactionReference);
-        transaction.setCreatedAt(Instant.now());
-        transaction.setUpdatedAt(Instant.now());
+        transaction.setTransactionReference(reference);
         
-        // Validate the transaction
-        validationService.validateTransaction(transaction);
-        
-        // Persist the transaction
-        PaymentTransaction createdTransaction = transactionDAO.create(transaction);
-        
-        // Record creation event
-        eventDAO.recordTransactionEvent(
-                createdTransaction.getTransactionId(),
-                "TRANSACTION_CREATED",
-                null,
-                PaymentStatus.CREATED,
-                "Transaction created",
-                null);
-        
-        logger.info("Created payment transaction with ID: {}", createdTransaction.getTransactionId());
-        
-        return createdTransaction;
+        try {
+            // Persist the transaction
+            PaymentTransaction createdTransaction = transactionDAO.create(transaction);
+            
+            // Record creation event
+            String userId = getCurrentUserId();
+            eventService.recordTransactionCreatedEvent(createdTransaction, userId);
+            
+            logger.info("Created new payment transaction with ID: {}", transactionId);
+            return createdTransaction;
+        } catch (ConnectionException | QueryExecutionException | TransactionException e) {
+            logger.error("Failed to create payment transaction", e);
+            throw new RuntimeException("Failed to create payment transaction", e);
+        }
     }
-    
+
     @Override
-    public PaymentTransaction getTransactionById(UUID transactionId) {
-        logger.debug("Retrieving transaction by ID: {}", transactionId);
+    public Optional<PaymentTransaction> getTransactionById(UUID transactionId) {
+        logger.debug("Retrieving payment transaction with ID: {}", transactionId);
         
         if (transactionId == null) {
             throw new IllegalArgumentException("Transaction ID cannot be null");
         }
         
-        PaymentTransaction transaction = transactionDAO.findById(transactionId);
-        
-        if (transaction == null) {
-            logger.warn("Transaction not found with ID: {}", transactionId);
-            throw new ResourceNotFoundException("Transaction not found", "transaction_id", transactionId.toString());
+        try {
+            return transactionDAO.findById(transactionId);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve payment transaction with ID: {}", transactionId, e);
+            throw new RuntimeException("Failed to retrieve payment transaction", e);
         }
-        
-        return transaction;
     }
-    
+
     @Override
-    public List<PaymentTransaction> getTransactionsByOrganization(
-            UUID organizationId,
-            int limit,
-            int offset) {
-        
-        logger.debug("Retrieving transactions for organization: {}, limit: {}, offset: {}", 
-                organizationId, limit, offset);
+    public List<PaymentTransaction> getTransactionsByOrganization(UUID organizationId, int offset, int limit) {
+        logger.debug("Retrieving payment transactions for organization: {}", organizationId);
         
         if (organizationId == null) {
             throw new IllegalArgumentException("Organization ID cannot be null");
         }
         
-        return transactionDAO.findByOrganization(organizationId, limit, offset);
-    }
-    
-    @Override
-    public List<PaymentTransaction> getTransactionsByAccount(
-            UUID organizationId,
-            UUID accountId,
-            int limit,
-            int offset) {
+        validationService.validateOrganizationAccess(organizationId);
         
-        logger.debug("Retrieving transactions for organization: {}, account: {}, limit: {}, offset: {}", 
-                organizationId, accountId, limit, offset);
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            filterParams.setOffset(offset);
+            filterParams.setLimit(limit);
+            
+            return transactionDAO.findByOrganizationId(organizationId, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve payment transactions for organization: {}", organizationId, e);
+            throw new RuntimeException("Failed to retrieve payment transactions", e);
+        }
+    }
+
+    @Override
+    public List<PaymentTransaction> getTransactionsByAccount(UUID organizationId, UUID accountId, int offset, int limit) {
+        logger.debug("Retrieving payment transactions for organization: {}, account: {}", 
+                organizationId, accountId);
         
         if (organizationId == null || accountId == null) {
             throw new IllegalArgumentException("Organization ID and Account ID cannot be null");
         }
         
-        return transactionDAO.findByAccount(organizationId, accountId, limit, offset);
-    }
-    
-    @Override
-    public List<PaymentTransaction> getTransactionsByStatus(
-            UUID organizationId,
-            UUID accountId,
-            PaymentStatus status,
-            int limit,
-            int offset) {
+        validationService.validateOrganizationAccess(organizationId);
+        validationService.validateAccountAccess(organizationId, accountId);
         
-        logger.debug("Retrieving transactions for organization: {}, account: {}, status: {}, limit: {}, offset: {}", 
-                organizationId, accountId, status, limit, offset);
-        
-        if (organizationId == null || status == null) {
-            throw new IllegalArgumentException("Organization ID and Status cannot be null");
-        }
-        
-        return transactionDAO.findByStatus(organizationId, accountId, status, limit, offset);
-    }
-    
-    @Override
-    public List<PaymentTransaction> getTransactionsByDateRange(
-            UUID organizationId,
-            UUID accountId,
-            Instant startDate,
-            Instant endDate,
-            int limit,
-            int offset) {
-        
-        logger.debug("Retrieving transactions for organization: {}, account: {}, date range: {} to {}, limit: {}, offset: {}", 
-                organizationId, accountId, startDate, endDate, limit, offset);
-        
-        if (organizationId == null || startDate == null || endDate == null) {
-            throw new IllegalArgumentException("Organization ID, Start Date, and End Date cannot be null");
-        }
-        
-        if (startDate.isAfter(endDate)) {
-            throw new IllegalArgumentException("Start date must be before or equal to end date");
-        }
-        
-        return transactionDAO.findByDateRange(organizationId, accountId, startDate, endDate, limit, offset);
-    }
-    
-    @Override
-    public List<PaymentTransaction> getTransactionsByAmountRange(
-            UUID organizationId,
-            UUID accountId,
-            BigDecimal minAmount,
-            BigDecimal maxAmount,
-            String currency,
-            int limit,
-            int offset) {
-        
-        logger.debug("Retrieving transactions for organization: {}, account: {}, amount range: {} to {} {}, limit: {}, offset: {}", 
-                organizationId, accountId, minAmount, maxAmount, currency, limit, offset);
-        
-        if (organizationId == null || minAmount == null || maxAmount == null || currency == null) {
-            throw new IllegalArgumentException("Organization ID, Min Amount, Max Amount, and Currency cannot be null");
-        }
-        
-        if (minAmount.compareTo(BigDecimal.ZERO) < 0 || maxAmount.compareTo(BigDecimal.ZERO) < 0) {
-            throw new IllegalArgumentException("Amount values cannot be negative");
-        }
-        
-        if (minAmount.compareTo(maxAmount) > 0) {
-            throw new IllegalArgumentException("Minimum amount must be less than or equal to maximum amount");
-        }
-        
-        // Validate currency code
         try {
-            Currency.getInstance(currency);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException("Invalid currency code: " + currency);
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            filterParams.setOffset(offset);
+            filterParams.setLimit(limit);
+            
+            return transactionDAO.findByOrganizationIdAndAccountId(organizationId, accountId, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve payment transactions for account: {}", accountId, e);
+            throw new RuntimeException("Failed to retrieve payment transactions", e);
         }
-        
-        return transactionDAO.findByAmountRange(organizationId, accountId, minAmount, maxAmount, currency, limit, offset);
     }
-    
+
     @Override
-    public List<PaymentTransaction> getTransactionsByMerchant(
-            UUID organizationId,
-            UUID accountId,
-            String merchantId,
-            int limit,
-            int offset) {
+    public List<PaymentTransaction> getTransactionsByStatus(PaymentStatus status, int offset, int limit) {
+        logger.debug("Retrieving payment transactions with status: {}", status);
         
-        logger.debug("Retrieving transactions for organization: {}, account: {}, merchant: {}, limit: {}, offset: {}", 
-                organizationId, accountId, merchantId, limit, offset);
-        
-        if (organizationId == null || merchantId == null || merchantId.trim().isEmpty()) {
-            throw new IllegalArgumentException("Organization ID and Merchant ID cannot be null or empty");
+        if (status == null) {
+            throw new IllegalArgumentException("Status cannot be null");
         }
         
-        return transactionDAO.findByMerchant(organizationId, accountId, merchantId, limit, offset);
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            filterParams.setOffset(offset);
+            filterParams.setLimit(limit);
+            
+            return transactionDAO.findByStatus(status, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve payment transactions with status: {}", status, e);
+            throw new RuntimeException("Failed to retrieve payment transactions", e);
+        }
     }
-    
-    @Override
-    public List<PaymentTransaction> queryTransactions(PaymentFilterParams filterParams) {
-        logger.debug("Querying transactions with filter params: {}", filterParams);
-        
-        if (filterParams == null) {
-            throw new IllegalArgumentException("Filter parameters cannot be null");
-        }
-        
-        // Validate filter parameters
-        validationService.validateFilterParams(filterParams);
-        
-        return transactionDAO.findByFilterParams(filterParams);
-    }
-    
-    @Override
-    public long countTransactions(PaymentFilterParams filterParams) {
-        logger.debug("Counting transactions with filter params: {}", filterParams);
-        
-        if (filterParams == null) {
-            throw new IllegalArgumentException("Filter parameters cannot be null");
-        }
-        
-        // Validate filter parameters
-        validationService.validateFilterParams(filterParams);
-        
-        return transactionDAO.countByFilterParams(filterParams);
-    }
-    
-    @Override
-    public PaymentTransaction updateTransactionStatus(UUID transactionId, PaymentStatus newStatus) {
-        logger.debug("Updating transaction status: {} -> {}", transactionId, newStatus);
-        
-        if (transactionId == null || newStatus == null) {
-            throw new IllegalArgumentException("Transaction ID and new status cannot be null");
-        }
-        
-        // Get current transaction
-        PaymentTransaction transaction = getTransactionById(transactionId);
-        PaymentStatus currentStatus = transaction.getStatus();
-        
-        // Validate status transition
-        if (!lifecycleService.isValidTransition(currentStatus, newStatus)) {
-            throw new IllegalStateException(
-                    String.format("Invalid status transition from %s to %s", currentStatus, newStatus));
-        }
-        
-        // Update status
-        transaction.setStatus(newStatus);
-        transaction.setUpdatedAt(Instant.now());
-        
-        // Persist updated transaction
-        PaymentTransaction updatedTransaction = transactionDAO.update(transaction);
-        
-        // Record status change event
-        eventDAO.recordTransactionEvent(
-                transactionId,
-                "STATUS_CHANGED",
-                currentStatus,
-                newStatus,
-                String.format("Status changed from %s to %s", currentStatus, newStatus),
-                null);
-        
-        logger.info("Updated transaction status: {} from {} to {}", 
-                transactionId, currentStatus, newStatus);
-        
-        return updatedTransaction;
-    }
-    
+
     @Override
     public PaymentTransaction processTransaction(UUID transactionId) {
-        logger.debug("Processing transaction: {}", transactionId);
-        
-        PaymentTransaction transaction = getTransactionById(transactionId);
-        
-        if (transaction.getStatus() != PaymentStatus.CREATED) {
-            throw new IllegalStateException(
-                    String.format("Cannot process transaction in %s state", transaction.getStatus()));
-        }
-        
-        // Update to PROCESSING status
-        return updateTransactionStatus(transactionId, PaymentStatus.PROCESSING);
-    }
-    
-    @Override
-    public PaymentTransaction authorizeTransaction(UUID transactionId) {
-        logger.debug("Authorizing transaction: {}", transactionId);
-        
-        PaymentTransaction transaction = getTransactionById(transactionId);
-        
-        if (transaction.getStatus() != PaymentStatus.PROCESSING) {
-            throw new IllegalStateException(
-                    String.format("Cannot authorize transaction in %s state", transaction.getStatus()));
-        }
-        
-        // Update to AUTHORIZED status
-        return updateTransactionStatus(transactionId, PaymentStatus.AUTHORIZED);
-    }
-    
-    @Override
-    public PaymentTransaction captureTransaction(UUID transactionId) {
-        logger.debug("Capturing transaction: {}", transactionId);
-        
-        PaymentTransaction transaction = getTransactionById(transactionId);
-        
-        if (transaction.getStatus() != PaymentStatus.AUTHORIZED) {
-            throw new IllegalStateException(
-                    String.format("Cannot capture transaction in %s state", transaction.getStatus()));
-        }
-        
-        // Update to CAPTURED status
-        return updateTransactionStatus(transactionId, PaymentStatus.CAPTURED);
-    }
-    
-    @Override
-    public PaymentTransaction capturePartialTransaction(UUID transactionId, BigDecimal amount) {
-        logger.debug("Capturing partial transaction: {} with amount: {}", transactionId, amount);
-        
-        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new IllegalArgumentException("Capture amount must be positive");
-        }
-        
-        PaymentTransaction transaction = getTransactionById(transactionId);
-        
-        if (transaction.getStatus() != PaymentStatus.AUTHORIZED) {
-            throw new IllegalStateException(
-                    String.format("Cannot capture transaction in %s state", transaction.getStatus()));
-        }
-        
-        if (amount.compareTo(transaction.getAmount()) > 0) {
-            throw new IllegalArgumentException(
-                    "Capture amount cannot exceed the authorized amount");
-        }
-        
-        // For partial captures, we need to track the captured amount
-        // This would typically involve additional data structures and logic
-        // For this implementation, we'll record the partial capture as an event
-        // and update the transaction status
-        
-        // Record partial capture event with amount information
-        eventDAO.recordTransactionEvent(
-                transactionId,
-                "PARTIAL_CAPTURE",
-                PaymentStatus.AUTHORIZED,
-                PaymentStatus.PARTIALLY_CAPTURED,
-                String.format("Partial capture of %s %s", amount, transaction.getCurrency()),
-                amount);
-        
-        // Update to PARTIALLY_CAPTURED status if it's a partial amount, otherwise CAPTURED
-        PaymentStatus newStatus = amount.compareTo(transaction.getAmount()) < 0 
-                ? PaymentStatus.PARTIALLY_CAPTURED 
-                : PaymentStatus.CAPTURED;
-        
-        return updateTransactionStatus(transactionId, newStatus);
-    }
-    
-    @Override
-    public PaymentTransaction refundTransaction(UUID transactionId) {
-        logger.debug("Refunding transaction: {}", transactionId);
-        
-        PaymentTransaction transaction = getTransactionById(transactionId);
-        
-        if (transaction.getStatus() != PaymentStatus.CAPTURED && 
-            transaction.getStatus() != PaymentStatus.PARTIALLY_CAPTURED) {
-            throw new IllegalStateException(
-                    String.format("Cannot refund transaction in %s state", transaction.getStatus()));
-        }
-        
-        // Update to REFUNDED status
-        return updateTransactionStatus(transactionId, PaymentStatus.REFUNDED);
-    }
-    
-    @Override
-    public PaymentTransaction refundPartialTransaction(UUID transactionId, BigDecimal amount) {
-        logger.debug("Refunding partial transaction: {} with amount: {}", transactionId, amount);
-        
-        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new IllegalArgumentException("Refund amount must be positive");
-        }
-        
-        PaymentTransaction transaction = getTransactionById(transactionId);
-        
-        if (transaction.getStatus() != PaymentStatus.CAPTURED && 
-            transaction.getStatus() != PaymentStatus.PARTIALLY_CAPTURED) {
-            throw new IllegalStateException(
-                    String.format("Cannot refund transaction in %s state", transaction.getStatus()));
-        }
-        
-        if (amount.compareTo(transaction.getAmount()) > 0) {
-            throw new IllegalArgumentException(
-                    "Refund amount cannot exceed the captured amount");
-        }
-        
-        // For partial refunds, we need to track the refunded amount
-        // This would typically involve additional data structures and logic
-        // For this implementation, we'll record the partial refund as an event
-        // and update the transaction status
-        
-        // Record partial refund event with amount information
-        eventDAO.recordTransactionEvent(
-                transactionId,
-                "PARTIAL_REFUND",
-                transaction.getStatus(),
-                PaymentStatus.PARTIALLY_REFUNDED,
-                String.format("Partial refund of %s %s", amount, transaction.getCurrency()),
-                amount);
-        
-        // Update to PARTIALLY_REFUNDED status if it's a partial amount, otherwise REFUNDED
-        PaymentStatus newStatus = amount.compareTo(transaction.getAmount()) < 0 
-                ? PaymentStatus.PARTIALLY_REFUNDED 
-                : PaymentStatus.REFUNDED;
-        
-        return updateTransactionStatus(transactionId, newStatus);
-    }
-    
-    @Override
-    public PaymentTransaction voidTransaction(UUID transactionId) {
-        logger.debug("Voiding transaction: {}", transactionId);
-        
-        PaymentTransaction transaction = getTransactionById(transactionId);
-        
-        if (transaction.getStatus() != PaymentStatus.AUTHORIZED) {
-            throw new IllegalStateException(
-                    String.format("Cannot void transaction in %s state", transaction.getStatus()));
-        }
-        
-        // Update to VOIDED status
-        return updateTransactionStatus(transactionId, PaymentStatus.VOIDED);
-    }
-    
-    @Override
-    public PaymentTransaction failTransaction(UUID transactionId, String errorReason) {
-        logger.debug("Marking transaction as failed: {} with reason: {}", transactionId, errorReason);
+        logger.debug("Processing payment transaction with ID: {}", transactionId);
         
         if (transactionId == null) {
             throw new IllegalArgumentException("Transaction ID cannot be null");
         }
         
-        // Get current transaction
-        PaymentTransaction transaction = getTransactionById(transactionId);
-        PaymentStatus currentStatus = transaction.getStatus();
-        
-        // Only allow failing transactions that are not in a final state
-        if (PaymentStatus.isFinalStatus(currentStatus)) {
-            throw new IllegalStateException(
-                    String.format("Cannot fail transaction in final state: %s", currentStatus));
-        }
-        
-        // Update to FAILED status
-        transaction.setStatus(PaymentStatus.FAILED);
-        transaction.setUpdatedAt(Instant.now());
-        
-        // Persist updated transaction
-        PaymentTransaction updatedTransaction = transactionDAO.update(transaction);
-        
-        // Record failure event
-        eventDAO.recordTransactionEvent(
-                transactionId,
-                "TRANSACTION_FAILED",
-                currentStatus,
-                PaymentStatus.FAILED,
-                errorReason != null ? errorReason : "Transaction failed",
-                null);
-        
-        logger.info("Marked transaction as failed: {} from {} to FAILED, reason: {}", 
-                transactionId, currentStatus, errorReason);
-        
-        return updatedTransaction;
-    }
-    
-    @Override
-    public void validateTransaction(PaymentTransaction transaction) {
-        logger.debug("Validating transaction: {}", transaction);
-        
-        if (transaction == null) {
-            throw new IllegalArgumentException("Transaction cannot be null");
-        }
-        
-        validationService.validateTransaction(transaction);
-    }
-    
-    @Override
-    public boolean canProcessTransaction(UUID transactionId) {
-        logger.debug("Checking if transaction can be processed: {}", transactionId);
-        
         try {
-            PaymentTransaction transaction = getTransactionById(transactionId);
-            return transaction.getStatus() == PaymentStatus.CREATED;
+            // Retrieve the transaction
+            PaymentTransaction transaction = transactionDAO.findById(transactionId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Transaction not found: " + transactionId));
+            
+            // Validate that the transaction can be processed
+            if (transaction.getStatus() != PaymentStatus.PENDING) {
+                throw new IllegalStateException("Transaction cannot be processed. Current status: " + transaction.getStatus());
+            }
+            
+            // Update status to PROCESSING
+            transaction.updateStatus(PaymentStatus.PROCESSING);
+            transaction = transactionDAO.update(transaction);
+            
+            // Record processing event
+            String userId = getCurrentUserId();
+            Map<String, String> metadata = new HashMap<>();
+            metadata.put("processor", "SYSTEM");
+            metadata.put("processingId", UUID.randomUUID().toString());
+            eventService.recordProcessingEvent(transaction, userId, metadata);
+            
+            // Simulate processing logic
+            // In a real implementation, this might involve calling a payment gateway
+            // or other external service to process the payment
+            
+            // For this implementation, we'll simulate a successful processing
+            // by updating the status to AUTHORIZED
+            transaction.updateStatus(PaymentStatus.AUTHORIZED);
+            transaction = transactionDAO.update(transaction);
+            
+            // Record status change event
+            eventService.recordStatusChangeEvent(transaction, PaymentStatus.AUTHORIZED, userId);
+            
+            logger.info("Successfully processed payment transaction with ID: {}", transactionId);
+            return transaction;
         } catch (ResourceNotFoundException e) {
-            return false;
+            logger.error("Transaction not found: {}", transactionId);
+            throw new IllegalArgumentException("Transaction not found", e);
+        } catch (ConnectionException | QueryExecutionException | TransactionException e) {
+            logger.error("Failed to process payment transaction: {}", transactionId, e);
+            throw new RuntimeException("Failed to process payment transaction", e);
         }
     }
-    
+
     @Override
-    public boolean canCaptureTransaction(UUID transactionId) {
-        logger.debug("Checking if transaction can be captured: {}", transactionId);
+    public PaymentTransaction captureTransaction(UUID transactionId, BigDecimal amount) {
+        logger.debug("Capturing payment transaction with ID: {}, amount: {}", transactionId, amount);
+        
+        if (transactionId == null) {
+            throw new IllegalArgumentException("Transaction ID cannot be null");
+        }
+        
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("Capture amount must be greater than zero");
+        }
         
         try {
-            PaymentTransaction transaction = getTransactionById(transactionId);
-            return transaction.getStatus() == PaymentStatus.AUTHORIZED;
+            // Retrieve the transaction
+            PaymentTransaction transaction = transactionDAO.findById(transactionId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Transaction not found: " + transactionId));
+            
+            // Validate that the transaction can be captured
+            validationService.validateCanCapture(transaction);
+            
+            // Validate the capture amount
+            validationService.validateCaptureAmount(transaction, amount);
+            
+            // Determine if this is a full or partial capture
+            boolean isFullCapture = amount.compareTo(transaction.getAmount()) == 0;
+            PaymentStatus newStatus = isFullCapture ? PaymentStatus.CAPTURED : PaymentStatus.PARTIALLY_CAPTURED;
+            
+            // Update the transaction status
+            transaction.updateStatus(newStatus);
+            transaction = transactionDAO.update(transaction);
+            
+            // Record capture event
+            String userId = getCurrentUserId();
+            eventService.recordCaptureEvent(transaction, userId, amount.toString(), !isFullCapture);
+            
+            logger.info("Successfully captured payment transaction with ID: {}, amount: {}", 
+                    transactionId, amount);
+            return transaction;
         } catch (ResourceNotFoundException e) {
-            return false;
+            logger.error("Transaction not found: {}", transactionId);
+            throw new IllegalArgumentException("Transaction not found", e);
+        } catch (ConnectionException | QueryExecutionException | TransactionException e) {
+            logger.error("Failed to capture payment transaction: {}", transactionId, e);
+            throw new RuntimeException("Failed to capture payment transaction", e);
         }
     }
-    
+
     @Override
-    public boolean canRefundTransaction(UUID transactionId) {
-        logger.debug("Checking if transaction can be refunded: {}", transactionId);
+    public PaymentTransaction refundTransaction(UUID transactionId, BigDecimal amount, String reason) {
+        logger.debug("Refunding payment transaction with ID: {}, amount: {}, reason: {}", 
+                transactionId, amount, reason);
+        
+        if (transactionId == null) {
+            throw new IllegalArgumentException("Transaction ID cannot be null");
+        }
+        
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("Refund amount must be greater than zero");
+        }
         
         try {
-            PaymentTransaction transaction = getTransactionById(transactionId);
-            return transaction.getStatus() == PaymentStatus.CAPTURED || 
-                   transaction.getStatus() == PaymentStatus.PARTIALLY_CAPTURED;
+            // Retrieve the transaction
+            PaymentTransaction transaction = transactionDAO.findById(transactionId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Transaction not found: " + transactionId));
+            
+            // Validate that the transaction can be refunded
+            validationService.validateCanRefund(transaction);
+            
+            // Validate the refund amount
+            validationService.validateRefundAmount(transaction, amount);
+            
+            // Determine if this is a full or partial refund
+            boolean isFullRefund = amount.compareTo(transaction.getAmount()) == 0;
+            PaymentStatus newStatus = isFullRefund ? PaymentStatus.REFUNDED : PaymentStatus.PARTIALLY_REFUNDED;
+            
+            // Update the transaction status
+            transaction.updateStatus(newStatus);
+            transaction = transactionDAO.update(transaction);
+            
+            // Record refund event
+            String userId = getCurrentUserId();
+            eventService.recordRefundEvent(transaction, userId, amount.toString(), reason, !isFullRefund);
+            
+            logger.info("Successfully refunded payment transaction with ID: {}, amount: {}", 
+                    transactionId, amount);
+            return transaction;
         } catch (ResourceNotFoundException e) {
-            return false;
+            logger.error("Transaction not found: {}", transactionId);
+            throw new IllegalArgumentException("Transaction not found", e);
+        } catch (ConnectionException | QueryExecutionException | TransactionException e) {
+            logger.error("Failed to refund payment transaction: {}", transactionId, e);
+            throw new RuntimeException("Failed to refund payment transaction", e);
         }
     }
-    
+
     @Override
-    public boolean canVoidTransaction(UUID transactionId) {
-        logger.debug("Checking if transaction can be voided: {}", transactionId);
+    public PaymentTransaction voidTransaction(UUID transactionId, String reason) {
+        logger.debug("Voiding payment transaction with ID: {}, reason: {}", transactionId, reason);
+        
+        if (transactionId == null) {
+            throw new IllegalArgumentException("Transaction ID cannot be null");
+        }
         
         try {
-            PaymentTransaction transaction = getTransactionById(transactionId);
-            return transaction.getStatus() == PaymentStatus.AUTHORIZED;
+            // Retrieve the transaction
+            PaymentTransaction transaction = transactionDAO.findById(transactionId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Transaction not found: " + transactionId));
+            
+            // Validate that the transaction can be voided
+            validationService.validateCanVoid(transaction);
+            
+            // Update the transaction status
+            transaction.updateStatus(PaymentStatus.VOIDED);
+            transaction = transactionDAO.update(transaction);
+            
+            // Record void event
+            String userId = getCurrentUserId();
+            eventService.recordVoidEvent(transaction, userId, reason);
+            
+            logger.info("Successfully voided payment transaction with ID: {}", transactionId);
+            return transaction;
         } catch (ResourceNotFoundException e) {
-            return false;
+            logger.error("Transaction not found: {}", transactionId);
+            throw new IllegalArgumentException("Transaction not found", e);
+        } catch (ConnectionException | QueryExecutionException | TransactionException e) {
+            logger.error("Failed to void payment transaction: {}", transactionId, e);
+            throw new RuntimeException("Failed to void payment transaction", e);
         }
     }
-    
-    /**
-     * Validates the parameters for creating a transaction.
-     * 
-     * @param organizationId The organization identifier
-     * @param accountId The account identifier
-     * @param amount The transaction amount
-     * @param currency The currency code
-     * @param merchantId The merchant identifier
-     * @param paymentType The payment method type
-     * @throws IllegalArgumentException if any parameters are invalid
-     */
-    private void validateCreateTransactionParams(
-            UUID organizationId,
-            UUID accountId,
-            BigDecimal amount,
-            String currency,
-            String merchantId,
-            PaymentType paymentType) {
+
+    @Override
+    public PaymentTransaction updateTransactionStatus(UUID transactionId, PaymentStatus newStatus) {
+        logger.debug("Updating status of payment transaction with ID: {} to {}", transactionId, newStatus);
         
-        if (organizationId == null) {
-            throw new IllegalArgumentException("Organization ID cannot be null");
+        if (transactionId == null || newStatus == null) {
+            throw new IllegalArgumentException("Transaction ID and new status cannot be null");
         }
         
-        if (accountId == null) {
-            throw new IllegalArgumentException("Account ID cannot be null");
-        }
-        
-        if (amount == null) {
-            throw new IllegalArgumentException("Amount cannot be null");
-        }
-        
-        if (amount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new IllegalArgumentException("Amount must be positive");
-        }
-        
-        if (currency == null || currency.trim().isEmpty()) {
-            throw new IllegalArgumentException("Currency cannot be null or empty");
-        }
-        
-        // Validate currency code
         try {
-            Currency.getInstance(currency);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException("Invalid currency code: " + currency);
+            // Retrieve the transaction
+            PaymentTransaction transaction = transactionDAO.findById(transactionId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Transaction not found: " + transactionId));
+            
+            // Validate the status transition
+            PaymentStatus currentStatus = transaction.getStatus();
+            validationService.validateStatusTransition(currentStatus, newStatus);
+            
+            // Update the transaction status
+            transaction.updateStatus(newStatus);
+            transaction = transactionDAO.update(transaction);
+            
+            // Record status change event
+            String userId = getCurrentUserId();
+            eventService.recordStatusChangeEvent(transaction, newStatus, userId);
+            
+            logger.info("Successfully updated status of payment transaction with ID: {} to {}", 
+                    transactionId, newStatus);
+            return transaction;
+        } catch (ResourceNotFoundException e) {
+            logger.error("Transaction not found: {}", transactionId);
+            throw new IllegalArgumentException("Transaction not found", e);
+        } catch (ConnectionException | QueryExecutionException | TransactionException e) {
+            logger.error("Failed to update status of payment transaction: {}", transactionId, e);
+            throw new RuntimeException("Failed to update payment transaction status", e);
         }
+    }
+
+    @Override
+    public List<PaymentTransaction> getTransactionsByDateRange(LocalDateTime startDate, LocalDateTime endDate, 
+                                                             int offset, int limit) {
+        logger.debug("Retrieving payment transactions between {} and {}", startDate, endDate);
+        
+        if (startDate == null || endDate == null) {
+            throw new IllegalArgumentException("Start date and end date cannot be null");
+        }
+        
+        if (startDate.isAfter(endDate)) {
+            throw new IllegalArgumentException("Start date cannot be after end date");
+        }
+        
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            filterParams.setOffset(offset);
+            filterParams.setLimit(limit);
+            
+            DateRangeFilter dateRange = new DateRangeFilter(
+                    startDate.atZone(ZoneId.systemDefault()).toInstant(),
+                    endDate.atZone(ZoneId.systemDefault()).toInstant()
+            );
+            
+            return transactionDAO.findByCreatedAtBetween(dateRange, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve payment transactions by date range", e);
+            throw new RuntimeException("Failed to retrieve payment transactions", e);
+        }
+    }
+
+    @Override
+    public List<PaymentTransaction> getTransactionsByAmountRange(BigDecimal minAmount, BigDecimal maxAmount, 
+                                                               String currency, int offset, int limit) {
+        logger.debug("Retrieving payment transactions with amount between {} and {} {}", 
+                minAmount, maxAmount, currency);
+        
+        if (minAmount == null || maxAmount == null) {
+            throw new IllegalArgumentException("Min amount and max amount cannot be null");
+        }
+        
+        if (minAmount.compareTo(BigDecimal.ZERO) < 0 || maxAmount.compareTo(BigDecimal.ZERO) < 0) {
+            throw new IllegalArgumentException("Amounts cannot be negative");
+        }
+        
+        if (minAmount.compareTo(maxAmount) > 0) {
+            throw new IllegalArgumentException("Min amount cannot be greater than max amount");
+        }
+        
+        if (currency != null) {
+            validationService.validateCurrency(currency);
+        }
+        
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            filterParams.setOffset(offset);
+            filterParams.setLimit(limit);
+            
+            AmountRangeFilter amountRange = new AmountRangeFilter(minAmount, maxAmount, currency);
+            
+            return transactionDAO.findByAmountBetween(amountRange, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve payment transactions by amount range", e);
+            throw new RuntimeException("Failed to retrieve payment transactions", e);
+        }
+    }
+
+    @Override
+    public List<PaymentTransaction> getTransactionsByMerchant(String merchantId, int offset, int limit) {
+        logger.debug("Retrieving payment transactions for merchant: {}", merchantId);
         
         if (merchantId == null || merchantId.trim().isEmpty()) {
             throw new IllegalArgumentException("Merchant ID cannot be null or empty");
         }
         
-        if (paymentType == null) {
-            throw new IllegalArgumentException("Payment type cannot be null");
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            filterParams.setOffset(offset);
+            filterParams.setLimit(limit);
+            
+            return transactionDAO.findByMerchantId(merchantId, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve payment transactions for merchant: {}", merchantId, e);
+            throw new RuntimeException("Failed to retrieve payment transactions", e);
         }
+    }
+
+    @Override
+    public List<PaymentTransaction> getTransactionsByPaymentType(String paymentType, int offset, int limit) {
+        logger.debug("Retrieving payment transactions with payment type: {}", paymentType);
+        
+        if (paymentType == null || paymentType.trim().isEmpty()) {
+            throw new IllegalArgumentException("Payment type cannot be null or empty");
+        }
+        
+        try {
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            filterParams.setOffset(offset);
+            filterParams.setLimit(limit);
+            
+            PaymentType type;
+            try {
+                type = PaymentType.valueOf(paymentType.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("Invalid payment type: " + paymentType);
+            }
+            
+            return transactionDAO.findByPaymentType(type, filterParams);
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to retrieve payment transactions with payment type: {}", paymentType, e);
+            throw new RuntimeException("Failed to retrieve payment transactions", e);
+        }
+    }
+
+    @Override
+    public List<PaymentTransaction> queryTransactions(UUID organizationId, UUID accountId,
+                                                    List<PaymentStatus> statuses,
+                                                    LocalDateTime startDate, LocalDateTime endDate,
+                                                    BigDecimal minAmount, BigDecimal maxAmount,
+                                                    String currency, String merchantId, String paymentType,
+                                                    String sortBy, String sortDirection,
+                                                    int offset, int limit) {
+        logger.debug("Executing complex query for payment transactions");
+        
+        // Validate organization access if specified
+        if (organizationId != null) {
+            validationService.validateOrganizationAccess(organizationId);
+        }
+        
+        // Validate account access if specified
+        if (organizationId != null && accountId != null) {
+            validationService.validateAccountAccess(organizationId, accountId);
+        }
+        
+        try {
+            // Build filter parameters
+            PaymentFilterParams filterParams = new PaymentFilterParams();
+            filterParams.setOffset(offset);
+            filterParams.setLimit(limit);
+            
+            // Set sorting parameters
+            if (sortBy != null && !sortBy.trim().isEmpty()) {
+                filterParams.setSortBy(sortBy);
+                
+                if (sortDirection != null && !sortDirection.trim().isEmpty()) {
+                    filterParams.setSortDirection(sortDirection);
+                }
+            }
+            
+            // Set date range if specified
+            if (startDate != null && endDate != null) {
+                if (startDate.isAfter(endDate)) {
+                    throw new IllegalArgumentException("Start date cannot be after end date");
+                }
+                
+                DateRangeFilter dateRange = new DateRangeFilter(
+                        startDate.atZone(ZoneId.systemDefault()).toInstant(),
+                        endDate.atZone(ZoneId.systemDefault()).toInstant()
+                );
+                filterParams.setDateRange(dateRange);
+            }
+            
+            // Set amount range if specified
+            if (minAmount != null && maxAmount != null) {
+                if (minAmount.compareTo(BigDecimal.ZERO) < 0 || maxAmount.compareTo(BigDecimal.ZERO) < 0) {
+                    throw new IllegalArgumentException("Amounts cannot be negative");
+                }
+                
+                if (minAmount.compareTo(maxAmount) > 0) {
+                    throw new IllegalArgumentException("Min amount cannot be greater than max amount");
+                }
+                
+                AmountRangeFilter amountRange = new AmountRangeFilter(minAmount, maxAmount, currency);
+                filterParams.setAmountRange(amountRange);
+            }
+            
+            // Set status filter if specified
+            if (statuses != null && !statuses.isEmpty()) {
+                StatusFilter statusFilter = new StatusFilter(statuses);
+                filterParams.setStatusFilter(statusFilter);
+            }
+            
+            // Set merchant ID if specified
+            if (merchantId != null && !merchantId.trim().isEmpty()) {
+                filterParams.setMerchantId(merchantId);
+            }
+            
+            // Set payment type if specified
+            if (paymentType != null && !paymentType.trim().isEmpty()) {
+                try {
+                    PaymentType type = PaymentType.valueOf(paymentType.toUpperCase());
+                    filterParams.setPaymentType(type);
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("Invalid payment type: " + paymentType);
+                }
+            }
+            
+            // Execute query based on parameters
+            if (organizationId != null && accountId != null) {
+                return transactionDAO.findByOrganizationIdAndAccountId(organizationId, accountId, filterParams);
+            } else if (organizationId != null) {
+                return transactionDAO.findByOrganizationId(organizationId, filterParams);
+            } else if (statuses != null && !statuses.isEmpty()) {
+                return transactionDAO.findByStatusIn(filterParams.getStatusFilter(), filterParams);
+            } else {
+                // Default to all transactions (with access control)
+                return transactionDAO.findForAllOrganizations(filterParams);
+            }
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to execute complex query for payment transactions", e);
+            throw new RuntimeException("Failed to query payment transactions", e);
+        }
+    }
+
+    @Override
+    public long countTransactions(UUID organizationId, UUID accountId,
+                                 List<PaymentStatus> statuses,
+                                 LocalDateTime startDate, LocalDateTime endDate,
+                                 BigDecimal minAmount, BigDecimal maxAmount,
+                                 String currency, String merchantId, String paymentType) {
+        logger.debug("Counting payment transactions matching criteria");
+        
+        // Execute a query with the same filters but count the results
+        // This is a simplified implementation that retrieves all matching transactions
+        // In a real implementation, this would use a COUNT query for efficiency
+        List<PaymentTransaction> transactions = queryTransactions(
+                organizationId, accountId, statuses, startDate, endDate,
+                minAmount, maxAmount, currency, merchantId, paymentType,
+                null, null, 0, Integer.MAX_VALUE
+        );
+        
+        return transactions.size();
+    }
+
+    @Override
+    public boolean validateTransaction(UUID transactionId) {
+        logger.debug("Validating payment transaction with ID: {}", transactionId);
+        
+        if (transactionId == null) {
+            return false;
+        }
+        
+        try {
+            Optional<PaymentTransaction> transactionOpt = transactionDAO.findById(transactionId);
+            
+            if (!transactionOpt.isPresent()) {
+                return false;
+            }
+            
+            PaymentTransaction transaction = transactionOpt.get();
+            
+            // Validate transaction data
+            try {
+                validationService.validateTransactionData(transaction);
+                return true;
+            } catch (IllegalArgumentException e) {
+                logger.warn("Transaction validation failed: {}", e.getMessage());
+                return false;
+            }
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to validate payment transaction: {}", transactionId, e);
+            return false;
+        }
+    }
+
+    @Override
+    public boolean verifyTransactionStatus(UUID transactionId, PaymentStatus expectedStatus) {
+        logger.debug("Verifying status of payment transaction with ID: {}", transactionId);
+        
+        if (transactionId == null || expectedStatus == null) {
+            return false;
+        }
+        
+        try {
+            Optional<PaymentTransaction> transactionOpt = transactionDAO.findById(transactionId);
+            
+            if (!transactionOpt.isPresent()) {
+                return false;
+            }
+            
+            PaymentTransaction transaction = transactionOpt.get();
+            return transaction.getStatus() == expectedStatus;
+        } catch (ConnectionException | QueryExecutionException e) {
+            logger.error("Failed to verify payment transaction status: {}", transactionId, e);
+            return false;
+        }
+    }
+    
+    /**
+     * Gets the current user ID from the security context.
+     * In a real implementation, this would retrieve the authenticated user.
+     * For this implementation, we'll return a placeholder value.
+     *
+     * @return The current user ID
+     */
+    private String getCurrentUserId() {
+        // In a real implementation, this would retrieve the user ID from the security context
+        return "system";
     }
 }

@@ -1,7 +1,7 @@
 package io.briklabs.sample.payments.model;
 
 import java.time.LocalDate;
-import java.time.Instant;
+import java.time.LocalDateTime;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -14,159 +14,129 @@ import java.util.UUID;
  */
 public class PaymentData {
 
-    /**
-     * Unique identifier for the payment data record.
-     */
+    // Primary identifier for the payment data
     private UUID paymentDataId;
-
-    /**
-     * Associated transaction identifier.
-     */
+    
+    // Reference to the parent transaction
     private UUID transactionId;
-
-    /**
-     * Payment method identifier used for reference and tracking.
-     */
+    
+    // Payment method identification
     private String paymentMethodId;
-
-    /**
-     * Tokenized payment data for secure storage of sensitive information.
-     */
+    
+    // Tokenized payment data for secure storage
     private String paymentToken;
-
-    /**
-     * Flexible payment method details stored as JSON.
-     * This can include method-specific attributes that vary by payment type.
-     */
+    
+    // Flexible payment method details stored as JSON
     private String paymentDetails;
-
-    /**
-     * Timestamp when the payment data was created.
-     */
-    private Instant createdAt;
-
-    /**
-     * Expiration date for the payment method, if applicable.
-     */
+    
+    // Payment method expiration date (if applicable)
     private LocalDate expiration;
-
-    /**
-     * Associated billing information stored as JSON.
-     * This can include billing address, contact information, etc.
-     */
+    
+    // Billing information stored as JSON
     private String billingData;
+    
+    // Creation timestamp
+    private LocalDateTime createdAt;
 
     /**
      * Default constructor for serialization frameworks.
      */
     public PaymentData() {
-        // Default constructor for serialization frameworks
     }
 
     /**
      * Creates a new payment data record with required fields.
      *
-     * @param transactionId The associated transaction identifier
-     * @param paymentMethodId The payment method identifier
+     * @param paymentDataId Unique identifier for this payment data record
+     * @param transactionId Associated transaction identifier
+     * @param paymentMethodId Identifier for the payment method
      */
-    public PaymentData(UUID transactionId, String paymentMethodId) {
-        this.paymentDataId = UUID.randomUUID();
+    public PaymentData(UUID paymentDataId, UUID transactionId, String paymentMethodId) {
+        this.paymentDataId = paymentDataId;
         this.transactionId = transactionId;
         this.paymentMethodId = paymentMethodId;
-        this.createdAt = Instant.now();
+        this.createdAt = LocalDateTime.now();
     }
 
     /**
      * Creates a new payment data record with all fields.
      *
-     * @param paymentDataId The payment data identifier
-     * @param transactionId The associated transaction identifier
-     * @param paymentMethodId The payment method identifier
-     * @param paymentToken The tokenized payment data
-     * @param paymentDetails The payment method details as JSON
-     * @param createdAt The creation timestamp
-     * @param expiration The payment method expiration date
-     * @param billingData The billing information as JSON
+     * @param paymentDataId Unique identifier for this payment data record
+     * @param transactionId Associated transaction identifier
+     * @param paymentMethodId Identifier for the payment method
+     * @param paymentToken Tokenized payment data (if applicable)
+     * @param paymentDetails JSON string containing payment method details
+     * @param expiration Payment method expiration date (if applicable)
+     * @param billingData JSON string containing billing information
      */
     public PaymentData(UUID paymentDataId, UUID transactionId, String paymentMethodId,
-                      String paymentToken, String paymentDetails, Instant createdAt,
-                      LocalDate expiration, String billingData) {
+                      String paymentToken, String paymentDetails, LocalDate expiration,
+                      String billingData) {
         this.paymentDataId = paymentDataId;
         this.transactionId = transactionId;
         this.paymentMethodId = paymentMethodId;
         this.paymentToken = paymentToken;
         this.paymentDetails = paymentDetails;
-        this.createdAt = createdAt;
         this.expiration = expiration;
         this.billingData = billingData;
+        this.createdAt = LocalDateTime.now();
     }
 
     /**
-     * Validates the payment data.
+     * Masks sensitive payment data for display or logging purposes.
+     * This method returns a copy of the payment data with sensitive fields masked.
      *
-     * @throws IllegalArgumentException if any validation fails
+     * @return A new PaymentData instance with masked sensitive fields
      */
-    public void validate() {
-        if (transactionId == null) {
-            throw new IllegalArgumentException("Transaction ID is required");
+    public PaymentData getMaskedCopy() {
+        PaymentData masked = new PaymentData();
+        masked.setPaymentDataId(this.paymentDataId);
+        masked.setTransactionId(this.transactionId);
+        masked.setPaymentMethodId(this.paymentMethodId);
+        
+        // Mask the payment token if present
+        if (this.paymentToken != null && !this.paymentToken.isEmpty()) {
+            int length = this.paymentToken.length();
+            if (length > 4) {
+                masked.setPaymentToken("****" + this.paymentToken.substring(length - 4));
+            } else {
+                masked.setPaymentToken("****");
+            }
         }
         
-        if (paymentMethodId == null || paymentMethodId.isEmpty()) {
-            throw new IllegalArgumentException("Payment method ID is required");
-        }
+        // Payment details would be masked at the JSON level before setting
+        masked.setPaymentDetails(null);
         
-        // If expiration date is provided, ensure it's not in the past
-        if (expiration != null && expiration.isBefore(LocalDate.now())) {
-            throw new IllegalArgumentException("Expiration date cannot be in the past");
-        }
+        masked.setExpiration(this.expiration);
+        
+        // Billing data would be masked at the JSON level before setting
+        masked.setBillingData(null);
+        
+        masked.setCreatedAt(this.createdAt);
+        
+        return masked;
     }
 
     /**
      * Checks if this payment method has expired.
      *
-     * @return true if the payment method has expired, false otherwise or if no expiration is set
+     * @return true if the payment method has an expiration date and it has passed, false otherwise
      */
     public boolean isExpired() {
         return expiration != null && expiration.isBefore(LocalDate.now());
     }
 
     /**
-     * Masks sensitive payment data for display or logging purposes.
-     * This method returns a copy of the payment data with sensitive information masked.
+     * Checks if this payment method will expire soon (within 30 days).
      *
-     * @return A new PaymentData instance with masked sensitive data
+     * @return true if the payment method will expire within 30 days, false otherwise
      */
-    public PaymentData maskedCopy() {
-        PaymentData masked = new PaymentData();
-        masked.paymentDataId = this.paymentDataId;
-        masked.transactionId = this.transactionId;
-        masked.paymentMethodId = this.paymentMethodId;
-        masked.createdAt = this.createdAt;
-        masked.expiration = this.expiration;
-        
-        // Mask the payment token if present
-        if (this.paymentToken != null && !this.paymentToken.isEmpty()) {
-            // Keep only the last 4 characters, mask the rest
-            int length = this.paymentToken.length();
-            if (length > 4) {
-                masked.paymentToken = "****" + this.paymentToken.substring(length - 4);
-            } else {
-                masked.paymentToken = "****";
-            }
+    public boolean isExpiringSoon() {
+        if (expiration == null) {
+            return false;
         }
-        
-        // For payment details and billing data, we would need to parse the JSON
-        // and selectively mask fields. For simplicity, we're just indicating
-        // that these fields contain data but not showing the actual content.
-        if (this.paymentDetails != null && !this.paymentDetails.isEmpty()) {
-            masked.paymentDetails = "{...}";
-        }
-        
-        if (this.billingData != null && !this.billingData.isEmpty()) {
-            masked.billingData = "{...}";
-        }
-        
-        return masked;
+        LocalDate thirtyDaysFromNow = LocalDate.now().plusDays(30);
+        return expiration.isAfter(LocalDate.now()) && expiration.isBefore(thirtyDaysFromNow);
     }
 
     // Getters and setters
@@ -211,14 +181,6 @@ public class PaymentData {
         this.paymentDetails = paymentDetails;
     }
 
-    public Instant getCreatedAt() {
-        return createdAt;
-    }
-
-    public void setCreatedAt(Instant createdAt) {
-        this.createdAt = createdAt;
-    }
-
     public LocalDate getExpiration() {
         return expiration;
     }
@@ -233,6 +195,14 @@ public class PaymentData {
 
     public void setBillingData(String billingData) {
         this.billingData = billingData;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(LocalDateTime createdAt) {
+        this.createdAt = createdAt;
     }
 
     @Override
@@ -250,17 +220,15 @@ public class PaymentData {
 
     @Override
     public String toString() {
-        // Use maskedCopy to ensure sensitive data isn't accidentally logged
-        PaymentData masked = this.maskedCopy();
+        // Use masked copy for toString to prevent accidental logging of sensitive data
+        PaymentData masked = getMaskedCopy();
         return "PaymentData{" +
                 "paymentDataId=" + masked.paymentDataId +
                 ", transactionId=" + masked.transactionId +
                 ", paymentMethodId='" + masked.paymentMethodId + '\'' +
                 ", paymentToken='" + masked.paymentToken + '\'' +
-                ", paymentDetails='" + masked.paymentDetails + '\'' +
-                ", createdAt=" + masked.createdAt +
                 ", expiration=" + masked.expiration +
-                ", billingData='" + masked.billingData + '\'' +
+                ", createdAt=" + masked.createdAt +
                 '}';
     }
 }

@@ -1,127 +1,157 @@
 package io.briklabs.sample.payments.service;
 
-import io.briklabs.sample.payments.model.PaymentStatus;
-import io.briklabs.sample.payments.model.PaymentTransaction;
-
 import java.math.BigDecimal;
 import java.util.UUID;
 
+import io.briklabs.sample.payments.model.PaymentTransaction;
+
 /**
  * Service interface for validating payment operations and data.
- * This service provides methods for ensuring data integrity and business rule compliance
+ * Provides methods for ensuring data integrity and business rule compliance
  * throughout the payment lifecycle.
  */
 public interface PaymentValidationService {
-
+    
     /**
-     * Validates a new payment transaction data before creation.
-     * Ensures all required fields are present and valid, including amount, currency,
-     * and merchant information.
+     * Validates a payment transaction for creation.
+     * Ensures all required fields are present and valid.
      *
-     * @param transaction The transaction to validate
-     * @throws IllegalArgumentException if validation fails
+     * @param transaction The payment transaction to validate
+     * @return true if the transaction is valid, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
      */
-    void validateTransactionData(PaymentTransaction transaction);
-
+    boolean validateTransactionData(PaymentTransaction transaction);
+    
     /**
-     * Validates that a transaction amount is valid.
-     * Amount must be greater than zero and properly formatted.
+     * Validates the amount and currency of a payment transaction.
+     * Ensures the amount is positive and the currency is a valid ISO 4217 code.
      *
-     * @param amount The amount to validate
-     * @param currency The currency code (ISO 4217)
-     * @throws IllegalArgumentException if the amount is invalid
+     * @param amount The payment amount to validate
+     * @param currency The currency code to validate (3-character ISO 4217 code)
+     * @return true if the amount and currency are valid, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
      */
-    void validateAmount(BigDecimal amount, String currency);
-
+    boolean validateAmountAndCurrency(BigDecimal amount, String currency);
+    
     /**
-     * Validates that a currency code is valid according to ISO 4217 standard.
+     * Validates a capture amount against the original transaction amount.
+     * Ensures the capture amount is positive and does not exceed the available amount.
      *
-     * @param currency The currency code to validate
-     * @throws IllegalArgumentException if the currency code is invalid
-     */
-    void validateCurrency(String currency);
-
-    /**
-     * Validates that a state transition is allowed for a payment transaction.
-     * Ensures the transition follows the defined payment lifecycle rules.
-     *
-     * @param currentStatus The current status of the transaction
-     * @param newStatus The target status for the transition
-     * @throws IllegalStateException if the transition is not allowed
-     */
-    void validateStatusTransition(PaymentStatus currentStatus, PaymentStatus newStatus);
-
-    /**
-     * Validates that a transaction can be captured.
-     * Transaction must be in AUTHORIZED status to be captured.
-     *
-     * @param transaction The transaction to validate
-     * @throws IllegalStateException if the transaction cannot be captured
-     */
-    void validateCanCapture(PaymentTransaction transaction);
-
-    /**
-     * Validates that a transaction can be refunded.
-     * Transaction must be in CAPTURED status to be refunded.
-     *
-     * @param transaction The transaction to validate
-     * @throws IllegalStateException if the transaction cannot be refunded
-     */
-    void validateCanRefund(PaymentTransaction transaction);
-
-    /**
-     * Validates that a transaction can be voided.
-     * Transaction must be in AUTHORIZED status to be voided.
-     *
-     * @param transaction The transaction to validate
-     * @throws IllegalStateException if the transaction cannot be voided
-     */
-    void validateCanVoid(PaymentTransaction transaction);
-
-    /**
-     * Validates that a capture amount is valid for a transaction.
-     * Capture amount must be greater than zero and less than or equal to the original transaction amount.
-     *
-     * @param transaction The transaction being captured
+     * @param transactionId The ID of the transaction being captured
      * @param captureAmount The amount to capture
-     * @throws IllegalArgumentException if the capture amount is invalid
+     * @return true if the capture amount is valid, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
      */
-    void validateCaptureAmount(PaymentTransaction transaction, BigDecimal captureAmount);
-
+    boolean validateCaptureAmount(UUID transactionId, BigDecimal captureAmount);
+    
     /**
-     * Validates that a refund amount is valid for a transaction.
-     * Refund amount must be greater than zero and less than or equal to the captured amount.
+     * Validates a refund amount against the captured transaction amount.
+     * Ensures the refund amount is positive and does not exceed the captured amount.
      *
-     * @param transaction The transaction being refunded
+     * @param transactionId The ID of the transaction being refunded
      * @param refundAmount The amount to refund
-     * @throws IllegalArgumentException if the refund amount is invalid
+     * @return true if the refund amount is valid, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
      */
-    void validateRefundAmount(PaymentTransaction transaction, BigDecimal refundAmount);
-
+    boolean validateRefundAmount(UUID transactionId, BigDecimal refundAmount);
+    
     /**
-     * Validates that the organization ID is valid and the user has access to it.
+     * Validates a state transition for a payment transaction.
+     * Ensures the requested state transition is allowed based on the current state.
      *
-     * @param organizationId The organization ID to validate
-     * @throws IllegalArgumentException if the organization ID is invalid
-     * @throws SecurityException if the user does not have access to the organization
+     * @param transactionId The ID of the transaction
+     * @param currentState The current state of the transaction
+     * @param newState The requested new state
+     * @return true if the state transition is valid, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
      */
-    void validateOrganizationAccess(UUID organizationId);
-
+    boolean validateStateTransition(UUID transactionId, String currentState, String newState);
+    
     /**
-     * Validates that the account ID is valid and belongs to the specified organization.
+     * Validates that a transaction exists and is in a valid state for processing.
      *
-     * @param organizationId The organization ID
-     * @param accountId The account ID to validate
-     * @throws IllegalArgumentException if the account ID is invalid or does not belong to the organization
+     * @param transactionId The ID of the transaction to validate
+     * @return true if the transaction exists and is in a valid state, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
      */
-    void validateAccountAccess(UUID organizationId, UUID accountId);
-
+    boolean validateTransactionExists(UUID transactionId);
+    
     /**
-     * Validates that the merchant ID is valid and associated with the specified organization.
+     * Validates that a transaction is in a specific state.
      *
-     * @param organizationId The organization ID
+     * @param transactionId The ID of the transaction to validate
+     * @param expectedState The expected state of the transaction
+     * @return true if the transaction is in the expected state, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
+     */
+    boolean validateTransactionState(UUID transactionId, String expectedState);
+    
+    /**
+     * Validates that a transaction is in one of a set of allowed states.
+     *
+     * @param transactionId The ID of the transaction to validate
+     * @param allowedStates Array of allowed states for the transaction
+     * @return true if the transaction is in one of the allowed states, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
+     */
+    boolean validateTransactionState(UUID transactionId, String[] allowedStates);
+    
+    /**
+     * Validates that a transaction belongs to the specified organization and account.
+     *
+     * @param transactionId The ID of the transaction to validate
+     * @param organizationId The organization ID to validate against
+     * @param accountId The account ID to validate against
+     * @return true if the transaction belongs to the specified organization and account, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
+     */
+    boolean validateTransactionOwnership(UUID transactionId, UUID organizationId, UUID accountId);
+    
+    /**
+     * Validates a merchant ID format and existence.
+     *
      * @param merchantId The merchant ID to validate
-     * @throws IllegalArgumentException if the merchant ID is invalid or not associated with the organization
+     * @return true if the merchant ID is valid, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
      */
-    void validateMerchantId(UUID organizationId, String merchantId);
+    boolean validateMerchantId(String merchantId);
+    
+    /**
+     * Validates a payment method type.
+     *
+     * @param paymentType The payment method type to validate
+     * @return true if the payment method type is valid, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
+     */
+    boolean validatePaymentType(String paymentType);
+    
+    /**
+     * Validates payment data for a specific payment method type.
+     *
+     * @param paymentMethodId The payment method ID
+     * @param paymentData The payment data to validate
+     * @return true if the payment data is valid for the payment method, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
+     */
+    boolean validatePaymentData(String paymentMethodId, String paymentData);
+    
+    /**
+     * Validates that a capture operation is allowed for a transaction.
+     * Checks transaction state, previous captures, and available amount.
+     *
+     * @param transactionId The ID of the transaction to validate for capture
+     * @return true if capture is allowed, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
+     */
+    boolean validateCaptureAllowed(UUID transactionId);
+    
+    /**
+     * Validates that a refund operation is allowed for a transaction.
+     * Checks transaction state, previous refunds, and available amount.
+     *
+     * @param transactionId The ID of the transaction to validate for refund
+     * @return true if refund is allowed, false otherwise
+     * @throws IllegalArgumentException if validation fails with specific error details
+     */
+    boolean validateRefundAllowed(UUID transactionId);
 }

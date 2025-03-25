@@ -1,17 +1,16 @@
 package io.briklabs.sample.payments.service;
 
 import io.briklabs.sample.payments.model.PaymentEvent;
-import io.briklabs.sample.payments.model.PaymentStatus;
 import io.briklabs.sample.payments.model.PaymentTransaction;
+import io.briklabs.sample.payments.model.PaymentTransaction.PaymentStatus;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Implementation of the PaymentLifecycleService interface that manages payment state transitions.
@@ -21,13 +20,11 @@ import org.slf4j.LoggerFactory;
  */
 public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
 
-    private static final Logger logger = LoggerFactory.getLogger(PaymentLifecycleServiceImpl.class);
-    
     private final PaymentEventService eventService;
     private final PaymentTransactionService transactionService;
-    
+
     /**
-     * Constructs a new PaymentLifecycleServiceImpl with required dependencies.
+     * Creates a new PaymentLifecycleServiceImpl with the required dependencies.
      *
      * @param eventService The event service for recording lifecycle events
      * @param transactionService The transaction service for retrieving and updating transactions
@@ -46,38 +43,65 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
         if (transaction == null) {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
-        
         if (newStatus == null) {
             throw new IllegalArgumentException("New status cannot be null");
         }
-        
         if (userId == null || userId.trim().isEmpty()) {
             throw new IllegalArgumentException("User ID cannot be null or empty");
         }
-        
+
         // Validate the state transition
         if (!isValidStateTransition(transaction, newStatus)) {
             throw new IllegalStateException(
-                String.format("Invalid state transition from %s to %s for transaction %s", 
-                    transaction.getStatus(), newStatus, transaction.getTransactionId()));
+                    String.format("Invalid state transition from %s to %s for transaction %s",
+                            transaction.getStatus(), newStatus, transaction.getTransactionId()));
         }
+
+        // Prepare event data
+        String eventData = buildEventDataJson(metadata);
         
-        // Record the event before updating the transaction
-        PaymentEvent event = eventService.recordStatusChangeEvent(transaction, newStatus, userId);
-        
-        // If metadata is provided, record it as a custom event
-        if (metadata != null && !metadata.isEmpty()) {
-            eventService.recordCustomEvent(transaction, "STATE_TRANSITION_METADATA", userId, metadata);
-        }
-        
-        // Update the transaction status
+        // Record the status change event
         PaymentStatus previousStatus = transaction.getStatus();
+        eventService.recordStatusChangeEvent(
+                transaction.getTransactionId(),
+                previousStatus,
+                newStatus,
+                eventData,
+                userId
+        );
+
+        // Update the transaction status
         transaction.updateStatus(newStatus);
         
-        logger.info("Transaction {} state changed from {} to {} by user {}", 
-            transaction.getTransactionId(), previousStatus, newStatus, userId);
-        
+        // Return the updated transaction
         return transaction;
+    }
+
+    /**
+     * Builds a JSON string from a metadata map for event recording.
+     *
+     * @param metadata The metadata map to convert
+     * @return A JSON string representation of the metadata
+     */
+    private String buildEventDataJson(Map<String, String> metadata) {
+        if (metadata == null || metadata.isEmpty()) {
+            return "{}";
+        }
+        
+        StringBuilder json = new StringBuilder("{");
+        boolean first = true;
+        
+        for (Map.Entry<String, String> entry : metadata.entrySet()) {
+            if (!first) {
+                json.append(",");
+            }
+            json.append("\"").append(entry.getKey()).append("\":\"")
+                .append(entry.getValue().replace("\"", "\\\"")).append("\"");
+            first = false;
+        }
+        
+        json.append("}");
+        return json.toString();
     }
 
     /**
@@ -85,8 +109,11 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
      */
     @Override
     public boolean isValidStateTransition(PaymentTransaction transaction, PaymentStatus newStatus) {
-        if (transaction == null || newStatus == null) {
-            return false;
+        if (transaction == null) {
+            throw new IllegalArgumentException("Transaction cannot be null");
+        }
+        if (newStatus == null) {
+            throw new IllegalArgumentException("New status cannot be null");
         }
         
         return isValidStateTransition(transaction.getStatus(), newStatus);
@@ -97,17 +124,67 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
      */
     @Override
     public boolean isValidStateTransition(PaymentStatus currentStatus, PaymentStatus newStatus) {
-        if (currentStatus == null || newStatus == null) {
+        if (currentStatus == null) {
+            throw new IllegalArgumentException("Current status cannot be null");
+        }
+        if (newStatus == null) {
+            throw new IllegalArgumentException("New status cannot be null");
+        }
+        
+        // If the statuses are the same, it's not a valid transition
+        if (currentStatus == newStatus) {
             return false;
         }
         
-        // Same state is always valid (idempotent operation)
-        if (currentStatus == newStatus) {
-            return true;
+        // Define valid transitions based on current state
+        switch (currentStatus) {
+            case PENDING:
+                // Pending can transition to authorized, declined, failed, or processing
+                return newStatus == PaymentStatus.AUTHORIZED || 
+                       newStatus == PaymentStatus.DECLINED || 
+                       newStatus == PaymentStatus.FAILED ||
+                       newStatus == PaymentStatus.PROCESSING;
+                
+            case PROCESSING:
+                // Processing can transition to authorized, declined, or failed
+                return newStatus == PaymentStatus.AUTHORIZED || 
+                       newStatus == PaymentStatus.DECLINED || 
+                       newStatus == PaymentStatus.FAILED;
+                
+            case AUTHORIZED:
+                // Authorized can transition to captured, partially_captured, voided, or failed
+                return newStatus == PaymentStatus.CAPTURED || 
+                       newStatus == PaymentStatus.PARTIALLY_CAPTURED || 
+                       newStatus == PaymentStatus.VOIDED || 
+                       newStatus == PaymentStatus.FAILED;
+                
+            case PARTIALLY_CAPTURED:
+                // Partially captured can transition to captured, partially_refunded, or failed
+                return newStatus == PaymentStatus.CAPTURED || 
+                       newStatus == PaymentStatus.PARTIALLY_REFUNDED || 
+                       newStatus == PaymentStatus.FAILED;
+                
+            case CAPTURED:
+                // Captured can transition to refunded, partially_refunded, or failed
+                return newStatus == PaymentStatus.REFUNDED || 
+                       newStatus == PaymentStatus.PARTIALLY_REFUNDED || 
+                       newStatus == PaymentStatus.FAILED;
+                
+            case PARTIALLY_REFUNDED:
+                // Partially refunded can transition to refunded or failed
+                return newStatus == PaymentStatus.REFUNDED || 
+                       newStatus == PaymentStatus.FAILED;
+                
+            case REFUNDED:
+            case VOIDED:
+            case DECLINED:
+            case FAILED:
+                // Terminal states - no further transitions allowed
+                return false;
+                
+            default:
+                return false;
         }
-        
-        // Use the built-in transition validation from the PaymentStatus enum
-        return currentStatus.canTransitionTo(newStatus);
     }
 
     /**
@@ -131,16 +208,16 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
             throw new IllegalArgumentException("Current status cannot be null");
         }
         
-        // If it's a final state, no transitions are possible
-        if (currentStatus.isFinalState()) {
-            return Collections.emptyList();
-        }
+        List<PaymentStatus> validStates = new ArrayList<>();
         
         // Check each possible status to see if it's a valid transition
-        return Stream.of(PaymentStatus.values())
-            .filter(status -> currentStatus.canTransitionTo(status))
-            .filter(status -> status != currentStatus) // Exclude the current status
-            .collect(Collectors.toList());
+        for (PaymentStatus status : PaymentStatus.values()) {
+            if (isValidStateTransition(currentStatus, status)) {
+                validStates.add(status);
+            }
+        }
+        
+        return validStates;
     }
 
     /**
@@ -152,7 +229,13 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
         
-        return transaction.isInFinalState();
+        PaymentStatus status = transaction.getStatus();
+        
+        // Define terminal states
+        return status == PaymentStatus.REFUNDED ||
+               status == PaymentStatus.VOIDED ||
+               status == PaymentStatus.DECLINED ||
+               status == PaymentStatus.FAILED;
     }
 
     /**
@@ -164,7 +247,11 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
         
-        return transaction.canCapture();
+        PaymentStatus status = transaction.getStatus();
+        
+        // Only authorized and partially_captured transactions can be captured
+        return status == PaymentStatus.AUTHORIZED || 
+               status == PaymentStatus.PARTIALLY_CAPTURED;
     }
 
     /**
@@ -176,7 +263,11 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
         
-        return transaction.canRefund();
+        PaymentStatus status = transaction.getStatus();
+        
+        // Only captured and partially_refunded transactions can be refunded
+        return status == PaymentStatus.CAPTURED || 
+               status == PaymentStatus.PARTIALLY_REFUNDED;
     }
 
     /**
@@ -188,7 +279,8 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
         
-        return transaction.canVoid();
+        // Only authorized transactions can be voided
+        return transaction.getStatus() == PaymentStatus.AUTHORIZED;
     }
 
     /**
@@ -199,20 +291,17 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
         if (transaction == null) {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
-        
         if (userId == null || userId.trim().isEmpty()) {
             throw new IllegalArgumentException("User ID cannot be null or empty");
         }
         
-        // Verify that the transaction is in the CREATED state
-        verifyTransactionState(transaction, PaymentStatus.CREATED);
+        // Verify that the transaction is in PENDING state
+        verifyTransactionState(transaction, PaymentStatus.PENDING);
         
-        // Record the processing event
+        // Create metadata for the event
         Map<String, String> metadata = new HashMap<>();
-        metadata.put("initiatedBy", userId);
-        metadata.put("initiatedAt", Instant.now().toString());
-        
-        eventService.recordProcessingEvent(transaction, userId, metadata);
+        metadata.put("action", "processing_initiated");
+        metadata.put("timestamp", Instant.now().toString());
         
         // Execute the state transition
         return executeStateTransition(transaction, PaymentStatus.PROCESSING, userId, metadata);
@@ -226,25 +315,26 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
         if (transaction == null) {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
-        
         if (userId == null || userId.trim().isEmpty()) {
             throw new IllegalArgumentException("User ID cannot be null or empty");
         }
         
-        // Verify that the transaction is in the PROCESSING state
-        verifyTransactionState(transaction, PaymentStatus.PROCESSING);
-        
-        // Record metadata for the authorization
-        Map<String, String> metadata = new HashMap<>();
-        metadata.put("authorizedBy", userId);
-        metadata.put("authorizedAt", Instant.now().toString());
-        
-        if (authorizationCode != null && !authorizationCode.trim().isEmpty()) {
-            metadata.put("authorizationCode", authorizationCode);
+        // Verify that the transaction is in a valid state for authorization
+        if (transaction.getStatus() != PaymentStatus.PENDING && 
+            transaction.getStatus() != PaymentStatus.PROCESSING) {
+            throw new IllegalStateException(
+                    String.format("Transaction %s cannot be authorized from state %s",
+                            transaction.getTransactionId(), transaction.getStatus()));
         }
         
-        // Record a custom event for the authorization details
-        eventService.recordCustomEvent(transaction, "AUTHORIZATION", userId, metadata);
+        // Create metadata for the event
+        Map<String, String> metadata = new HashMap<>();
+        metadata.put("action", "authorization");
+        metadata.put("timestamp", Instant.now().toString());
+        
+        if (authorizationCode != null && !authorizationCode.trim().isEmpty()) {
+            metadata.put("authorization_code", authorizationCode);
+        }
         
         // Execute the state transition
         return executeStateTransition(transaction, PaymentStatus.AUTHORIZED, userId, metadata);
@@ -259,36 +349,44 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
         if (transaction == null) {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
-        
         if (userId == null || userId.trim().isEmpty()) {
             throw new IllegalArgumentException("User ID cannot be null or empty");
         }
         
-        // Verify that the transaction is in the AUTHORIZED state
-        verifyTransactionState(transaction, PaymentStatus.AUTHORIZED);
+        // Verify that the transaction can be captured
+        if (!canCapture(transaction)) {
+            throw new IllegalStateException(
+                    String.format("Transaction %s cannot be captured from state %s",
+                            transaction.getTransactionId(), transaction.getStatus()));
+        }
         
-        // Record the capture event
-        boolean isPartial = captureAmount != null && 
-                           !captureAmount.equals(transaction.getAmount().toString());
-        
-        eventService.recordCaptureEvent(transaction, userId, 
-                                      captureAmount != null ? captureAmount : transaction.getAmount().toString(), 
-                                      isPartial);
-        
-        // Record metadata for the capture
+        // Create metadata for the event
         Map<String, String> metadata = new HashMap<>();
-        metadata.put("capturedBy", userId);
-        metadata.put("capturedAt", Instant.now().toString());
+        metadata.put("action", "capture");
+        metadata.put("timestamp", Instant.now().toString());
         
-        if (captureAmount != null) {
-            metadata.put("captureAmount", captureAmount);
+        if (captureAmount != null && !captureAmount.trim().isEmpty()) {
+            metadata.put("capture_amount", captureAmount);
+            
+            // Determine if this is a partial capture based on the amount
+            try {
+                double amount = Double.parseDouble(captureAmount);
+                double transactionAmount = transaction.getAmount().doubleValue();
+                
+                if (amount < transactionAmount) {
+                    // This is a partial capture
+                    return executeStateTransition(transaction, PaymentStatus.PARTIALLY_CAPTURED, userId, metadata);
+                }
+            } catch (NumberFormatException e) {
+                // If we can't parse the amount, assume it's a full capture
+            }
         }
         
         if (captureReference != null && !captureReference.trim().isEmpty()) {
-            metadata.put("captureReference", captureReference);
+            metadata.put("capture_reference", captureReference);
         }
         
-        // Execute the state transition
+        // Execute the state transition to CAPTURED
         return executeStateTransition(transaction, PaymentStatus.CAPTURED, userId, metadata);
     }
 
@@ -301,41 +399,48 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
         if (transaction == null) {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
-        
         if (userId == null || userId.trim().isEmpty()) {
             throw new IllegalArgumentException("User ID cannot be null or empty");
         }
         
-        // Verify that the transaction is in the CAPTURED state
-        verifyTransactionState(transaction, PaymentStatus.CAPTURED);
+        // Verify that the transaction can be refunded
+        if (!canRefund(transaction)) {
+            throw new IllegalStateException(
+                    String.format("Transaction %s cannot be refunded from state %s",
+                            transaction.getTransactionId(), transaction.getStatus()));
+        }
         
-        // Record the refund event
-        boolean isPartial = refundAmount != null && 
-                           !refundAmount.equals(transaction.getAmount().toString());
-        
-        eventService.recordRefundEvent(transaction, userId, 
-                                     refundAmount != null ? refundAmount : transaction.getAmount().toString(), 
-                                     refundReason != null ? refundReason : "No reason provided", 
-                                     isPartial);
-        
-        // Record metadata for the refund
+        // Create metadata for the event
         Map<String, String> metadata = new HashMap<>();
-        metadata.put("refundedBy", userId);
-        metadata.put("refundedAt", Instant.now().toString());
+        metadata.put("action", "refund");
+        metadata.put("timestamp", Instant.now().toString());
         
-        if (refundAmount != null) {
-            metadata.put("refundAmount", refundAmount);
+        if (refundAmount != null && !refundAmount.trim().isEmpty()) {
+            metadata.put("refund_amount", refundAmount);
+            
+            // Determine if this is a partial refund based on the amount
+            try {
+                double amount = Double.parseDouble(refundAmount);
+                double transactionAmount = transaction.getAmount().doubleValue();
+                
+                if (amount < transactionAmount) {
+                    // This is a partial refund
+                    return executeStateTransition(transaction, PaymentStatus.PARTIALLY_REFUNDED, userId, metadata);
+                }
+            } catch (NumberFormatException e) {
+                // If we can't parse the amount, assume it's a full refund
+            }
         }
         
         if (refundReason != null && !refundReason.trim().isEmpty()) {
-            metadata.put("refundReason", refundReason);
+            metadata.put("refund_reason", refundReason);
         }
         
         if (refundReference != null && !refundReference.trim().isEmpty()) {
-            metadata.put("refundReference", refundReference);
+            metadata.put("refund_reference", refundReference);
         }
         
-        // Execute the state transition
+        // Execute the state transition to REFUNDED
         return executeStateTransition(transaction, PaymentStatus.REFUNDED, userId, metadata);
     }
 
@@ -347,25 +452,24 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
         if (transaction == null) {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
-        
         if (userId == null || userId.trim().isEmpty()) {
             throw new IllegalArgumentException("User ID cannot be null or empty");
         }
         
-        // Verify that the transaction is in the AUTHORIZED state
-        verifyTransactionState(transaction, PaymentStatus.AUTHORIZED);
+        // Verify that the transaction can be voided
+        if (!canVoid(transaction)) {
+            throw new IllegalStateException(
+                    String.format("Transaction %s cannot be voided from state %s",
+                            transaction.getTransactionId(), transaction.getStatus()));
+        }
         
-        // Record the void event
-        eventService.recordVoidEvent(transaction, userId, 
-                                   voidReason != null ? voidReason : "No reason provided");
-        
-        // Record metadata for the void
+        // Create metadata for the event
         Map<String, String> metadata = new HashMap<>();
-        metadata.put("voidedBy", userId);
-        metadata.put("voidedAt", Instant.now().toString());
+        metadata.put("action", "void");
+        metadata.put("timestamp", Instant.now().toString());
         
         if (voidReason != null && !voidReason.trim().isEmpty()) {
-            metadata.put("voidReason", voidReason);
+            metadata.put("void_reason", voidReason);
         }
         
         // Execute the state transition
@@ -381,31 +485,32 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
         if (transaction == null) {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
-        
         if (userId == null || userId.trim().isEmpty()) {
             throw new IllegalArgumentException("User ID cannot be null or empty");
         }
         
-        // Record the error event
-        eventService.recordErrorEvent(transaction, userId, 
-                                    errorCode != null ? errorCode : "UNKNOWN_ERROR", 
-                                    errorMessage != null ? errorMessage : "Unknown error occurred");
-        
-        // Record metadata for the failure
+        // Create metadata for the event
         Map<String, String> metadata = new HashMap<>();
-        metadata.put("failedAt", Instant.now().toString());
-        metadata.put("reportedBy", userId);
+        metadata.put("action", "failure");
+        metadata.put("timestamp", Instant.now().toString());
         
         if (errorCode != null && !errorCode.trim().isEmpty()) {
-            metadata.put("errorCode", errorCode);
+            metadata.put("error_code", errorCode);
         }
         
         if (errorMessage != null && !errorMessage.trim().isEmpty()) {
-            metadata.put("errorMessage", errorMessage);
+            metadata.put("error_message", errorMessage);
         }
         
         // Execute the state transition
-        return executeStateTransition(transaction, PaymentStatus.FAILED, userId, metadata);
+        // Note: Almost any state can transition to FAILED
+        if (isValidStateTransition(transaction, PaymentStatus.FAILED)) {
+            return executeStateTransition(transaction, PaymentStatus.FAILED, userId, metadata);
+        } else {
+            throw new IllegalStateException(
+                    String.format("Transaction %s cannot transition from %s to FAILED",
+                            transaction.getTransactionId(), transaction.getStatus()));
+        }
     }
 
     /**
@@ -417,13 +522,14 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
             throw new IllegalArgumentException("Transaction ID cannot be null");
         }
         
-        PaymentTransaction transaction = transactionService.getTransactionById(transactionId);
+        // Retrieve the transaction from the service
+        Optional<PaymentTransaction> transactionOpt = transactionService.getTransactionById(transactionId);
         
-        if (transaction == null) {
+        if (!transactionOpt.isPresent()) {
             throw new IllegalArgumentException("Transaction not found: " + transactionId);
         }
         
-        return transaction.getStatus();
+        return transactionOpt.get().getStatus();
     }
 
     /**
@@ -435,15 +541,8 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
             throw new IllegalArgumentException("Transaction ID cannot be null");
         }
         
-        // Verify that the transaction exists
-        PaymentTransaction transaction = transactionService.getTransactionById(transactionId);
-        
-        if (transaction == null) {
-            throw new IllegalArgumentException("Transaction not found: " + transactionId);
-        }
-        
-        // Get the complete timeline of events for this transaction
-        return eventService.buildTransactionTimeline(transactionId);
+        // Retrieve all events for the transaction
+        return eventService.getEventsByTransactionId(transactionId);
     }
 
     /**
@@ -454,15 +553,14 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
         if (transaction == null) {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
-        
         if (expectedStatus == null) {
             throw new IllegalArgumentException("Expected status cannot be null");
         }
         
         if (transaction.getStatus() != expectedStatus) {
             throw new IllegalStateException(
-                String.format("Transaction %s is in state %s, expected %s", 
-                    transaction.getTransactionId(), transaction.getStatus(), expectedStatus));
+                    String.format("Transaction %s is in state %s, expected %s",
+                            transaction.getTransactionId(), transaction.getStatus(), expectedStatus));
         }
     }
 
@@ -474,11 +572,11 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
         if (transaction == null) {
             throw new IllegalArgumentException("Transaction cannot be null");
         }
-        
         if (allowedStatuses == null || allowedStatuses.length == 0) {
-            return false;
+            throw new IllegalArgumentException("At least one allowed status must be provided");
         }
         
+        // Check if the transaction's status is in the list of allowed statuses
         for (PaymentStatus status : allowedStatuses) {
             if (transaction.getStatus() == status) {
                 return true;
@@ -497,149 +595,200 @@ public class PaymentLifecycleServiceImpl implements PaymentLifecycleService {
             throw new IllegalArgumentException("Transaction ID cannot be null");
         }
         
-        // Verify that the transaction exists
-        PaymentTransaction transaction = transactionService.getTransactionById(transactionId);
+        // Retrieve the transaction
+        Optional<PaymentTransaction> transactionOpt = transactionService.getTransactionById(transactionId);
         
-        if (transaction == null) {
+        if (!transactionOpt.isPresent()) {
             throw new IllegalArgumentException("Transaction not found: " + transactionId);
         }
         
-        // Get the complete timeline of events for this transaction
-        List<PaymentEvent> events = eventService.buildTransactionTimeline(transactionId);
+        PaymentTransaction transaction = transactionOpt.get();
+        
+        // Retrieve all events for the transaction
+        List<PaymentEvent> events = eventService.getEventsByTransactionId(transactionId);
         
         // Create the summary map
         Map<String, Object> summary = new HashMap<>();
         
         // Add basic transaction information
-        summary.put("transactionId", transaction.getTransactionId());
-        summary.put("currentStatus", transaction.getStatus().name());
-        summary.put("statusDisplayName", transaction.getStatus().getDisplayName());
-        summary.put("statusDescription", transaction.getStatus().getDescription());
-        summary.put("isInFinalState", transaction.isInFinalState());
-        summary.put("createdAt", transaction.getCreatedAt());
-        summary.put("lastUpdatedAt", transaction.getUpdatedAt());
-        summary.put("totalLifecycleTimeMs", 
-            Duration.between(transaction.getCreatedAt(), transaction.getUpdatedAt()).toMillis());
+        summary.put("transactionId", transactionId.toString());
+        summary.put("currentStatus", transaction.getStatus().toString());
+        summary.put("amount", transaction.getAmount().toString());
+        summary.put("currency", transaction.getCurrency());
+        summary.put("createdAt", transaction.getCreatedAt().toString());
+        summary.put("updatedAt", transaction.getUpdatedAt().toString());
         
-        // Calculate time spent in each state
-        Map<String, Long> timeInStates = calculateTimeInStates(events);
-        summary.put("timeInStates", timeInStates);
-        
-        // Extract key lifecycle events
-        Map<String, Object> keyEvents = extractKeyLifecycleEvents(events);
-        summary.put("keyEvents", keyEvents);
-        
-        // Add event counts
-        summary.put("totalEvents", events.size());
-        summary.put("statusChangeEvents", 
-            events.stream().filter(e -> "STATUS_CHANGE".equals(e.getEventType())).count());
-        summary.put("errorEvents", 
-            events.stream().filter(e -> "ERROR".equals(e.getEventType())).count());
-        
-        // Add valid next states
-        List<String> validNextStates = getValidNextStates(transaction).stream()
-            .map(PaymentStatus::name)
-            .collect(Collectors.toList());
-        summary.put("validNextStates", validNextStates);
-        
-        // Add operation capabilities
+        // Add lifecycle capabilities
         summary.put("canCapture", canCapture(transaction));
         summary.put("canRefund", canRefund(transaction));
         summary.put("canVoid", canVoid(transaction));
+        summary.put("isInFinalState", isInFinalState(transaction));
+        summary.put("validNextStates", getValidNextStates(transaction).stream()
+                .map(Enum::toString)
+                .collect(Collectors.toList()));
+        
+        // Calculate time spent in each state
+        Map<String, Duration> timeInStates = calculateTimeInStates(events);
+        Map<String, String> formattedTimeInStates = new HashMap<>();
+        
+        for (Map.Entry<String, Duration> entry : timeInStates.entrySet()) {
+            formattedTimeInStates.put(entry.getKey(), formatDuration(entry.getValue()));
+        }
+        
+        summary.put("timeInStates", formattedTimeInStates);
+        
+        // Add key events
+        List<Map<String, Object>> keyEvents = extractKeyEvents(events);
+        summary.put("keyEvents", keyEvents);
+        
+        // Add event counts by type
+        Map<String, Long> eventCounts = eventService.getEventCountByType(transactionId);
+        summary.put("eventCounts", eventCounts);
         
         return summary;
     }
-    
+
     /**
-     * Calculates the time spent in each state based on the event timeline.
+     * Calculates the time spent in each state based on status change events.
      *
-     * @param events The chronologically ordered list of events
-     * @return A map of state names to duration in milliseconds
+     * @param events List of payment events for a transaction
+     * @return Map of state names to durations
      */
-    private Map<String, Long> calculateTimeInStates(List<PaymentEvent> events) {
-        Map<String, Long> timeInStates = new HashMap<>();
+    private Map<String, Duration> calculateTimeInStates(List<PaymentEvent> events) {
+        Map<String, Duration> timeInStates = new HashMap<>();
+        Map<String, Instant> stateStartTimes = new HashMap<>();
         
-        // Filter to only status change events and sort by timestamp
-        List<PaymentEvent> statusChanges = events.stream()
-            .filter(e -> "STATUS_CHANGE".equals(e.getEventType()))
-            .sorted(Comparator.comparing(PaymentEvent::getCreatedAt))
-            .collect(Collectors.toList());
+        // Filter to status change events and sort chronologically
+        List<PaymentEvent> statusEvents = events.stream()
+                .filter(e -> "STATUS_CHANGE".equals(e.getEventType()))
+                .sorted(Comparator.comparing(PaymentEvent::getCreatedAt))
+                .collect(Collectors.toList());
         
-        if (statusChanges.isEmpty()) {
+        if (statusEvents.isEmpty()) {
             return timeInStates;
         }
         
-        // Process each status change event
-        for (int i = 0; i < statusChanges.size() - 1; i++) {
-            PaymentEvent current = statusChanges.get(i);
-            PaymentEvent next = statusChanges.get(i + 1);
+        // Initialize with the first state
+        PaymentEvent firstEvent = statusEvents.get(0);
+        String currentState = firstEvent.getNewStatus();
+        stateStartTimes.put(currentState, firstEvent.getCreatedAt());
+        
+        // Process subsequent state changes
+        for (int i = 1; i < statusEvents.size(); i++) {
+            PaymentEvent event = statusEvents.get(i);
+            String previousState = event.getPreviousStatus();
+            String newState = event.getNewStatus();
+            Instant stateStart = stateStartTimes.get(previousState);
+            Instant stateEnd = event.getCreatedAt();
             
-            String status = current.getNewStatus();
-            long durationMs = Duration.between(current.getCreatedAt(), next.getCreatedAt()).toMillis();
+            // Calculate duration in this state
+            if (stateStart != null) {
+                Duration duration = Duration.between(stateStart, stateEnd);
+                
+                // Add to existing duration or set new duration
+                if (timeInStates.containsKey(previousState)) {
+                    duration = timeInStates.get(previousState).plus(duration);
+                }
+                
+                timeInStates.put(previousState, duration);
+            }
             
-            timeInStates.put(status, durationMs);
+            // Update current state and start time
+            currentState = newState;
+            stateStartTimes.put(currentState, stateEnd);
         }
         
-        // Handle the last state (still current)
-        PaymentEvent lastChange = statusChanges.get(statusChanges.size() - 1);
-        String lastStatus = lastChange.getNewStatus();
-        long lastDurationMs = Duration.between(lastChange.getCreatedAt(), Instant.now()).toMillis();
-        
-        timeInStates.put(lastStatus, lastDurationMs);
+        // Calculate duration for the current state (from last change to now)
+        Instant stateStart = stateStartTimes.get(currentState);
+        if (stateStart != null) {
+            Duration duration = Duration.between(stateStart, Instant.now());
+            
+            // Add to existing duration or set new duration
+            if (timeInStates.containsKey(currentState)) {
+                duration = timeInStates.get(currentState).plus(duration);
+            }
+            
+            timeInStates.put(currentState, duration);
+        }
         
         return timeInStates;
     }
-    
+
     /**
-     * Extracts key lifecycle events from the event timeline.
+     * Formats a duration into a human-readable string.
      *
-     * @param events The chronologically ordered list of events
-     * @return A map of event types to event details
+     * @param duration The duration to format
+     * @return A formatted string representation of the duration
      */
-    private Map<String, Object> extractKeyLifecycleEvents(List<PaymentEvent> events) {
-        Map<String, Object> keyEvents = new HashMap<>();
+    private String formatDuration(Duration duration) {
+        long days = duration.toDays();
+        long hours = duration.minusDays(days).toHours();
+        long minutes = duration.minusDays(days).minusHours(hours).toMinutes();
+        long seconds = duration.minusDays(days).minusHours(hours).minusMinutes(minutes).getSeconds();
         
-        // Define the key event types we're interested in
-        Set<String> keyEventTypes = new HashSet<>(Arrays.asList(
-            "TRANSACTION_CREATED", 
-            "PROCESSING_INITIATED", 
-            "CAPTURE_INITIATED", 
-            "REFUND_INITIATED", 
-            "ERROR"
-        ));
+        StringBuilder formatted = new StringBuilder();
         
-        // Group events by type and take the most recent of each type
-        Map<String, List<PaymentEvent>> eventsByType = events.stream()
-            .filter(e -> keyEventTypes.contains(e.getEventType()))
-            .collect(Collectors.groupingBy(PaymentEvent::getEventType));
-        
-        // For each key event type, extract the most recent event
-        for (Map.Entry<String, List<PaymentEvent>> entry : eventsByType.entrySet()) {
-            String eventType = entry.getKey();
-            List<PaymentEvent> typeEvents = entry.getValue();
-            
-            if (!typeEvents.isEmpty()) {
-                // Sort by timestamp descending and take the first (most recent)
-                PaymentEvent mostRecent = typeEvents.stream()
-                    .sorted(Comparator.comparing(PaymentEvent::getCreatedAt).reversed())
-                    .findFirst()
-                    .orElse(null);
-                
-                if (mostRecent != null) {
-                    Map<String, Object> eventDetails = new HashMap<>();
-                    eventDetails.put("timestamp", mostRecent.getCreatedAt());
-                    eventDetails.put("actor", mostRecent.getCreatedBy());
-                    eventDetails.put("eventId", mostRecent.getEventId());
-                    
-                    if (mostRecent.getEventData() != null) {
-                        eventDetails.put("data", mostRecent.getEventData());
-                    }
-                    
-                    keyEvents.put(eventType, eventDetails);
-                }
-            }
+        if (days > 0) {
+            formatted.append(days).append("d ");
         }
         
-        return keyEvents;
+        if (hours > 0 || days > 0) {
+            formatted.append(hours).append("h ");
+        }
+        
+        if (minutes > 0 || hours > 0 || days > 0) {
+            formatted.append(minutes).append("m ");
+        }
+        
+        formatted.append(seconds).append("s");
+        
+        return formatted.toString();
+    }
+
+    /**
+     * Extracts key events from the full event list for summary display.
+     *
+     * @param events List of payment events for a transaction
+     * @return List of simplified event data for key events
+     */
+    private List<Map<String, Object>> extractKeyEvents(List<PaymentEvent> events) {
+        // Define key event types to include
+        Set<String> keyEventTypes = Stream.of(
+                "STATUS_CHANGE", "ERROR", "CAPTURE", "REFUND", "VOID"
+        ).collect(Collectors.toSet());
+        
+        // Filter to key events and sort chronologically
+        return events.stream()
+                .filter(e -> keyEventTypes.contains(e.getEventType()))
+                .sorted(Comparator.comparing(PaymentEvent::getCreatedAt))
+                .map(this::simplifyEvent)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Simplifies an event into a map of key information for summary display.
+     *
+     * @param event The event to simplify
+     * @return A map containing simplified event data
+     */
+    private Map<String, Object> simplifyEvent(PaymentEvent event) {
+        Map<String, Object> simplified = new HashMap<>();
+        
+        simplified.put("eventId", event.getEventId().toString());
+        simplified.put("eventType", event.getEventType());
+        simplified.put("timestamp", event.getCreatedAt().toString());
+        simplified.put("createdBy", event.getCreatedBy());
+        
+        if ("STATUS_CHANGE".equals(event.getEventType())) {
+            simplified.put("previousStatus", event.getPreviousStatus());
+            simplified.put("newStatus", event.getNewStatus());
+        }
+        
+        // Include a subset of event data if available
+        if (event.getEventData() != null && !event.getEventData().isEmpty()) {
+            simplified.put("data", event.getEventData());
+        }
+        
+        return simplified;
     }
 }

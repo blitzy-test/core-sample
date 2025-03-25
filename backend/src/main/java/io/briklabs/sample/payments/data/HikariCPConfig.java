@@ -5,13 +5,12 @@ import com.zaxxer.hikari.HikariDataSource;
 import io.briklabs.sample.config.ConfigSource;
 import io.briklabs.sample.config.DatabaseConfig;
 import io.briklabs.sample.config.PaymentDatabaseConfig;
-import io.briklabs.sample.config.HikariConfigurationProvider;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Configures and initializes the HikariCP connection pool specifically for payment operations.
@@ -21,89 +20,68 @@ import java.util.concurrent.TimeUnit;
 public class HikariCPConfig {
     private static final Logger logger = LoggerFactory.getLogger(HikariCPConfig.class);
     
-    // Default connection pool parameters optimized for payment processing
-    private static final int DEFAULT_MAXIMUM_POOL_SIZE = 40;
+    /**
+     * Thread-safe reference to the HikariCP data source.
+     */
+    private static final AtomicReference<HikariDataSource> dataSourceRef = new AtomicReference<>();
+    
+    /**
+     * Default connection pool parameters for payment transaction processing.
+     */
+    private static final int DEFAULT_MAXIMUM_POOL_SIZE = 30;
     private static final int DEFAULT_MINIMUM_IDLE = 10;
-    private static final long DEFAULT_CONNECTION_TIMEOUT_MS = 20000; // 20 seconds
-    private static final long DEFAULT_VALIDATION_TIMEOUT_MS = 5000; // 5 seconds
-    private static final long DEFAULT_IDLE_TIMEOUT_MS = 300000; // 5 minutes
-    private static final long DEFAULT_MAX_LIFETIME_MS = 1200000; // 20 minutes
+    private static final long DEFAULT_CONNECTION_TIMEOUT = 20000; // 20 seconds
+    private static final long DEFAULT_VALIDATION_TIMEOUT = 5000; // 5 seconds
+    private static final long DEFAULT_IDLE_TIMEOUT = 300000; // 5 minutes
+    private static final long DEFAULT_MAX_LIFETIME = 1200000; // 20 minutes
     private static final boolean DEFAULT_AUTO_COMMIT = false;
     private static final String DEFAULT_CONNECTION_TEST_QUERY = "SELECT 1";
-    private static final long DEFAULT_LEAK_DETECTION_THRESHOLD_MS = 60000; // 60 seconds
+    private static final long DEFAULT_LEAK_DETECTION_THRESHOLD = 60000; // 1 minute
     private static final boolean DEFAULT_REGISTER_MBEANS = true;
-    
-    private final ConfigSource configSource;
-    private final DatabaseConfig databaseConfig;
-    private final HikariConfigurationProvider hikariConfigProvider;
-    private HikariDataSource dataSource;
+    private static final String DEFAULT_POOL_NAME = "PaymentHikariPool";
     
     /**
-     * Constructs a new HikariCPConfig with the specified ConfigSource.
-     * Uses the PaymentDatabaseConfig for database connection parameters.
-     * 
-     * @param configSource The configuration source
+     * Private constructor to prevent instantiation.
+     * This class provides static methods only.
      */
-    public HikariCPConfig(ConfigSource configSource) {
-        this.configSource = configSource;
-        this.databaseConfig = new PaymentDatabaseConfig(configSource);
-        this.hikariConfigProvider = new HikariConfigurationProvider(configSource);
-        
-        logger.info("Initializing HikariCP connection pool for payment operations");
-        initializeDataSource();
+    private HikariCPConfig() {
+        // Private constructor to prevent instantiation
     }
     
     /**
-     * Constructs a new HikariCPConfig with the specified DatabaseConfig.
-     * 
+     * Initializes and returns the HikariCP data source for payment operations.
+     * This method is thread-safe and ensures the data source is initialized only once.
+     *
      * @param databaseConfig The database configuration
      * @param configSource The configuration source
+     * @return The initialized HikariDataSource
      */
-    public HikariCPConfig(DatabaseConfig databaseConfig, ConfigSource configSource) {
-        this.configSource = configSource;
-        this.databaseConfig = databaseConfig;
-        this.hikariConfigProvider = new HikariConfigurationProvider(configSource);
-        
-        logger.info("Initializing HikariCP connection pool for payment operations with custom database config");
-        initializeDataSource();
-    }
-    
-    /**
-     * Initializes the HikariCP data source with optimized settings for payment processing.
-     */
-    private void initializeDataSource() {
-        try {
-            // Validate database connection parameters
-            if (!databaseConfig.validateConnectionParameters()) {
-                throw new IllegalStateException("Payment database connection validation failed");
+    public static synchronized HikariDataSource getDataSource(DatabaseConfig databaseConfig, ConfigSource configSource) {
+        if (dataSourceRef.get() == null) {
+            logger.info("Initializing HikariCP connection pool for payment database");
+            try {
+                HikariConfig config = createHikariConfig(databaseConfig, configSource);
+                HikariDataSource dataSource = new HikariDataSource(config);
+                dataSourceRef.set(dataSource);
+                logger.info("HikariCP connection pool initialized successfully with maximumPoolSize={}, minimumIdle={}",
+                        config.getMaximumPoolSize(), config.getMinimumIdle());
+            } catch (Exception e) {
+                logger.error("Failed to initialize HikariCP connection pool: {}", e.getMessage(), e);
+                throw new RuntimeException("Failed to initialize connection pool: " + e.getMessage(), e);
             }
-            
-            // Create HikariConfig with payment-optimized settings
-            HikariConfig config = createHikariConfig();
-            
-            // Create the data source
-            dataSource = new HikariDataSource(config);
-            
-            logger.info("Payment HikariCP connection pool initialized successfully with maximumPoolSize={}, minimumIdle={}",
-                    config.getMaximumPoolSize(), config.getMinimumIdle());
-        } catch (Exception e) {
-            logger.error("Failed to initialize payment HikariCP connection pool", e);
-            throw new RuntimeException("Failed to initialize payment database connection pool", e);
         }
+        
+        return dataSourceRef.get();
     }
     
     /**
-     * Creates a HikariConfig with payment-optimized settings.
-     * 
-     * @return A configured HikariConfig object
+     * Creates a HikariCP configuration with settings optimized for payment transaction processing.
+     *
+     * @param databaseConfig The database configuration
+     * @param configSource The configuration source
+     * @return The HikariCP configuration
      */
-    private HikariConfig createHikariConfig() {
-        // Try to use the HikariConfigurationProvider first
-        if (hikariConfigProvider != null) {
-            return hikariConfigProvider.createPaymentHikariConfig(databaseConfig);
-        }
-        
-        // Fall back to manual configuration if provider is not available
+    private static HikariConfig createHikariConfig(DatabaseConfig databaseConfig, ConfigSource configSource) {
         HikariConfig config = new HikariConfig();
         
         // Set basic connection properties
@@ -112,206 +90,184 @@ public class HikariCPConfig {
         config.setPassword(databaseConfig.getDatabasePassword());
         config.setSchema(databaseConfig.getDatabaseSchema());
         
-        // Get connection pool configuration from DatabaseConfig if available
-        Map<String, Object> poolConfig = databaseConfig.getConnectionPoolConfig()
-                .orElseGet(() -> configSource.getPaymentConnectionPoolConfig());
+        // Get connection pool configuration from database config if available
+        Optional<Map<String, Object>> poolConfigOpt = databaseConfig.getConnectionPoolConfig();
         
-        // Set connection pool parameters with payment-optimized defaults
-        config.setMaximumPoolSize(getIntValue(poolConfig, "maximumPoolSize", DEFAULT_MAXIMUM_POOL_SIZE));
-        config.setMinimumIdle(getIntValue(poolConfig, "minimumIdle", DEFAULT_MINIMUM_IDLE));
-        config.setConnectionTimeout(getLongValue(poolConfig, "connectionTimeout", DEFAULT_CONNECTION_TIMEOUT_MS));
-        config.setValidationTimeout(getLongValue(poolConfig, "validationTimeout", DEFAULT_VALIDATION_TIMEOUT_MS));
-        config.setIdleTimeout(getLongValue(poolConfig, "idleTimeout", DEFAULT_IDLE_TIMEOUT_MS));
-        config.setMaxLifetime(getLongValue(poolConfig, "maxLifetime", DEFAULT_MAX_LIFETIME_MS));
-        config.setAutoCommit(getBooleanValue(poolConfig, "autoCommit", DEFAULT_AUTO_COMMIT));
-        config.setConnectionTestQuery(getStringValue(poolConfig, "connectionTestQuery", DEFAULT_CONNECTION_TEST_QUERY));
-        
-        // Set leak detection threshold
-        long leakDetectionThreshold = getLongValue(poolConfig, "leakDetectionThreshold", DEFAULT_LEAK_DETECTION_THRESHOLD_MS);
-        if (leakDetectionThreshold > 0) {
-            config.setLeakDetectionThreshold(leakDetectionThreshold);
+        if (poolConfigOpt.isPresent()) {
+            Map<String, Object> poolConfig = poolConfigOpt.get();
+            logger.debug("Using connection pool configuration from database config");
+            
+            // Apply pool configuration from database config
+            applyPoolConfiguration(config, poolConfig);
+        } else {
+            // Use payment-specific defaults
+            logger.debug("Using default payment-specific connection pool configuration");
+            setDefaultPaymentPoolConfiguration(config);
         }
         
-        // Enable JMX monitoring for operational visibility
-        config.setRegisterMbeans(getBooleanValue(poolConfig, "registerMbeans", DEFAULT_REGISTER_MBEANS));
-        
-        // Set pool name for monitoring and troubleshooting
-        config.setPoolName("PaymentHikariPool");
-        
-        // Configure additional PostgreSQL-specific properties
-        configurePostgresProperties(config);
+        // Ensure essential properties are set
+        validateAndApplyDefaults(config);
         
         return config;
     }
     
     /**
-     * Configures PostgreSQL-specific properties for the HikariConfig.
-     * 
-     * @param config The HikariConfig to configure
+     * Applies connection pool configuration from a map of properties.
+     *
+     * @param config The HikariCP configuration to update
+     * @param poolConfig The map of pool configuration properties
      */
-    private void configurePostgresProperties(HikariConfig config) {
-        // Set PostgreSQL-specific properties
-        config.addDataSourceProperty("cachePrepStmts", "true");
-        config.addDataSourceProperty("prepStmtCacheSize", "250");
-        config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
-        
-        // Enable SSL if configured
-        boolean sslEnabled = configSource.getPaymentConfigBoolean("database.ssl.enabled", true);
-        if (sslEnabled) {
-            config.addDataSourceProperty("ssl", "true");
-            config.addDataSourceProperty("sslmode", "verify-full");
+    private static void applyPoolConfiguration(HikariConfig config, Map<String, Object> poolConfig) {
+        // Apply each property with appropriate type handling
+        for (Map.Entry<String, Object> entry : poolConfig.entrySet()) {
+            String key = entry.getKey();
+            Object value = entry.getValue();
             
-            // Use appropriate SSL factory based on environment
-            String environment = configSource.getOrDefault("brik.environment", "development");
-            if ("production".equals(environment)) {
-                config.addDataSourceProperty("sslfactory", "org.postgresql.ssl.DefaultJavaSSLFactory");
-            } else {
-                config.addDataSourceProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory");
+            if (value == null) {
+                continue;
+            }
+            
+            try {
+                switch (key) {
+                    case "maximumPoolSize":
+                        config.setMaximumPoolSize(getIntValue(poolConfig, key, DEFAULT_MAXIMUM_POOL_SIZE));
+                        break;
+                    case "minimumIdle":
+                        config.setMinimumIdle(getIntValue(poolConfig, key, DEFAULT_MINIMUM_IDLE));
+                        break;
+                    case "connectionTimeout":
+                        config.setConnectionTimeout(getLongValue(poolConfig, key, DEFAULT_CONNECTION_TIMEOUT));
+                        break;
+                    case "validationTimeout":
+                        config.setValidationTimeout(getLongValue(poolConfig, key, DEFAULT_VALIDATION_TIMEOUT));
+                        break;
+                    case "idleTimeout":
+                        config.setIdleTimeout(getLongValue(poolConfig, key, DEFAULT_IDLE_TIMEOUT));
+                        break;
+                    case "maxLifetime":
+                        config.setMaxLifetime(getLongValue(poolConfig, key, DEFAULT_MAX_LIFETIME));
+                        break;
+                    case "autoCommit":
+                        config.setAutoCommit(getBooleanValue(poolConfig, key, DEFAULT_AUTO_COMMIT));
+                        break;
+                    case "connectionTestQuery":
+                        config.setConnectionTestQuery(getStringValue(poolConfig, key, DEFAULT_CONNECTION_TEST_QUERY));
+                        break;
+                    case "leakDetectionThreshold":
+                        config.setLeakDetectionThreshold(getLongValue(poolConfig, key, DEFAULT_LEAK_DETECTION_THRESHOLD));
+                        break;
+                    case "registerMbeans":
+                        config.setRegisterMbeans(getBooleanValue(poolConfig, key, DEFAULT_REGISTER_MBEANS));
+                        break;
+                    case "poolName":
+                        config.setPoolName(getStringValue(poolConfig, key, DEFAULT_POOL_NAME));
+                        break;
+                    default:
+                        // For other properties, add as data source property
+                        config.addDataSourceProperty(key, value);
+                        break;
+                }
+            } catch (Exception e) {
+                logger.warn("Failed to set HikariCP property {}: {}", key, e.getMessage());
             }
         }
     }
     
     /**
-     * Gets the HikariDataSource for payment database operations.
-     * 
-     * @return The configured HikariDataSource
+     * Sets default payment-specific connection pool configuration.
+     *
+     * @param config The HikariCP configuration to update
      */
-    public HikariDataSource getDataSource() {
-        if (dataSource == null || dataSource.isClosed()) {
-            initializeDataSource();
-        }
-        return dataSource;
+    private static void setDefaultPaymentPoolConfiguration(HikariConfig config) {
+        config.setMaximumPoolSize(DEFAULT_MAXIMUM_POOL_SIZE);
+        config.setMinimumIdle(DEFAULT_MINIMUM_IDLE);
+        config.setConnectionTimeout(DEFAULT_CONNECTION_TIMEOUT);
+        config.setValidationTimeout(DEFAULT_VALIDATION_TIMEOUT);
+        config.setIdleTimeout(DEFAULT_IDLE_TIMEOUT);
+        config.setMaxLifetime(DEFAULT_MAX_LIFETIME);
+        config.setAutoCommit(DEFAULT_AUTO_COMMIT);
+        config.setConnectionTestQuery(DEFAULT_CONNECTION_TEST_QUERY);
+        config.setLeakDetectionThreshold(DEFAULT_LEAK_DETECTION_THRESHOLD);
+        config.setRegisterMbeans(DEFAULT_REGISTER_MBEANS);
+        config.setPoolName(DEFAULT_POOL_NAME);
+        
+        // Additional optimizations for payment processing
+        config.setInitializationFailTimeout(10000); // 10 seconds
+        config.setKeepaliveTime(60000); // 1 minute
     }
     
     /**
-     * Closes the HikariDataSource, releasing all resources.
+     * Validates the configuration and applies defaults for any missing essential properties.
+     *
+     * @param config The HikariCP configuration to validate and update
      */
-    public void close() {
-        if (dataSource != null && !dataSource.isClosed()) {
-            logger.info("Closing payment HikariCP connection pool");
-            dataSource.close();
-        }
-    }
-    
-    /**
-     * Gets the current health status of the connection pool.
-     * 
-     * @return A string representation of the pool health
-     */
-    public String getHealthStatus() {
-        if (dataSource == null || dataSource.isClosed()) {
-            return "CLOSED";
+    private static void validateAndApplyDefaults(HikariConfig config) {
+        // Ensure essential properties have valid values
+        if (config.getMaximumPoolSize() <= 0) {
+            logger.warn("Invalid maximumPoolSize ({}), using default: {}", 
+                    config.getMaximumPoolSize(), DEFAULT_MAXIMUM_POOL_SIZE);
+            config.setMaximumPoolSize(DEFAULT_MAXIMUM_POOL_SIZE);
         }
         
-        StringBuilder status = new StringBuilder();
-        status.append("ACTIVE: ");
-        status.append("Total=").append(dataSource.getHikariPoolMXBean().getTotalConnections());
-        status.append(", Active=").append(dataSource.getHikariPoolMXBean().getActiveConnections());
-        status.append(", Idle=").append(dataSource.getHikariPoolMXBean().getIdleConnections());
-        status.append(", Waiting=").append(dataSource.getHikariPoolMXBean().getThreadsAwaitingConnection());
-        
-        return status.toString();
-    }
-    
-    /**
-     * Gets the maximum pool size.
-     * 
-     * @return The maximum number of connections in the pool
-     */
-    public int getMaximumPoolSize() {
-        return dataSource.getHikariConfigMXBean().getMaximumPoolSize();
-    }
-    
-    /**
-     * Gets the current number of active connections.
-     * 
-     * @return The number of active connections
-     */
-    public int getActiveConnections() {
-        return dataSource.getHikariPoolMXBean().getActiveConnections();
-    }
-    
-    /**
-     * Gets the current number of idle connections.
-     * 
-     * @return The number of idle connections
-     */
-    public int getIdleConnections() {
-        return dataSource.getHikariPoolMXBean().getIdleConnections();
-    }
-    
-    /**
-     * Gets the current number of threads waiting for a connection.
-     * 
-     * @return The number of threads waiting for a connection
-     */
-    public int getThreadsAwaitingConnection() {
-        return dataSource.getHikariPoolMXBean().getThreadsAwaitingConnection();
-    }
-    
-    /**
-     * Gets the connection timeout in milliseconds.
-     * 
-     * @return The connection timeout in milliseconds
-     */
-    public long getConnectionTimeout() {
-        return dataSource.getHikariConfigMXBean().getConnectionTimeout();
-    }
-    
-    /**
-     * Gets the validation timeout in milliseconds.
-     * 
-     * @return The validation timeout in milliseconds
-     */
-    public long getValidationTimeout() {
-        return dataSource.getHikariConfigMXBean().getValidationTimeout();
-    }
-    
-    /**
-     * Gets the leak detection threshold in milliseconds.
-     * 
-     * @return The leak detection threshold in milliseconds
-     */
-    public long getLeakDetectionThreshold() {
-        return dataSource.getHikariConfigMXBean().getLeakDetectionThreshold();
-    }
-    
-    /**
-     * Formats a duration in a human-readable format.
-     * 
-     * @param millis Duration in milliseconds
-     * @return Human-readable duration string
-     */
-    public static String formatDuration(long millis) {
-        if (millis < 1000) {
-            return millis + "ms";
+        if (config.getMinimumIdle() < 0) {
+            logger.warn("Invalid minimumIdle ({}), using default: {}", 
+                    config.getMinimumIdle(), DEFAULT_MINIMUM_IDLE);
+            config.setMinimumIdle(DEFAULT_MINIMUM_IDLE);
         }
         
-        long seconds = TimeUnit.MILLISECONDS.toSeconds(millis);
-        if (seconds < 60) {
-            return seconds + "s";
+        if (config.getMinimumIdle() > config.getMaximumPoolSize()) {
+            logger.warn("minimumIdle ({}) > maximumPoolSize ({}), adjusting minimumIdle", 
+                    config.getMinimumIdle(), config.getMaximumPoolSize());
+            config.setMinimumIdle(Math.min(config.getMaximumPoolSize(), DEFAULT_MINIMUM_IDLE));
         }
         
-        long minutes = TimeUnit.SECONDS.toMinutes(seconds);
-        seconds = seconds % 60;
-        if (minutes < 60) {
-            return minutes + "m " + seconds + "s";
+        if (config.getConnectionTimeout() <= 0) {
+            logger.warn("Invalid connectionTimeout ({}), using default: {}", 
+                    config.getConnectionTimeout(), DEFAULT_CONNECTION_TIMEOUT);
+            config.setConnectionTimeout(DEFAULT_CONNECTION_TIMEOUT);
         }
         
-        long hours = TimeUnit.MINUTES.toHours(minutes);
-        minutes = minutes % 60;
-        return hours + "h " + minutes + "m";
+        if (config.getValidationTimeout() <= 0) {
+            logger.warn("Invalid validationTimeout ({}), using default: {}", 
+                    config.getValidationTimeout(), DEFAULT_VALIDATION_TIMEOUT);
+            config.setValidationTimeout(DEFAULT_VALIDATION_TIMEOUT);
+        }
+        
+        if (config.getIdleTimeout() <= 0) {
+            logger.warn("Invalid idleTimeout ({}), using default: {}", 
+                    config.getIdleTimeout(), DEFAULT_IDLE_TIMEOUT);
+            config.setIdleTimeout(DEFAULT_IDLE_TIMEOUT);
+        }
+        
+        if (config.getMaxLifetime() <= 0) {
+            logger.warn("Invalid maxLifetime ({}), using default: {}", 
+                    config.getMaxLifetime(), DEFAULT_MAX_LIFETIME);
+            config.setMaxLifetime(DEFAULT_MAX_LIFETIME);
+        }
+        
+        // Validate relationships between timeout values
+        if (config.getIdleTimeout() < config.getConnectionTimeout()) {
+            logger.warn("Suboptimal configuration: idleTimeout ({}) < connectionTimeout ({})", 
+                    config.getIdleTimeout(), config.getConnectionTimeout());
+        }
+        
+        if (config.getMaxLifetime() <= config.getIdleTimeout()) {
+            logger.warn("Suboptimal configuration: maxLifetime ({}) <= idleTimeout ({})", 
+                    config.getMaxLifetime(), config.getIdleTimeout());
+            // Adjust maxLifetime to be at least 30 minutes longer than idleTimeout
+            config.setMaxLifetime(config.getIdleTimeout() + 1800000);
+        }
     }
     
     /**
      * Gets an integer value from a map with a default fallback.
-     * 
+     *
      * @param map The map to get the value from
      * @param key The key to look up
      * @param defaultValue The default value to use if the key is not found or not an integer
      * @return The integer value
      */
-    private int getIntValue(Map<String, Object> map, String key, int defaultValue) {
+    private static int getIntValue(Map<String, Object> map, String key, int defaultValue) {
         Object value = map.get(key);
         if (value instanceof Integer) {
             return (Integer) value;
@@ -330,13 +286,13 @@ public class HikariCPConfig {
     
     /**
      * Gets a long value from a map with a default fallback.
-     * 
+     *
      * @param map The map to get the value from
      * @param key The key to look up
      * @param defaultValue The default value to use if the key is not found or not a long
      * @return The long value
      */
-    private long getLongValue(Map<String, Object> map, String key, long defaultValue) {
+    private static long getLongValue(Map<String, Object> map, String key, long defaultValue) {
         Object value = map.get(key);
         if (value instanceof Long) {
             return (Long) value;
@@ -357,13 +313,13 @@ public class HikariCPConfig {
     
     /**
      * Gets a boolean value from a map with a default fallback.
-     * 
+     *
      * @param map The map to get the value from
      * @param key The key to look up
      * @param defaultValue The default value to use if the key is not found or not a boolean
      * @return The boolean value
      */
-    private boolean getBooleanValue(Map<String, Object> map, String key, boolean defaultValue) {
+    private static boolean getBooleanValue(Map<String, Object> map, String key, boolean defaultValue) {
         Object value = map.get(key);
         if (value instanceof Boolean) {
             return (Boolean) value;
@@ -375,17 +331,86 @@ public class HikariCPConfig {
     
     /**
      * Gets a string value from a map with a default fallback.
-     * 
+     *
      * @param map The map to get the value from
      * @param key The key to look up
      * @param defaultValue The default value to use if the key is not found or not a string
      * @return The string value
      */
-    private String getStringValue(Map<String, Object> map, String key, String defaultValue) {
+    private static String getStringValue(Map<String, Object> map, String key, String defaultValue) {
         Object value = map.get(key);
         if (value instanceof String) {
             return (String) value;
         }
         return value != null ? value.toString() : defaultValue;
+    }
+    
+    /**
+     * Gets the current connection pool metrics.
+     *
+     * @return A map of connection pool metrics
+     */
+    public static Map<String, Object> getPoolMetrics() {
+        HikariDataSource dataSource = dataSourceRef.get();
+        if (dataSource == null) {
+            return Map.of("status", "not_initialized");
+        }
+        
+        return Map.of(
+            "status", dataSource.isClosed() ? "closed" : "active",
+            "activeConnections", dataSource.getHikariPoolMXBean().getActiveConnections(),
+            "idleConnections", dataSource.getHikariPoolMXBean().getIdleConnections(),
+            "totalConnections", dataSource.getHikariPoolMXBean().getTotalConnections(),
+            "threadsAwaitingConnection", dataSource.getHikariPoolMXBean().getThreadsAwaitingConnection(),
+            "maximumPoolSize", dataSource.getHikariPoolMXBean().getMaximumPoolSize()
+        );
+    }
+    
+    /**
+     * Checks if the connection pool is healthy.
+     *
+     * @return true if the connection pool is initialized and not closed, false otherwise
+     */
+    public static boolean isHealthy() {
+        HikariDataSource dataSource = dataSourceRef.get();
+        return dataSource != null && !dataSource.isClosed();
+    }
+    
+    /**
+     * Closes the connection pool and releases all resources.
+     * This method should be called during application shutdown.
+     */
+    public static void shutdown() {
+        HikariDataSource dataSource = dataSourceRef.get();
+        if (dataSource != null && !dataSource.isClosed()) {
+            logger.info("Shutting down HikariCP connection pool for payment database");
+            dataSource.close();
+            dataSourceRef.set(null);
+        }
+    }
+    
+    /**
+     * Creates a new HikariDataSource specifically for payment operations.
+     * This method is useful for testing or when a separate connection pool is needed.
+     *
+     * @param databaseConfig The database configuration
+     * @param configSource The configuration source
+     * @return A new HikariDataSource
+     */
+    public static HikariDataSource createDataSource(DatabaseConfig databaseConfig, ConfigSource configSource) {
+        HikariConfig config = createHikariConfig(databaseConfig, configSource);
+        return new HikariDataSource(config);
+    }
+    
+    /**
+     * Gets a HikariDataSource using a PaymentDatabaseConfig.
+     * This is a convenience method for payment-specific database configurations.
+     *
+     * @param paymentDbConfig The payment database configuration
+     * @param configSource The configuration source
+     * @return The initialized HikariDataSource
+     */
+    public static HikariDataSource getDataSource(PaymentDatabaseConfig paymentDbConfig, ConfigSource configSource) {
+        return getDataSource((DatabaseConfig) paymentDbConfig, configSource);
     }
 }

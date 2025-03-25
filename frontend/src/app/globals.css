@@ -7,19 +7,15 @@
   --foreground: #171717;
   
   /* Payment status colors */
-  --payment-success: #10b981; /* Green for successful/completed transactions */
-  --payment-pending: #f59e0b; /* Amber for processing/pending transactions */
-  --payment-failed: #ef4444; /* Red for failed/error transactions */
-  --payment-attention: #6366f1; /* Indigo for transactions requiring attention */
+  --payment-status-success: #10b981; /* Green for successful/completed payments */
+  --payment-status-pending: #f59e0b; /* Amber for processing/pending payments */
+  --payment-status-failed: #ef4444; /* Red for failed/error payments */
+  --payment-status-attention: #3b82f6; /* Blue for payments requiring attention */
   
-  /* Payment UI component colors */
-  --payment-capture-action: #3b82f6; /* Blue for capture actions */
-  --payment-refund-action: #f97316; /* Orange for refund actions */
-  --payment-void-action: #64748b; /* Slate for void actions */
-  
-  /* Payment card background colors */
-  --payment-card-bg-light: #f8fafc;
-  --payment-card-bg-dark: #1e293b;
+  /* Payment action colors */
+  --payment-action-capture: #0ea5e9; /* Sky blue for capture actions */
+  --payment-action-refund: #8b5cf6; /* Purple for refund actions */
+  --payment-action-void: #6b7280; /* Gray for void actions */
 }
 
 @layer base {
@@ -35,98 +31,80 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    
+    /* Payment status colors - dark mode */
+    --payment-status-success: #34d399; /* Lighter green for dark mode */
+    --payment-status-pending: #fbbf24; /* Lighter amber for dark mode */
+    --payment-status-failed: #f87171; /* Lighter red for dark mode */
+    --payment-status-attention: #60a5fa; /* Lighter blue for dark mode */
+    
+    /* Payment action colors - dark mode */
+    --payment-action-capture: #38bdf8; /* Lighter sky blue for dark mode */
+    --payment-action-refund: #a78bfa; /* Lighter purple for dark mode */
+    --payment-action-void: #9ca3af; /* Lighter gray for dark mode */
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans, Arial, Helvetica, sans-serif);
+  font-family: Arial, Helvetica, sans-serif;
 }
 
-/* Payment-specific responsive utility classes */
-@layer utilities {
-  /* Payment card layouts */
-  .payment-card {
-    @apply rounded-lg border p-4 shadow-sm;
-  }
-  
-  /* Payment status indicators */
-  .payment-status-success {
-    @apply text-[var(--payment-success)] bg-[var(--payment-success)]/10 px-2 py-1 rounded-full text-xs font-medium;
-  }
-  
-  .payment-status-pending {
-    @apply text-[var(--payment-pending)] bg-[var(--payment-pending)]/10 px-2 py-1 rounded-full text-xs font-medium;
-  }
-  
-  .payment-status-failed {
-    @apply text-[var(--payment-failed)] bg-[var(--payment-failed)]/10 px-2 py-1 rounded-full text-xs font-medium;
-  }
-  
-  .payment-status-attention {
-    @apply text-[var(--payment-attention)] bg-[var(--payment-attention)]/10 px-2 py-1 rounded-full text-xs font-medium;
-  }
-  
-  /* Payment action buttons */
-  .payment-action-btn {
-    @apply px-4 py-2 rounded-md font-medium transition-colors;
-  }
-  
-  .payment-action-capture {
-    @apply bg-[var(--payment-capture-action)] text-white hover:bg-[var(--payment-capture-action)]/90;
-  }
-  
-  .payment-action-refund {
-    @apply bg-[var(--payment-refund-action)] text-white hover:bg-[var(--payment-refund-action)]/90;
-  }
-  
-  .payment-action-void {
-    @apply bg-[var(--payment-void-action)] text-white hover:bg-[var(--payment-void-action)]/90;
-  }
-  
-  /* Responsive payment table/card transformations */
-  .payment-table-row {
-    @apply grid grid-cols-1 gap-2 sm:table-row;
-  }
-  
-  .payment-table-cell {
-    @apply block sm:table-cell py-2 sm:py-4;
-  }
-  
-  .payment-table-cell-label {
-    @apply font-medium sm:hidden;
-  }
-  
-  /* Touch-friendly targets for mobile */
-  .payment-touch-target {
-    @apply min-h-[44px] min-w-[44px] flex items-center justify-center;
-  }
-  
-  /* Payment filter components */
-  .payment-filter-container {
-    @apply fixed inset-x-0 bottom-0 sm:static bg-[var(--background)] sm:bg-transparent p-4 sm:p-0 border-t sm:border-0 z-10 sm:z-auto;
-  }
-  
-  .payment-filter-toggle {
-    @apply fixed bottom-4 right-4 sm:hidden rounded-full w-12 h-12 flex items-center justify-center bg-[var(--payment-capture-action)] text-white shadow-lg z-20;
-  }
-  
-  /* Payment form controls */
-  .payment-form-input {
-    @apply w-full rounded-md border border-gray-300 dark:border-gray-700 px-3 py-2 min-h-[44px] sm:min-h-[36px];
-  }
-  
-  /* Payment modal sizes */
-  .payment-modal-sm {
-    @apply w-full sm:max-w-[400px] mx-auto;
-  }
-  
-  .payment-modal-md {
-    @apply w-full sm:max-w-[600px] mx-auto;
-  }
-  
-  .payment-modal-lg {
-    @apply w-full sm:max-w-[800px] mx-auto;
-  }
+/* Payment status indicator styles */
+.payment-status-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+}
+
+.payment-status-success {
+  background-color: var(--payment-status-success);
+  color: white;
+}
+
+.payment-status-pending {
+  background-color: var(--payment-status-pending);
+  color: white;
+}
+
+.payment-status-failed {
+  background-color: var(--payment-status-failed);
+  color: white;
+}
+
+.payment-status-attention {
+  background-color: var(--payment-status-attention);
+  color: white;
+}
+
+/* Payment card styles */
+.payment-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  transition: all 0.2s ease;
+}
+
+.payment-card:hover {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+/* Payment action button styles */
+.payment-action-capture {
+  background-color: var(--payment-action-capture);
+  color: white;
+}
+
+.payment-action-refund {
+  background-color: var(--payment-action-refund);
+  color: white;
+}
+
+.payment-action-void {
+  background-color: var(--payment-action-void);
+  color: white;
 }

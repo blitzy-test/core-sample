@@ -1,187 +1,264 @@
 package io.briklabs.sample.rest;
 
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.container.ResourceContext;
-import javax.ws.rs.core.Context;
-
 import com.zaxxer.hikari.HikariDataSource;
-
+import io.briklabs.sample.payments.data.dao.PaymentDAOFactory;
 import io.briklabs.sample.payments.rest.TransactionResource;
 import io.briklabs.sample.payments.rest.TransactionProcessingResource;
 import io.briklabs.sample.payments.rest.TransactionEventResource;
-import io.swagger.v3.oas.annotations.Operation;
-import io.swagger.v3.oas.annotations.Parameter;
+import io.briklabs.sample.payments.service.PaymentTransactionService;
+import io.briklabs.sample.payments.service.PaymentQueryService;
+import io.briklabs.sample.payments.service.PaymentValidationService;
+import io.swagger.v3.oas.annotations.OpenAPIDefinition;
+import io.swagger.v3.oas.annotations.info.Info;
 import io.swagger.v3.oas.annotations.tags.Tag;
+
+import javax.ws.rs.ApplicationPath;
+import javax.ws.rs.container.ContainerRequestContext;
+import javax.ws.rs.container.ContainerRequestFilter;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.ext.Provider;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Routing configuration for payment-related REST endpoints.
- * This class serves as a bridge between the core REST application and the specialized payment endpoints,
- * mapping URI patterns to their respective resources.
+ * <p>
+ * This class serves as a bridge between the core REST application and the specialized
+ * payment endpoints, mapping URI patterns to their respective resources. It handles
+ * special path parameters like the '_all' placeholder for retrieving data across
+ * accounts or transactions.
+ * </p>
  * <p>
  * The routing follows the pattern: /organizations/{org_id}/accounts/{account_id}/transactions/
- * with support for the special '_all' placeholder to retrieve data for all accounts or transactions.
+ * </p>
  */
-@Path("/organizations/{org_id}")
-@Tag(name = "Payments", description = "Payment transaction operations")
-public class PaymentRestRouting {
-
-    @Context
-    private ResourceContext resourceContext;
+@Provider
+@OpenAPIDefinition(
+    info = @Info(
+        title = "Payment API",
+        version = "1.0.0",
+        description = "API for payment transaction processing"
+    ),
+    tags = {
+        @Tag(name = "Payments", description = "Payment transaction operations")
+    }
+)
+public class PaymentRestRouting implements ContainerRequestFilter {
+    private static final Logger logger = LoggerFactory.getLogger(PaymentRestRouting.class);
+    
+    // URI pattern for payment endpoints
+    private static final Pattern PAYMENT_URI_PATTERN = Pattern.compile(
+            "/organizations/([^/]+)/accounts/([^/]+)/transactions(?:/([^/]+))?(?:/([^/]+))?");
     
     private final HikariDataSource dataSource;
+    private final PaymentTransactionService transactionService;
+    private final PaymentQueryService queryService;
+    private final PaymentValidationService validationService;
     
     /**
-     * Creates a new PaymentRestRouting instance with the specified data source.
+     * Constructor with HikariDataSource dependency.
      * 
-     * @param dataSource The HikariCP connection pool for payment data access
+     * @param dataSource The HikariCP connection pool for database operations
      */
     public PaymentRestRouting(HikariDataSource dataSource) {
         this.dataSource = dataSource;
+        
+        // Initialize services using the DAO factory
+        PaymentDAOFactory daoFactory = new PaymentDAOFactory(dataSource);
+        this.transactionService = new PaymentTransactionService(daoFactory);
+        this.queryService = new PaymentQueryService(daoFactory);
+        this.validationService = new PaymentValidationService();
+        
+        logger.info("Payment REST routing initialized");
     }
     
     /**
-     * Routes requests to account-level payment endpoints.
+     * Filters incoming requests to handle payment-specific routing.
+     * <p>
+     * This method intercepts requests matching the payment URI pattern and performs
+     * validation and preprocessing before the request reaches the appropriate resource.
+     * It handles special path parameters like '_all' for retrieving data across
+     * accounts or transactions.
+     * </p>
      * 
-     * @param organizationId The organization identifier
-     * @return The account-level payment routing resource
+     * @param requestContext The container request context
+     * @throws IOException If an I/O error occurs
      */
-    @Path("/accounts/{account_id}")
-    @Operation(
-        summary = "Access account-level payment operations",
-        description = "Routes to payment operations for a specific account within an organization."
-    )
-    public AccountPaymentRouting getAccountPaymentRouting(
-            @Parameter(description = "Organization identifier", required = true)
-            @PathParam("org_id") String organizationId) {
+    @Override
+    public void filter(ContainerRequestContext requestContext) throws IOException {
+        String path = requestContext.getUriInfo().getPath();
         
-        return resourceContext.getResource(AccountPaymentRouting.class);
+        // Check if the request matches the payment URI pattern
+        Matcher matcher = PAYMENT_URI_PATTERN.matcher(path);
+        if (!matcher.matches()) {
+            // Not a payment endpoint, continue with normal processing
+            return;
+        }
+        
+        logger.debug("Processing payment request: {}", path);
+        
+        try {
+            // Extract path parameters
+            String orgId = matcher.group(1);
+            String accountId = matcher.group(2);
+            String transactionId = matcher.group(3); // May be null for collection endpoints
+            String action = matcher.group(4); // May be null for standard endpoints
+            
+            // Validate organization ID
+            try {
+                UUID.fromString(orgId);
+            } catch (IllegalArgumentException e) {
+                logger.warn("Invalid organization ID format: {}", orgId);
+                sendErrorResponse(requestContext, Response.Status.BAD_REQUEST, 
+                        "Invalid organization ID format");
+                return;
+            }
+            
+            // Validate account ID (unless it's the special '_all' placeholder)
+            if (!"_all".equals(accountId)) {
+                try {
+                    UUID.fromString(accountId);
+                } catch (IllegalArgumentException e) {
+                    logger.warn("Invalid account ID format: {}", accountId);
+                    sendErrorResponse(requestContext, Response.Status.BAD_REQUEST, 
+                            "Invalid account ID format");
+                    return;
+                }
+            }
+            
+            // Validate transaction ID if present (unless it's the special '_all' placeholder)
+            if (transactionId != null && !"_all".equals(transactionId)) {
+                try {
+                    UUID.fromString(transactionId);
+                } catch (IllegalArgumentException e) {
+                    logger.warn("Invalid transaction ID format: {}", transactionId);
+                    sendErrorResponse(requestContext, Response.Status.BAD_REQUEST, 
+                            "Invalid transaction ID format");
+                    return;
+                }
+            }
+            
+            // Check for valid actions if specified
+            if (action != null && !isValidAction(action)) {
+                logger.warn("Invalid payment action: {}", action);
+                sendErrorResponse(requestContext, Response.Status.NOT_FOUND, 
+                        "Invalid payment action");
+                return;
+            }
+            
+            // Store validated parameters in request properties for use by resources
+            requestContext.setProperty("organizationId", orgId);
+            requestContext.setProperty("accountId", accountId);
+            if (transactionId != null) {
+                requestContext.setProperty("transactionId", transactionId);
+            }
+            if (action != null) {
+                requestContext.setProperty("action", action);
+            }
+            
+            // Set services in request properties for dependency injection
+            requestContext.setProperty("transactionService", transactionService);
+            requestContext.setProperty("queryService", queryService);
+            requestContext.setProperty("validationService", validationService);
+            
+            // Integrate with Access Rights module for payment endpoint authorization
+            if (!checkAccessRights(requestContext)) {
+                logger.warn("Access denied for payment operation");
+                sendErrorResponse(requestContext, Response.Status.FORBIDDEN, 
+                        "Insufficient permissions for this payment operation");
+                return;
+            }
+            
+            logger.debug("Payment request validated and routed successfully");
+            
+        } catch (Exception e) {
+            logger.error("Error processing payment request", e);
+            sendErrorResponse(requestContext, Response.Status.INTERNAL_SERVER_ERROR, 
+                    "Error processing payment request: " + e.getMessage());
+        }
     }
     
     /**
-     * Routes requests to organization-wide payment endpoints using the '_all' placeholder.
-     * This allows querying transactions across all accounts within an organization.
+     * Checks if the specified action is valid for payment transactions.
      * 
-     * @param organizationId The organization identifier
-     * @return The transaction resource for organization-wide operations
+     * @param action The action to validate
+     * @return true if the action is valid, false otherwise
      */
-    @Path("/accounts/_all/transactions")
-    @Operation(
-        summary = "Access organization-wide payment transactions",
-        description = "Routes to payment operations across all accounts within an organization using the '_all' placeholder."
-    )
-    public TransactionResource getOrganizationTransactions(
-            @Parameter(description = "Organization identifier", required = true)
-            @PathParam("org_id") String organizationId) {
-        
-        TransactionResource resource = resourceContext.getResource(TransactionResource.class);
-        resource.setDataSource(dataSource);
-        resource.setOrganizationId(organizationId);
-        resource.setAllAccounts(true);
-        return resource;
+    private boolean isValidAction(String action) {
+        return "process".equals(action) || 
+               "capture".equals(action) || 
+               "refund".equals(action) || 
+               "void".equals(action) || 
+               "events".equals(action);
     }
     
     /**
-     * Nested resource class for account-level payment routing.
+     * Checks access rights for the current request against the Access Rights module.
+     * 
+     * @param requestContext The container request context
+     * @return true if access is granted, false otherwise
      */
-    @Path("/")
-    public static class AccountPaymentRouting {
+    private boolean checkAccessRights(ContainerRequestContext requestContext) {
+        // This is a placeholder for integration with the Access Rights module
+        // In a real implementation, this would check the user's permissions
+        // against the requested operation and resource
         
-        @Context
-        private ResourceContext resourceContext;
+        // For now, we'll assume access is granted
+        // TODO: Implement actual integration with Access Rights module
+        return true;
+    }
+    
+    /**
+     * Sends an error response and aborts the request processing.
+     * 
+     * @param requestContext The container request context
+     * @param status The HTTP status code
+     * @param message The error message
+     */
+    private void sendErrorResponse(ContainerRequestContext requestContext, 
+                                  Response.Status status, 
+                                  String message) {
+        Map<String, Object> errorResponse = new HashMap<>();
+        errorResponse.put("status", "error");
+        errorResponse.put("message", message);
         
-        private HikariDataSource dataSource;
-        
-        /**
-         * Sets the data source for this routing resource.
-         * 
-         * @param dataSource The HikariCP connection pool for payment data access
-         */
-        public void setDataSource(HikariDataSource dataSource) {
-            this.dataSource = dataSource;
-        }
-        
-        /**
-         * Routes requests to transaction-level endpoints for a specific account.
-         * 
-         * @param organizationId The organization identifier
-         * @param accountId The account identifier
-         * @return The transaction resource for account-specific operations
-         */
-        @Path("/transactions")
-        @Operation(
-            summary = "Access account-specific payment transactions",
-            description = "Routes to payment transaction operations for a specific account."
-        )
-        public TransactionResource getAccountTransactions(
-                @Parameter(description = "Organization identifier", required = true)
-                @PathParam("org_id") String organizationId,
-                @Parameter(description = "Account identifier", required = true)
-                @PathParam("account_id") String accountId) {
-            
-            TransactionResource resource = resourceContext.getResource(TransactionResource.class);
-            resource.setDataSource(dataSource);
-            resource.setOrganizationId(organizationId);
-            resource.setAccountId(accountId);
-            return resource;
-        }
-        
-        /**
-         * Routes requests to transaction processing endpoints for a specific transaction.
-         * 
-         * @param organizationId The organization identifier
-         * @param accountId The account identifier
-         * @param transactionId The transaction identifier
-         * @return The transaction processing resource for lifecycle operations
-         */
-        @Path("/transactions/{transaction_id}")
-        @Operation(
-            summary = "Access specific transaction operations",
-            description = "Routes to operations for a specific transaction including retrieval, processing, capturing, and refunding."
-        )
-        public TransactionProcessingResource getTransactionProcessing(
-                @Parameter(description = "Organization identifier", required = true)
-                @PathParam("org_id") String organizationId,
-                @Parameter(description = "Account identifier", required = true)
-                @PathParam("account_id") String accountId,
-                @Parameter(description = "Transaction identifier", required = true)
-                @PathParam("transaction_id") String transactionId) {
-            
-            TransactionProcessingResource resource = resourceContext.getResource(TransactionProcessingResource.class);
-            resource.setDataSource(dataSource);
-            resource.setOrganizationId(organizationId);
-            resource.setAccountId(accountId);
-            resource.setTransactionId(transactionId);
-            return resource;
-        }
-        
-        /**
-         * Routes requests to transaction event history endpoints for a specific transaction.
-         * 
-         * @param organizationId The organization identifier
-         * @param accountId The account identifier
-         * @param transactionId The transaction identifier
-         * @return The transaction event resource for event history operations
-         */
-        @Path("/transactions/{transaction_id}/events")
-        @Operation(
-            summary = "Access transaction event history",
-            description = "Routes to operations for retrieving the event history of a specific transaction."
-        )
-        public TransactionEventResource getTransactionEvents(
-                @Parameter(description = "Organization identifier", required = true)
-                @PathParam("org_id") String organizationId,
-                @Parameter(description = "Account identifier", required = true)
-                @PathParam("account_id") String accountId,
-                @Parameter(description = "Transaction identifier", required = true)
-                @PathParam("transaction_id") String transactionId) {
-            
-            TransactionEventResource resource = resourceContext.getResource(TransactionEventResource.class);
-            resource.setDataSource(dataSource);
-            resource.setOrganizationId(organizationId);
-            resource.setAccountId(accountId);
-            resource.setTransactionId(transactionId);
-            return resource;
-        }
+        requestContext.abortWith(
+                Response.status(status)
+                        .entity(errorResponse)
+                        .build());
+    }
+    
+    /**
+     * Gets the transaction service instance.
+     * 
+     * @return The transaction service
+     */
+    public PaymentTransactionService getTransactionService() {
+        return transactionService;
+    }
+    
+    /**
+     * Gets the query service instance.
+     * 
+     * @return The query service
+     */
+    public PaymentQueryService getQueryService() {
+        return queryService;
+    }
+    
+    /**
+     * Gets the validation service instance.
+     * 
+     * @return The validation service
+     */
+    public PaymentValidationService getValidationService() {
+        return validationService;
     }
 }

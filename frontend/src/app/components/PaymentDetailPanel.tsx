@@ -1,67 +1,75 @@
 import React from 'react';
 import PaymentStatusIndicator, { PaymentStatus } from './PaymentStatusIndicator';
-import PaymentAmountDisplay from './PaymentAmountDisplay';
-import PaymentActionButton, { PaymentActionType, PaymentStatusType } from './PaymentActionButton';
+import { PaymentTransaction, PaymentType } from './PaymentCard';
 
 /**
- * Interface for a payment event in the timeline
- */
-interface PaymentEvent {
-  eventId: string;
-  eventType: string;
-  timestamp: string;
-  previousStatus?: string;
-  newStatus?: string;
-  createdBy: string;
-  eventData?: Record<string, any>;
-}
-
-/**
- * Interface for payment method details
+ * Interface representing payment method details
  */
 interface PaymentMethodDetails {
+  /**
+   * Payment method identifier
+   */
   paymentMethodId: string;
-  paymentType: string;
-  cardType?: string;
-  cardNumber?: string;
-  expirationDate?: string;
-  cardholderName?: string;
-  billingAddress?: {
-    line1?: string;
-    line2?: string;
-    city?: string;
-    state?: string;
-    postalCode?: string;
-    country?: string;
-  };
+  
+  /**
+   * Masked payment token (e.g., last 4 digits of card)
+   */
+  paymentToken?: string;
+  
+  /**
+   * Expiration date if applicable
+   */
+  expiration?: string;
+  
+  /**
+   * Additional payment details as needed
+   */
+  details?: Record<string, any>;
+  
+  /**
+   * Billing information
+   */
+  billingData?: Record<string, any>;
 }
 
 /**
- * Interface for payment transaction details
+ * Interface representing a payment event in the transaction timeline
  */
-interface PaymentTransaction {
-  transactionId: string;
-  organizationId: string;
-  accountId: string;
-  status: PaymentStatus;
-  amount: number;
-  currency: string;
+interface PaymentEvent {
+  /**
+   * Unique identifier for the event
+   */
+  eventId: string;
+  
+  /**
+   * Type of event that occurred
+   */
+  eventType: string;
+  
+  /**
+   * Status before the event if applicable
+   */
+  previousStatus?: string;
+  
+  /**
+   * Status after the event if applicable
+   */
+  newStatus?: string;
+  
+  /**
+   * Timestamp when the event occurred
+   */
   createdAt: string;
-  updatedAt: string;
-  merchantId: string;
-  merchantName: string;
-  paymentType: string;
-  transactionReference?: string;
-  description?: string;
-  paymentMethod?: PaymentMethodDetails;
-  events?: PaymentEvent[];
-  fees?: Array<{
-    feeId: string;
-    feeType: string;
-    amount: number;
-    currency: string;
-    description?: string;
-  }>;
+  
+  /**
+   * User or system that created the event
+   */
+  createdBy: string;
+  
+  /**
+   * Additional event data
+   */
+  eventData?: Record<string, any>;
 }
 
 /**
@@ -74,511 +82,428 @@ interface PaymentDetailPanelProps {
   transaction: PaymentTransaction;
   
   /**
-   * Optional CSS class name for the container
+   * Payment method details associated with the transaction
+   */
+  paymentMethod?: PaymentMethodDetails;
+  
+  /**
+   * Timeline of events for this transaction
+   */
+  events?: PaymentEvent[];
+  
+  /**
+   * Callback for capture action
+   */
+  onCapture?: (transactionId: string) => void;
+  
+  /**
+   * Callback for refund action
+   */
+  onRefund?: (transactionId: string) => void;
+  
+  /**
+   * Callback for void action
+   */
+  onVoid?: (transactionId: string) => void;
+  
+  /**
+   * Optional CSS class name to apply to the container
    */
   className?: string;
-  
-  /**
-   * Optional user permissions for action buttons
-   */
-  userPermissions?: string[];
-  
-  /**
-   * Optional callback when an action is completed
-   */
-  onActionComplete?: () => void;
-  
-  /**
-   * Optional flag to show/hide action buttons
-   */
-  showActions?: boolean;
 }
 
 /**
+ * PaymentDetailPanel component
+ * 
  * A component that displays comprehensive payment transaction details in a structured layout.
  * It organizes payment information into logical sections including transaction details,
  * payment method information, and transaction history.
  */
 const PaymentDetailPanel: React.FC<PaymentDetailPanelProps> = ({
   transaction,
-  className = '',
-  userPermissions = [],
-  onActionComplete,
-  showActions = true
+  paymentMethod,
+  events = [],
+  onCapture,
+  onRefund,
+  onVoid,
+  className = ''
 }) => {
-  // Format date for display
+  // Format currency amount with proper decimal places and currency symbol
+  const formatAmount = (amount: number, currency: string): string => {
+    const formatter = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
+    
+    return formatter.format(amount);
+  };
+  
+  // Format date to a readable format
   const formatDate = (dateString: string): string => {
-    try {
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: 'numeric',
-        second: 'numeric',
-        hour12: true
-      }).format(date);
-    } catch (error) {
-      console.error('Error formatting date:', error);
-      return dateString;
-    }
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
   };
   
-  // Map PaymentStatus to PaymentStatusType for action buttons
-  const mapStatusForActions = (status: PaymentStatus): PaymentStatusType => {
-    const statusMap: Record<PaymentStatus, PaymentStatusType> = {
-      'CREATED': 'pending',
-      'PROCESSING': 'processing',
-      'AUTHORIZED': 'authorized',
-      'CAPTURED': 'captured',
-      'REFUNDED': 'refunded',
-      'FAILED': 'failed',
-      'VOIDED': 'voided',
-      'PENDING': 'pending'
-    };
-    
-    return statusMap[status] || 'pending';
-  };
-  
-  // Determine available actions based on transaction status
-  const getAvailableActions = (status: PaymentStatus): PaymentActionType[] => {
-    switch (status) {
-      case 'CREATED':
-      case 'PENDING':
-        return ['authorize', 'void'];
-      case 'AUTHORIZED':
-        return ['capture', 'void'];
-      case 'CAPTURED':
-        return ['refund'];
-      case 'PROCESSING':
-        return [];
-      case 'REFUNDED':
-      case 'FAILED':
-      case 'VOIDED':
-        return [];
+  // Get payment method display name
+  const getPaymentMethodDisplay = (paymentType: PaymentType): string => {
+    switch (paymentType) {
+      case 'CREDIT_CARD':
+        return 'Credit Card';
+      case 'DEBIT_CARD':
+        return 'Debit Card';
+      case 'BANK_TRANSFER':
+        return 'Bank Transfer';
+      case 'DIGITAL_WALLET':
+        return 'Digital Wallet';
       default:
-        return [];
+        return paymentType;
     }
   };
   
-  // Get masked card number for display
-  const getMaskedCardNumber = (cardNumber?: string): string => {
-    if (!cardNumber) return 'N/A';
-    
-    // Keep only the last 4 digits visible
-    if (cardNumber.length > 4) {
-      const lastFour = cardNumber.slice(-4);
-      const maskedPart = 'XXXX-XXXX-XXXX-';
-      return maskedPart + lastFour;
-    }
-    
-    return cardNumber;
-  };
-  
-  // Get next available actions text based on status
-  const getNextActionsText = (status: PaymentStatus): string => {
-    switch (status) {
-      case 'CREATED':
-      case 'PENDING':
-        return 'Authorize the transaction or void it if no longer needed.';
-      case 'AUTHORIZED':
-        return 'Capture funds to complete the transaction or void the authorization.';
-      case 'CAPTURED':
-        return 'Issue a refund if needed.';
-      case 'PROCESSING':
-        return 'Wait for processing to complete.';
-      case 'REFUNDED':
-        return 'Transaction has been refunded. No further actions available.';
-      case 'FAILED':
-        return 'Transaction failed. Create a new transaction if needed.';
-      case 'VOIDED':
-        return 'Transaction has been voided. No further actions available.';
+  // Get event type display name
+  const getEventTypeDisplay = (eventType: string): string => {
+    switch (eventType) {
+      case 'TRANSACTION_CREATED':
+        return 'Transaction Created';
+      case 'STATUS_CHANGE':
+        return 'Status Changed';
+      case 'PROCESSING_INITIATED':
+        return 'Processing Initiated';
+      case 'CAPTURE_INITIATED':
+        return 'Capture Initiated';
+      case 'REFUND_INITIATED':
+        return 'Refund Initiated';
+      case 'ERROR':
+        return 'Error Occurred';
       default:
-        return 'No actions available for the current status.';
+        return eventType.split('_').map(word => 
+          word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+        ).join(' ');
     }
   };
+  
+  // Get event icon based on event type
+  const getEventIcon = (eventType: string): React.ReactNode => {
+    switch (eventType) {
+      case 'TRANSACTION_CREATED':
+        return (
+          <div className="h-8 w-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path d="M5.433 13.917l1.262-3.155A4 4 0 017.58 9.42l6.92-6.918a2.121 2.121 0 013 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 01-.65-.65z" />
+              <path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0010 3H4.75A2.75 2.75 0 002 5.75v9.5A2.75 2.75 0 004.75 18h9.5A2.75 2.75 0 0017 15.25V10a.75.75 0 00-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5z" />
+            </svg>
+          </div>
+        );
+      case 'STATUS_CHANGE':
+        return (
+          <div className="h-8 w-8 rounded-full bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center text-purple-600 dark:text-purple-400">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.929a.75.75 0 00-1.5 0V5.36l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z" clipRule="evenodd" />
+            </svg>
+          </div>
+        );
+      case 'PROCESSING_INITIATED':
+        return (
+          <div className="h-8 w-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 animate-spin">
+              <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.929a.75.75 0 00-1.5 0V5.36l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z" clipRule="evenodd" />
+            </svg>
+          </div>
+        );
+      case 'CAPTURE_INITIATED':
+        return (
+          <div className="h-8 w-8 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center text-green-600 dark:text-green-400">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path fillRule="evenodd" d="M5 10a.75.75 0 01.75-.75h6.638L10.23 7.29a.75.75 0 111.04-1.08l3.5 3.25a.75.75 0 010 1.08l-3.5 3.25a.75.75 0 11-1.04-1.08l2.158-1.96H5.75A.75.75 0 015 10z" clipRule="evenodd" />
+            </svg>
+          </div>
+        );
+      case 'REFUND_INITIATED':
+        return (
+          <div className="h-8 w-8 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center text-amber-600 dark:text-amber-400">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path fillRule="evenodd" d="M15 10a.75.75 0 01-.75.75H7.612l2.158 1.96a.75.75 0 11-1.04 1.08l-3.5-3.25a.75.75 0 010-1.08l3.5-3.25a.75.75 0 111.04 1.08L7.612 9.25h6.638A.75.75 0 0115 10z" clipRule="evenodd" />
+            </svg>
+          </div>
+        );
+      case 'ERROR':
+        return (
+          <div className="h-8 w-8 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center text-red-600 dark:text-red-400">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
+            </svg>
+          </div>
+        );
+      default:
+        return (
+          <div className="h-8 w-8 rounded-full bg-gray-100 dark:bg-gray-700 flex items-center justify-center text-gray-600 dark:text-gray-400">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a.75.75 0 000 1.5h.253a.25.25 0 01.244.304l-.459 2.066A1.75 1.75 0 0010.747 15H11a.75.75 0 000-1.5h-.253a.25.25 0 01-.244-.304l.459-2.066A1.75 1.75 0 009.253 9H9z" clipRule="evenodd" />
+            </svg>
+          </div>
+        );
+    }
+  };
+  
+  // Sort events by creation date (newest first)
+  const sortedEvents = [...events].sort((a, b) => 
+    new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+  
+  // Determine if actions are available based on transaction status
+  const canCapture = transaction.status === 'AUTHORIZED' && onCapture;
+  const canRefund = transaction.status === 'CAPTURED' && onRefund;
+  const canVoid = transaction.status === 'AUTHORIZED' && onVoid;
   
   return (
-    <div className={`bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden ${className}`}>
-      {/* Transaction Header */}
-      <div className="p-6 border-b border-gray-200 dark:border-gray-700">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between">
+    <div 
+      className={`bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden ${className}`}
+      data-testid="payment-detail-panel"
+    >
+      {/* Header with Transaction ID and Status */}
+      <div className="border-b border-gray-200 dark:border-gray-700 p-4 sm:p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-              Payment Transaction
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+              Transaction Details
             </h2>
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
               ID: {transaction.transactionId}
             </p>
+            {transaction.transactionReference && (
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Reference: {transaction.transactionReference}
+              </p>
+            )}
           </div>
-          <div className="mt-4 sm:mt-0">
-            <PaymentStatusIndicator 
-              status={transaction.status} 
-              size="lg" 
-              className="font-semibold"
-            />
-          </div>
-        </div>
-      </div>
-      
-      {/* Main Content - Two Column Layout on Desktop */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 p-6">
-        {/* Transaction Details - Left Column (2/3 width on desktop) */}
-        <div className="md:col-span-2 space-y-6">
-          {/* Transaction Details Card */}
-          <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-6">
-            <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
-              Transaction Details
-            </h3>
-            
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Amount</p>
-                <p className="mt-1 text-base font-semibold">
-                  <PaymentAmountDisplay 
-                    amount={transaction.amount} 
-                    currency={transaction.currency}
-                  />
-                </p>
-              </div>
-              
-              <div>
-                <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Currency</p>
-                <p className="mt-1 text-base">{transaction.currency}</p>
-              </div>
-              
-              <div>
-                <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Date Created</p>
-                <p className="mt-1 text-base">{formatDate(transaction.createdAt)}</p>
-              </div>
-              
-              <div>
-                <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Last Updated</p>
-                <p className="mt-1 text-base">{formatDate(transaction.updatedAt)}</p>
-              </div>
-              
-              <div>
-                <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Merchant</p>
-                <p className="mt-1 text-base">{transaction.merchantName}</p>
-              </div>
-              
-              <div>
-                <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Payment Type</p>
-                <p className="mt-1 text-base">{transaction.paymentType}</p>
-              </div>
-              
-              {transaction.transactionReference && (
-                <div>
-                  <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Reference</p>
-                  <p className="mt-1 text-base">{transaction.transactionReference}</p>
-                </div>
-              )}
-              
-              {transaction.description && (
-                <div className="sm:col-span-2">
-                  <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Description</p>
-                  <p className="mt-1 text-base">{transaction.description}</p>
-                </div>
-              )}
-            </div>
-          </div>
-          
-          {/* Payment Method Details Card */}
-          {transaction.paymentMethod && (
-            <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-6">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
-                Payment Method
-              </h3>
-              
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Method Type</p>
-                  <p className="mt-1 text-base">{transaction.paymentMethod.paymentType}</p>
-                </div>
-                
-                {transaction.paymentMethod.cardType && (
-                  <div>
-                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Card Type</p>
-                    <p className="mt-1 text-base">{transaction.paymentMethod.cardType}</p>
-                  </div>
-                )}
-                
-                {transaction.paymentMethod.cardNumber && (
-                  <div>
-                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Card Number</p>
-                    <p className="mt-1 text-base font-mono">{getMaskedCardNumber(transaction.paymentMethod.cardNumber)}</p>
-                  </div>
-                )}
-                
-                {transaction.paymentMethod.expirationDate && (
-                  <div>
-                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Expiration Date</p>
-                    <p className="mt-1 text-base">{transaction.paymentMethod.expirationDate}</p>
-                  </div>
-                )}
-                
-                {transaction.paymentMethod.cardholderName && (
-                  <div>
-                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Cardholder Name</p>
-                    <p className="mt-1 text-base">{transaction.paymentMethod.cardholderName}</p>
-                  </div>
-                )}
-              </div>
-              
-              {/* Billing Address if available */}
-              {transaction.paymentMethod.billingAddress && (
-                <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-                  <h4 className="text-md font-medium text-gray-900 dark:text-white mb-2">
-                    Billing Address
-                  </h4>
-                  
-                  <address className="not-italic text-sm text-gray-600 dark:text-gray-300">
-                    {transaction.paymentMethod.billingAddress.line1 && (
-                      <p>{transaction.paymentMethod.billingAddress.line1}</p>
-                    )}
-                    {transaction.paymentMethod.billingAddress.line2 && (
-                      <p>{transaction.paymentMethod.billingAddress.line2}</p>
-                    )}
-                    {transaction.paymentMethod.billingAddress.city && transaction.paymentMethod.billingAddress.state && (
-                      <p>
-                        {transaction.paymentMethod.billingAddress.city}, {transaction.paymentMethod.billingAddress.state} {transaction.paymentMethod.billingAddress.postalCode}
-                      </p>
-                    )}
-                    {transaction.paymentMethod.billingAddress.country && (
-                      <p>{transaction.paymentMethod.billingAddress.country}</p>
-                    )}
-                  </address>
-                </div>
-              )}
-            </div>
-          )}
-          
-          {/* Fees Section if available */}
-          {transaction.fees && transaction.fees.length > 0 && (
-            <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-6">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
-                Transaction Fees
-              </h3>
-              
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                  <thead className="bg-gray-100 dark:bg-gray-800">
-                    <tr>
-                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Fee Type
-                      </th>
-                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Amount
-                      </th>
-                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Description
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
-                    {transaction.fees.map((fee) => (
-                      <tr key={fee.feeId}>
-                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                          {fee.feeType}
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-sm">
-                          <PaymentAmountDisplay 
-                            amount={fee.amount} 
-                            currency={fee.currency}
-                          />
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                          {fee.description || '-'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
+          <PaymentStatusIndicator status={transaction.status} size="lg" />
         </div>
         
-        {/* Right Column (1/3 width on desktop) */}
-        <div className="space-y-6">
-          {/* Actions Card */}
-          {showActions && (
-            <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-6">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
-                Actions
-              </h3>
-              
-              <div className="flex flex-col space-y-3">
-                {getAvailableActions(transaction.status).map((actionType) => (
-                  <PaymentActionButton
-                    key={actionType}
-                    actionType={actionType}
-                    paymentStatus={mapStatusForActions(transaction.status)}
-                    transactionId={transaction.transactionId}
-                    organizationId={transaction.organizationId}
-                    accountId={transaction.accountId}
-                    amount={transaction.amount.toString()}
-                    currency={transaction.currency}
-                    onActionComplete={onActionComplete}
-                    userPermissions={userPermissions}
-                    className="w-full justify-center"
-                  />
-                ))}
-                
-                {getAvailableActions(transaction.status).length === 0 && (
-                  <p className="text-sm text-gray-500 dark:text-gray-400 italic">
-                    No actions available for the current transaction status.
-                  </p>
-                )}
-              </div>
-              
-              <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-                <h4 className="text-sm font-medium text-gray-900 dark:text-white mb-2">
-                  Next Steps
-                </h4>
-                <p className="text-sm text-gray-600 dark:text-gray-300">
-                  {getNextActionsText(transaction.status)}
-                </p>
-              </div>
-            </div>
-          )}
-          
-          {/* Download Options */}
-          <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-6">
-            <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
-              Download
-            </h3>
-            
-            <div className="flex flex-col space-y-3">
+        {/* Action Buttons */}
+        {(canCapture || canRefund || canVoid) && (
+          <div className="flex flex-wrap gap-3 mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
+            {canCapture && (
               <button
-                type="button"
-                className="inline-flex items-center justify-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                onClick={() => onCapture?.(transaction.transactionId)}
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800"
+                aria-label="Capture payment"
               >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
-                </svg>
-                Download Receipt
+                Capture Payment
               </button>
-              
+            )}
+            {canRefund && (
               <button
-                type="button"
-                className="inline-flex items-center justify-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                onClick={() => onRefund?.(transaction.transactionId)}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-md text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800"
+                aria-label="Refund payment"
               >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                Export as PDF
+                Refund Payment
               </button>
-              
+            )}
+            {canVoid && (
               <button
-                type="button"
-                className="inline-flex items-center justify-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                onClick={() => onVoid?.(transaction.transactionId)}
+                className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-md text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800"
+                aria-label="Void payment"
               >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                Export as CSV
+                Void Payment
               </button>
-            </div>
+            )}
           </div>
-        </div>
+        )}
       </div>
       
-      {/* Transaction Timeline Section */}
-      {transaction.events && transaction.events.length > 0 && (
-        <div className="border-t border-gray-200 dark:border-gray-700 p-6">
-          <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-6">
+      {/* Main content with transaction details */}
+      <div className="p-4 sm:p-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Transaction Information Card */}
+          <div className="bg-gray-50 dark:bg-gray-900/50 rounded-lg p-4">
+            <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+              Transaction Information
+            </h3>
+            
+            <div className="space-y-3">
+              <div className="flex justify-between">
+                <span className="text-sm text-gray-500 dark:text-gray-400">Amount</span>
+                <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                  {formatAmount(transaction.amount, transaction.currency)}
+                </span>
+              </div>
+              
+              <div className="flex justify-between">
+                <span className="text-sm text-gray-500 dark:text-gray-400">Date</span>
+                <span className="text-sm text-gray-900 dark:text-gray-100">
+                  {formatDate(transaction.createdAt)}
+                </span>
+              </div>
+              
+              <div className="flex justify-between">
+                <span className="text-sm text-gray-500 dark:text-gray-400">Status</span>
+                <span className="text-sm text-gray-900 dark:text-gray-100">
+                  <PaymentStatusIndicator status={transaction.status} size="sm" />
+                </span>
+              </div>
+              
+              <div className="flex justify-between">
+                <span className="text-sm text-gray-500 dark:text-gray-400">Payment Method</span>
+                <span className="text-sm text-gray-900 dark:text-gray-100">
+                  {getPaymentMethodDisplay(transaction.paymentType)}
+                </span>
+              </div>
+              
+              <div className="flex justify-between">
+                <span className="text-sm text-gray-500 dark:text-gray-400">Merchant</span>
+                <span className="text-sm text-gray-900 dark:text-gray-100">
+                  {transaction.merchantName || transaction.merchantId}
+                </span>
+              </div>
+              
+              {transaction.description && (
+                <div className="pt-2 border-t border-gray-200 dark:border-gray-700">
+                  <span className="text-sm text-gray-500 dark:text-gray-400 block mb-1">Description</span>
+                  <p className="text-sm text-gray-900 dark:text-gray-100">
+                    {transaction.description}
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+          
+          {/* Payment Method Card */}
+          <div className="bg-gray-50 dark:bg-gray-900/50 rounded-lg p-4">
+            <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+              Payment Method Details
+            </h3>
+            
+            {paymentMethod ? (
+              <div className="space-y-3">
+                <div className="flex justify-between">
+                  <span className="text-sm text-gray-500 dark:text-gray-400">Method Type</span>
+                  <span className="text-sm text-gray-900 dark:text-gray-100">
+                    {getPaymentMethodDisplay(transaction.paymentType)}
+                  </span>
+                </div>
+                
+                {paymentMethod.paymentToken && (
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-500 dark:text-gray-400">
+                      {transaction.paymentType.includes('CARD') ? 'Card Number' : 'Token'}
+                    </span>
+                    <span className="text-sm font-mono text-gray-900 dark:text-gray-100">
+                      {paymentMethod.paymentToken}
+                    </span>
+                  </div>
+                )}
+                
+                {paymentMethod.expiration && (
+                  <div className="flex justify-between">
+                    <span className="text-sm text-gray-500 dark:text-gray-400">Expiration</span>
+                    <span className="text-sm text-gray-900 dark:text-gray-100">
+                      {paymentMethod.expiration}
+                    </span>
+                  </div>
+                )}
+                
+                <div className="flex justify-between">
+                  <span className="text-sm text-gray-500 dark:text-gray-400">Payment ID</span>
+                  <span className="text-sm font-mono text-gray-900 dark:text-gray-100">
+                    {paymentMethod.paymentMethodId}
+                  </span>
+                </div>
+                
+                {paymentMethod.billingData && (
+                  <div className="pt-2 border-t border-gray-200 dark:border-gray-700">
+                    <span className="text-sm text-gray-500 dark:text-gray-400 block mb-1">Billing Information</span>
+                    {paymentMethod.billingData.name && (
+                      <p className="text-sm text-gray-900 dark:text-gray-100">
+                        {paymentMethod.billingData.name}
+                      </p>
+                    )}
+                    {paymentMethod.billingData.address && (
+                      <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                        {paymentMethod.billingData.address}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                No detailed payment method information available.
+              </p>
+            )}
+          </div>
+        </div>
+        
+        {/* Transaction Timeline */}
+        <div className="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+          <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
             Transaction Timeline
           </h3>
           
-          <div className="flow-root">
-            <ul className="-mb-8">
-              {transaction.events.map((event, eventIdx) => (
-                <li key={event.eventId}>
-                  <div className="relative pb-8">
-                    {eventIdx !== transaction.events!.length - 1 ? (
-                      <span className="absolute top-4 left-4 -ml-px h-full w-0.5 bg-gray-200 dark:bg-gray-700" aria-hidden="true" />
-                    ) : null}
-                    <div className="relative flex space-x-3">
-                      <div>
-                        <span className="h-8 w-8 rounded-full flex items-center justify-center ring-8 ring-white dark:ring-gray-800 bg-gray-100 dark:bg-gray-700">
-                          {/* Icon based on event type */}
-                          {event.eventType.includes('CREATE') && (
-                            <svg className="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                            </svg>
-                          )}
-                          {event.eventType.includes('AUTHORIZE') && (
-                            <svg className="h-5 w-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                            </svg>
-                          )}
-                          {event.eventType.includes('CAPTURE') && (
-                            <svg className="h-5 w-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                          )}
-                          {event.eventType.includes('REFUND') && (
-                            <svg className="h-5 w-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
-                            </svg>
-                          )}
-                          {event.eventType.includes('VOID') && (
-                            <svg className="h-5 w-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                          )}
-                          {event.eventType.includes('FAIL') && (
-                            <svg className="h-5 w-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                          )}
-                          {!event.eventType.includes('CREATE') && 
-                            !event.eventType.includes('AUTHORIZE') && 
-                            !event.eventType.includes('CAPTURE') && 
-                            !event.eventType.includes('REFUND') && 
-                            !event.eventType.includes('VOID') && 
-                            !event.eventType.includes('FAIL') && (
-                            <svg className="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                          )}
-                        </span>
-                      </div>
-                      <div className="min-w-0 flex-1 pt-1.5 flex justify-between space-x-4">
+          {sortedEvents.length > 0 ? (
+            <div className="flow-root">
+              <ul className="-mb-8">
+                {sortedEvents.map((event, eventIdx) => (
+                  <li key={event.eventId}>
+                    <div className="relative pb-8">
+                      {eventIdx !== sortedEvents.length - 1 ? (
+                        <span
+                          className="absolute top-4 left-4 -ml-px h-full w-0.5 bg-gray-200 dark:bg-gray-700"
+                          aria-hidden="true"
+                        />
+                      ) : null}
+                      <div className="relative flex space-x-3">
                         <div>
-                          <p className="text-sm text-gray-900 dark:text-white">
-                            {event.eventType.replace(/_/g, ' ')}
-                            {event.previousStatus && event.newStatus && (
-                              <span className="text-gray-500 dark:text-gray-400">
-                                {' '}(Status changed from <span className="font-medium">{event.previousStatus}</span> to <span className="font-medium">{event.newStatus}</span>)
-                              </span>
-                            )}
-                          </p>
-                          {event.eventData && Object.keys(event.eventData).length > 0 && (
-                            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                              {Object.entries(event.eventData).map(([key, value]) => (
-                                <span key={key} className="block">
-                                  <span className="font-medium">{key.replace(/_/g, ' ')}:</span> {value}
-                                </span>
-                              ))}
-                            </p>
-                          )}
+                          {getEventIcon(event.eventType)}
                         </div>
-                        <div className="text-right text-xs whitespace-nowrap text-gray-500 dark:text-gray-400">
-                          <time dateTime={event.timestamp}>{formatDate(event.timestamp)}</time>
-                          <p className="mt-0.5">{event.createdBy}</p>
+                        <div className="flex min-w-0 flex-1 justify-between space-x-4 pt-1.5">
+                          <div>
+                            <p className="text-sm text-gray-900 dark:text-gray-100">
+                              {getEventTypeDisplay(event.eventType)}
+                              {event.previousStatus && event.newStatus && (
+                                <span className="text-gray-500 dark:text-gray-400">
+                                  : {event.previousStatus} → {event.newStatus}
+                                </span>
+                              )}
+                            </p>
+                            {event.eventData && (
+                              <p className="mt-0.5 text-sm text-gray-500 dark:text-gray-400">
+                                {typeof event.eventData === 'object' 
+                                  ? Object.entries(event.eventData)
+                                      .map(([key, value]) => `${key}: ${value}`)
+                                      .join(', ')
+                                  : event.eventData
+                                }
+                              </p>
+                            )}
+                          </div>
+                          <div className="whitespace-nowrap text-right text-sm text-gray-500 dark:text-gray-400">
+                            <time dateTime={event.createdAt}>{formatDate(event.createdAt)}</time>
+                            <div className="text-xs">{event.createdBy}</div>
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              No event history available for this transaction.
+            </p>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 };

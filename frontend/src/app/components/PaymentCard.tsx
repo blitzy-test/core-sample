@@ -1,102 +1,130 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
-import { format } from 'date-fns';
+import PaymentStatusIndicator, { PaymentStatus } from './PaymentStatusIndicator';
 
-// Define payment status types
-export type PaymentStatus = 'CREATED' | 'PROCESSING' | 'AUTHORIZED' | 'CAPTURED' | 'REFUNDED' | 'FAILED' | 'VOIDED';
-
-// Define payment type
+/**
+ * Payment type enumeration matching backend PaymentType
+ */
 export type PaymentType = 'CREDIT_CARD' | 'DEBIT_CARD' | 'BANK_TRANSFER' | 'DIGITAL_WALLET';
 
-// Define payment transaction interface
+/**
+ * Interface representing a payment transaction
+ */
 export interface PaymentTransaction {
+  /**
+   * Unique identifier for the transaction
+   */
   transactionId: string;
-  organizationId: string;
-  accountId: string;
-  status: PaymentStatus;
+  
+  /**
+   * Transaction amount with currency
+   */
   amount: number;
+  
+  /**
+   * ISO 4217 currency code (3 characters)
+   */
   currency: string;
+  
+  /**
+   * Current status of the transaction
+   */
+  status: PaymentStatus;
+  
+  /**
+   * Timestamp when the transaction was created
+   */
   createdAt: string;
-  updatedAt: string;
+  
+  /**
+   * External merchant identifier
+   */
   merchantId: string;
+  
+  /**
+   * Merchant name for display
+   */
+  merchantName?: string;
+  
+  /**
+   * Type of payment method used
+   */
   paymentType: PaymentType;
+  
+  /**
+   * External reference number
+   */
   transactionReference?: string;
+  
+  /**
+   * Human-readable description
+   */
   description?: string;
 }
 
-// Props for the PaymentCard component
+/**
+ * Props for the PaymentCard component
+ */
 interface PaymentCardProps {
+  /**
+   * The payment transaction to display
+   */
   transaction: PaymentTransaction;
-  showDetails?: boolean;
+  
+  /**
+   * Optional click handler for the card
+   */
+  onClick?: (transactionId: string) => void;
+  
+  /**
+   * Optional CSS class name to apply to the container
+   */
+  className?: string;
+  
+  /**
+   * Whether to show the "View Details" button
+   * @default true
+   */
+  showViewDetails?: boolean;
 }
 
 /**
- * PaymentCard component displays payment transaction information in a card format
+ * PaymentCard component
  * 
- * This component provides a standardized way to show payment details like
- * transaction ID, amount, date, and status with appropriate visual indicators.
- * It adapts responsively between mobile stacked view and desktop tabular view.
+ * A reusable card component for displaying payment transaction information in a consistent format.
+ * It provides a standardized way to show payment details like transaction ID, amount, date, and status
+ * with appropriate visual indicators.
  */
-const PaymentCard: React.FC<PaymentCardProps> = ({ 
-  transaction, 
-  showDetails = false 
+const PaymentCard: React.FC<PaymentCardProps> = ({
+  transaction,
+  onClick,
+  className = '',
+  showViewDetails = true
 }) => {
-  // Format date to readable string
-  const formattedDate = format(new Date(transaction.createdAt), 'MMM dd, yyyy');
-  
-  // Format currency with proper symbol and decimal places
-  const formatCurrency = (amount: number, currency: string): string => {
+  // Format currency amount with proper decimal places and currency symbol
+  const formatAmount = (amount: number, currency: string): string => {
     const formatter = new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: currency,
       minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
+      maximumFractionDigits: 2
     });
     
     return formatter.format(amount);
   };
-
-  // Get status indicator color based on payment status
-  const getStatusColor = (status: PaymentStatus): string => {
-    switch (status) {
-      case 'CAPTURED':
-      case 'AUTHORIZED':
-        return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300';
-      case 'PROCESSING':
-      case 'CREATED':
-        return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300';
-      case 'FAILED':
-      case 'VOIDED':
-        return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300';
-      case 'REFUNDED':
-        return 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-300';
-      default:
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
-    }
+  
+  // Format date to a readable format
+  const formatDate = (dateString: string): string => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric'
+    });
   };
-
-  // Get status icon based on payment status
-  const getStatusIcon = (status: PaymentStatus): string => {
-    switch (status) {
-      case 'CAPTURED':
-      case 'AUTHORIZED':
-        return '✓';
-      case 'PROCESSING':
-      case 'CREATED':
-        return '⟳';
-      case 'FAILED':
-      case 'VOIDED':
-        return '✕';
-      case 'REFUNDED':
-        return '↺';
-      default:
-        return '?';
-    }
-  };
-
-  // Get payment type display name
-  const getPaymentTypeDisplay = (type: PaymentType): string => {
-    switch (type) {
+  
+  // Get payment method display name
+  const getPaymentMethodDisplay = (paymentType: PaymentType): string => {
+    switch (paymentType) {
       case 'CREDIT_CARD':
         return 'Credit Card';
       case 'DEBIT_CARD':
@@ -106,82 +134,97 @@ const PaymentCard: React.FC<PaymentCardProps> = ({
       case 'DIGITAL_WALLET':
         return 'Digital Wallet';
       default:
-        return type;
+        return paymentType;
     }
   };
-
+  
+  // Handle card click
+  const handleCardClick = () => {
+    if (onClick) {
+      onClick(transaction.transactionId);
+    }
+  };
+  
+  // Generate a shortened transaction ID for display
+  const shortTransactionId = transaction.transactionId.substring(0, 8);
+  
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden transition-all hover:shadow-lg">
-      {/* Card Header */}
-      <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
-        <div className="font-medium text-gray-700 dark:text-gray-300">
-          Transaction #{transaction.transactionId.substring(0, 8)}
-        </div>
-        <div className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(transaction.status)}`}>
-          <span className="mr-1">{getStatusIcon(transaction.status)}</span>
-          {transaction.status}
-        </div>
-      </div>
-      
-      {/* Card Body */}
+    <div 
+      className={`bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden transition-all hover:shadow-md ${className} ${onClick ? 'cursor-pointer' : ''}`}
+      onClick={onClick ? handleCardClick : undefined}
+      data-testid="payment-card"
+    >
       <div className="p-4">
-        <div className="grid grid-cols-2 gap-4">
-          {/* Amount */}
-          <div className="col-span-2 sm:col-span-1">
-            <div className="text-sm text-gray-500 dark:text-gray-400">Amount</div>
-            <div className="text-lg font-semibold text-gray-900 dark:text-white">
-              {formatCurrency(transaction.amount, transaction.currency)}
-            </div>
+        {/* Header with Transaction ID and Status */}
+        <div className="flex justify-between items-start mb-3">
+          <div>
+            <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100">
+              Transaction #{shortTransactionId}
+            </h3>
+            {transaction.transactionReference && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Ref: {transaction.transactionReference}
+              </p>
+            )}
+          </div>
+          <PaymentStatusIndicator status={transaction.status} size="sm" />
+        </div>
+        
+        {/* Main content with amount and date */}
+        <div className="mb-3">
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-sm text-gray-500 dark:text-gray-400">Amount</span>
+            <span className="text-base font-semibold text-gray-900 dark:text-gray-100">
+              {formatAmount(transaction.amount, transaction.currency)}
+            </span>
           </div>
           
-          {/* Date */}
-          <div className="col-span-2 sm:col-span-1">
-            <div className="text-sm text-gray-500 dark:text-gray-400">Date</div>
-            <div className="text-gray-900 dark:text-white">{formattedDate}</div>
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-sm text-gray-500 dark:text-gray-400">Date</span>
+            <span className="text-sm text-gray-700 dark:text-gray-300">
+              {formatDate(transaction.createdAt)}
+            </span>
           </div>
           
-          {/* Merchant */}
-          <div className="col-span-2 sm:col-span-1">
-            <div className="text-sm text-gray-500 dark:text-gray-400">Merchant</div>
-            <div className="text-gray-900 dark:text-white">{transaction.merchantId}</div>
+          <div className="flex justify-between items-center">
+            <span className="text-sm text-gray-500 dark:text-gray-400">Method</span>
+            <span className="text-sm text-gray-700 dark:text-gray-300">
+              {getPaymentMethodDisplay(transaction.paymentType)}
+            </span>
           </div>
           
-          {/* Payment Method */}
-          <div className="col-span-2 sm:col-span-1">
-            <div className="text-sm text-gray-500 dark:text-gray-400">Payment Method</div>
-            <div className="text-gray-900 dark:text-white">
-              {getPaymentTypeDisplay(transaction.paymentType)}
-            </div>
-          </div>
-          
-          {/* Conditional rendering for additional details */}
-          {showDetails && transaction.description && (
-            <div className="col-span-2">
-              <div className="text-sm text-gray-500 dark:text-gray-400">Description</div>
-              <div className="text-gray-900 dark:text-white">{transaction.description}</div>
-            </div>
-          )}
-          
-          {showDetails && transaction.transactionReference && (
-            <div className="col-span-2">
-              <div className="text-sm text-gray-500 dark:text-gray-400">Reference</div>
-              <div className="text-gray-900 dark:text-white">{transaction.transactionReference}</div>
+          {transaction.merchantName && (
+            <div className="flex justify-between items-center mt-2">
+              <span className="text-sm text-gray-500 dark:text-gray-400">Merchant</span>
+              <span className="text-sm text-gray-700 dark:text-gray-300">
+                {transaction.merchantName}
+              </span>
             </div>
           )}
         </div>
-      </div>
-      
-      {/* Card Footer */}
-      <div className="px-4 py-3 bg-gray-50 dark:bg-gray-700 border-t border-gray-200 dark:border-gray-600">
-        <Link 
-          to={`/payments/${transaction.organizationId}/accounts/${transaction.accountId}/transactions/${transaction.transactionId}`}
-          className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 text-sm font-medium flex items-center"
-        >
-          View Details
-          <svg className="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
+        
+        {/* Description if available */}
+        {transaction.description && (
+          <div className="mb-3 text-sm text-gray-600 dark:text-gray-400 line-clamp-2">
+            {transaction.description}
+          </div>
+        )}
+        
+        {/* View Details button */}
+        {showViewDetails && (
+          <div className="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onClick) onClick(transaction.transactionId);
+              }}
+              className="w-full text-center text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 transition-colors"
+              aria-label={`View details for transaction ${shortTransactionId}`}
+            >
+              View Details
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

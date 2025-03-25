@@ -1,275 +1,614 @@
 package io.briklabs.sample.payments.data.dao.impl;
 
+import io.briklabs.sample.payments.data.ConnectionManager;
+import io.briklabs.sample.payments.data.dao.PaymentTransactionDAO;
+import io.briklabs.sample.payments.data.exception.PaymentDataAccessException;
+import io.briklabs.sample.payments.data.exception.PaymentEntityNotFoundException;
+import io.briklabs.sample.payments.data.exception.PaymentInvalidStateException;
+import io.briklabs.sample.payments.data.query.AmountRangeFilter;
+import io.briklabs.sample.payments.data.query.DateRangeFilter;
+import io.briklabs.sample.payments.data.query.PaymentFilterParams;
+import io.briklabs.sample.payments.data.query.PaginationParams;
+import io.briklabs.sample.payments.data.query.SortCriteria;
+import io.briklabs.sample.payments.data.query.StatusFilter;
+import io.briklabs.sample.payments.model.PaymentTransaction;
+import io.briklabs.sample.payments.model.PaymentTransaction.PaymentStatus;
+
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Timestamp;
-import java.time.Instant;
-import java.time.LocalDate;
+import java.sql.Types;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
-
-import io.briklabs.sample.config.DatabaseConfig;
-import io.briklabs.sample.payments.data.dao.PaymentTransactionDAO;
-import io.briklabs.sample.payments.data.exception.ConnectionException;
-import io.briklabs.sample.payments.data.exception.QueryExecutionException;
-import io.briklabs.sample.payments.data.exception.ResourceNotFoundException;
-import io.briklabs.sample.payments.data.exception.TransactionException;
-import io.briklabs.sample.payments.data.exception.ValidationException;
-import io.briklabs.sample.payments.data.query.AmountRangeFilter;
-import io.briklabs.sample.payments.data.query.DateRangeFilter;
-import io.briklabs.sample.payments.data.query.PaymentFilterParams;
-import io.briklabs.sample.payments.data.query.PaymentQueryBuilder;
-import io.briklabs.sample.payments.data.query.StatusFilter;
-import io.briklabs.sample.payments.model.PaymentStatus;
-import io.briklabs.sample.payments.model.PaymentTransaction;
-import io.briklabs.sample.payments.model.PaymentType;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 /**
- * Implementation of the PaymentTransactionDAO interface that handles all database operations
+ * Concrete implementation of the PaymentTransactionDAO interface that handles all database operations
  * for payment transactions. This class provides CRUD operations, complex filtering, status updates,
  * and specialized queries for payment transactions.
- * <p>
- * It uses the PaymentQueryBuilder to construct optimized SQL queries for transaction filtering
- * and implements all transaction lifecycle methods required by the payment service layer.
- * </p>
+ * 
+ * It uses the PaymentQueryBuilder to construct optimized SQL queries for transaction filtering and
+ * implements all transaction lifecycle methods required by the payment service layer.
  */
 public class PaymentTransactionDaoImpl implements PaymentTransactionDAO {
-    private static final Logger logger = LoggerFactory.getLogger(PaymentTransactionDaoImpl.class);
     
-    private final HikariDataSource dataSource;
-    private final ThreadLocal<Connection> transactionConnection = new ThreadLocal<>();
+    private static final Logger LOGGER = Logger.getLogger(PaymentTransactionDaoImpl.class.getName());
+    
+    // SQL constants for table and column names
+    private static final String TABLE_NAME = "payment_transaction";
+    private static final String ID_COLUMN = "transaction_id";
+    private static final String ORG_ID_COLUMN = "organization_id";
+    private static final String ACCOUNT_ID_COLUMN = "account_id";
+    private static final String STATUS_COLUMN = "status";
+    private static final String AMOUNT_COLUMN = "amount";
+    private static final String CURRENCY_COLUMN = "currency";
+    private static final String CREATED_AT_COLUMN = "created_at";
+    private static final String UPDATED_AT_COLUMN = "updated_at";
+    private static final String MERCHANT_ID_COLUMN = "merchant_id";
+    private static final String PAYMENT_TYPE_COLUMN = "payment_type";
+    private static final String REFERENCE_COLUMN = "transaction_reference";
+    private static final String DESCRIPTION_COLUMN = "description";
+    
+    // SQL query templates
+    private static final String INSERT_QUERY = 
+            "INSERT INTO " + TABLE_NAME + " (" + 
+            ID_COLUMN + ", " + 
+            ORG_ID_COLUMN + ", " + 
+            ACCOUNT_ID_COLUMN + ", " + 
+            STATUS_COLUMN + ", " + 
+            AMOUNT_COLUMN + ", " + 
+            CURRENCY_COLUMN + ", " + 
+            CREATED_AT_COLUMN + ", " + 
+            UPDATED_AT_COLUMN + ", " + 
+            MERCHANT_ID_COLUMN + ", " + 
+            PAYMENT_TYPE_COLUMN + ", " + 
+            REFERENCE_COLUMN + ", " + 
+            DESCRIPTION_COLUMN + 
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    
+    private static final String SELECT_BY_ID_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ID_COLUMN + " = ?";
+    
+    private static final String UPDATE_QUERY = 
+            "UPDATE " + TABLE_NAME + " SET " + 
+            ORG_ID_COLUMN + " = ?, " + 
+            ACCOUNT_ID_COLUMN + " = ?, " + 
+            STATUS_COLUMN + " = ?, " + 
+            AMOUNT_COLUMN + " = ?, " + 
+            CURRENCY_COLUMN + " = ?, " + 
+            UPDATED_AT_COLUMN + " = ?, " + 
+            MERCHANT_ID_COLUMN + " = ?, " + 
+            PAYMENT_TYPE_COLUMN + " = ?, " + 
+            REFERENCE_COLUMN + " = ?, " + 
+            DESCRIPTION_COLUMN + " = ? " + 
+            "WHERE " + ID_COLUMN + " = ?";
+    
+    private static final String UPDATE_STATUS_QUERY = 
+            "UPDATE " + TABLE_NAME + " SET " + 
+            STATUS_COLUMN + " = ?, " + 
+            UPDATED_AT_COLUMN + " = ? " + 
+            "WHERE " + ID_COLUMN + " = ?";
+    
+    private static final String DELETE_QUERY = 
+            "DELETE FROM " + TABLE_NAME + " WHERE " + ID_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_STATUS_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + STATUS_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_STATUS_IN_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + STATUS_COLUMN + " IN (%s)";
+    
+    private static final String SELECT_BY_STATUS_AND_DATE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + STATUS_COLUMN + " = ? AND " + 
+            CREATED_AT_COLUMN + " BETWEEN ? AND ?";
+    
+    private static final String SELECT_BY_ORG_STATUS_AND_DATE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ORG_ID_COLUMN + " = ? AND " + 
+            STATUS_COLUMN + " = ? AND " + CREATED_AT_COLUMN + " BETWEEN ? AND ?";
+    
+    private static final String SELECT_BY_ACCOUNT_STATUS_AND_DATE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ACCOUNT_ID_COLUMN + " = ? AND " + 
+            STATUS_COLUMN + " = ? AND " + CREATED_AT_COLUMN + " BETWEEN ? AND ?";
+    
+    private static final String SELECT_BY_AMOUNT_RANGE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + AMOUNT_COLUMN + " BETWEEN ? AND ? AND " + 
+            CURRENCY_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_MERCHANT_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + MERCHANT_ID_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_MERCHANT_AND_STATUS_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + MERCHANT_ID_COLUMN + " = ? AND " + 
+            STATUS_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_PAYMENT_TYPE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + PAYMENT_TYPE_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_REFERENCE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + REFERENCE_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_CREATION_DATE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + CREATED_AT_COLUMN + " BETWEEN ? AND ?";
+    
+    private static final String SELECT_BY_UPDATE_DATE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + UPDATED_AT_COLUMN + " BETWEEN ? AND ?";
+    
+    private static final String SELECT_BY_ORG_WITH_PAGINATION_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ORG_ID_COLUMN + " = ? " + 
+            "ORDER BY " + CREATED_AT_COLUMN + " DESC LIMIT ? OFFSET ?";
+    
+    private static final String SELECT_BY_ACCOUNT_WITH_PAGINATION_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ACCOUNT_ID_COLUMN + " = ? " + 
+            "ORDER BY " + CREATED_AT_COLUMN + " DESC LIMIT ? OFFSET ?";
+    
+    private static final String SELECT_BY_ORG_AND_ACCOUNT_WITH_PAGINATION_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ORG_ID_COLUMN + " = ? AND " + 
+            ACCOUNT_ID_COLUMN + " = ? ORDER BY " + CREATED_AT_COLUMN + " DESC LIMIT ? OFFSET ?";
+    
+    private static final String SEARCH_BY_TEXT_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + REFERENCE_COLUMN + " LIKE ? OR " + 
+            DESCRIPTION_COLUMN + " LIKE ?";
+    
+    private static final String SELECT_FOR_SETTLEMENT_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + STATUS_COLUMN + " = ? AND " + 
+            CREATED_AT_COLUMN + " <= ?";
+    
+    private static final String SELECT_EXPIRING_AUTHORIZATIONS_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + STATUS_COLUMN + " = ? AND " + 
+            CREATED_AT_COLUMN + " <= ? AND " + STATUS_COLUMN + " NOT IN ('CAPTURED', 'PARTIALLY_CAPTURED', 'VOIDED', 'FAILED')";
+    
+    private static final String AGGREGATE_AMOUNTS_BY_STATUS_BASE_QUERY = 
+            "SELECT " + STATUS_COLUMN + ", SUM(" + AMOUNT_COLUMN + ") as total_amount " + 
+            "FROM " + TABLE_NAME + " WHERE 1=1";
+    
+    private static final String AGGREGATE_COUNTS_BY_STATUS_BASE_QUERY = 
+            "SELECT " + STATUS_COLUMN + ", COUNT(*) as count " + 
+            "FROM " + TABLE_NAME + " WHERE 1=1";
+    
+    private static final String SELECT_FOR_RECONCILIATION_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + STATUS_COLUMN + " = 'CAPTURED' AND " + 
+            UPDATED_AT_COLUMN + " <= ?";
+    
+    private static final String SELECT_BY_ORG_AND_DATE_RANGE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ORG_ID_COLUMN + " = ? AND " + 
+            CREATED_AT_COLUMN + " BETWEEN ? AND ?";
+    
+    private static final String SELECT_BY_ACCOUNT_AND_DATE_RANGE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ACCOUNT_ID_COLUMN + " = ? AND " + 
+            CREATED_AT_COLUMN + " BETWEEN ? AND ?";
+    
+    private static final String SELECT_BY_MERCHANT_AND_DATE_RANGE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + MERCHANT_ID_COLUMN + " = ? AND " + 
+            CREATED_AT_COLUMN + " BETWEEN ? AND ?";
+    
+    private static final String SELECT_BY_DESCRIPTION_CONTAINING_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + DESCRIPTION_COLUMN + " LIKE ?";
+    
+    private static final String SELECT_BY_REFERENCE_CONTAINING_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + REFERENCE_COLUMN + " LIKE ?";
+    
+    private static final String SELECT_BY_ORG_AND_PAYMENT_TYPE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ORG_ID_COLUMN + " = ? AND " + 
+            PAYMENT_TYPE_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_ACCOUNT_AND_PAYMENT_TYPE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ACCOUNT_ID_COLUMN + " = ? AND " + 
+            PAYMENT_TYPE_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_MERCHANT_AND_PAYMENT_TYPE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + MERCHANT_ID_COLUMN + " = ? AND " + 
+            PAYMENT_TYPE_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_CURRENCY_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + CURRENCY_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_CURRENCY_AND_STATUS_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + CURRENCY_COLUMN + " = ? AND " + 
+            STATUS_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_ORG_CURRENCY_AND_STATUS_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ORG_ID_COLUMN + " = ? AND " + 
+            CURRENCY_COLUMN + " = ? AND " + STATUS_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_ACCOUNT_CURRENCY_AND_STATUS_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ACCOUNT_ID_COLUMN + " = ? AND " + 
+            CURRENCY_COLUMN + " = ? AND " + STATUS_COLUMN + " = ?";
+    
+    private static final String SELECT_LATEST_BY_ACCOUNT_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + ACCOUNT_ID_COLUMN + " = ? " + 
+            "ORDER BY " + CREATED_AT_COLUMN + " DESC LIMIT 1";
+    
+    private static final String SELECT_LATEST_BY_MERCHANT_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + MERCHANT_ID_COLUMN + " = ? " + 
+            "ORDER BY " + CREATED_AT_COLUMN + " DESC LIMIT 1";
+    
+    private static final String SELECT_BY_STATUS_CREATED_BEFORE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + STATUS_COLUMN + " = ? AND " + 
+            CREATED_AT_COLUMN + " <= ?";
+    
+    private static final String SELECT_BY_STATUS_UPDATED_BEFORE_QUERY = 
+            "SELECT * FROM " + TABLE_NAME + " WHERE " + STATUS_COLUMN + " = ? AND " + 
+            UPDATED_AT_COLUMN + " <= ?";
+    
+    private static final String SELECT_BY_ORG_WITH_COUNT_QUERY = 
+            "SELECT COUNT(*) FROM " + TABLE_NAME + " WHERE " + ORG_ID_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_ACCOUNT_WITH_COUNT_QUERY = 
+            "SELECT COUNT(*) FROM " + TABLE_NAME + " WHERE " + ACCOUNT_ID_COLUMN + " = ?";
+    
+    private static final String SELECT_BY_ORG_AND_ACCOUNT_WITH_COUNT_QUERY = 
+            "SELECT COUNT(*) FROM " + TABLE_NAME + " WHERE " + ORG_ID_COLUMN + " = ? AND " + 
+            ACCOUNT_ID_COLUMN + " = ?";
+    
+    private static final String EXISTS_QUERY = 
+            "SELECT 1 FROM " + TABLE_NAME + " WHERE " + ID_COLUMN + " = ? LIMIT 1";
+    
+    // Connection manager for database operations
+    private final ConnectionManager connectionManager;
     
     /**
-     * Constructs a new PaymentTransactionDaoImpl with the specified database configuration.
-     * Initializes the HikariCP connection pool with optimized settings for payment processing.
-     *
-     * @param dbConfig The database configuration
+     * Constructs a new PaymentTransactionDaoImpl with the specified connection manager.
+     * 
+     * @param connectionManager The connection manager to use for database operations
      */
-    public PaymentTransactionDaoImpl(DatabaseConfig dbConfig) {
-        HikariConfig config = new HikariConfig();
-        config.setJdbcUrl(dbConfig.getDatabaseURL());
-        config.setUsername(dbConfig.getDatabaseUsername());
-        config.setPassword(dbConfig.getDatabasePassword());
-        config.setSchema(dbConfig.getDatabaseSchema());
-        
-        // Apply connection pool configuration if available
-        dbConfig.getConnectionPoolConfig().ifPresent(poolConfig -> {
-            poolConfig.forEach((key, value) -> {
-                if (value instanceof Integer) {
-                    switch (key) {
-                        case "maximumPoolSize":
-                            config.setMaximumPoolSize((Integer) value);
-                            break;
-                        case "minimumIdle":
-                            config.setMinimumIdle((Integer) value);
-                            break;
-                        case "connectionTimeout":
-                            config.setConnectionTimeout((Integer) value);
-                            break;
-                        case "idleTimeout":
-                            config.setIdleTimeout((Integer) value);
-                            break;
-                        case "maxLifetime":
-                            config.setMaxLifetime((Integer) value);
-                            break;
-                        case "leakDetectionThreshold":
-                            config.setLeakDetectionThreshold((Integer) value);
-                            break;
-                        default:
-                            // Ignore unknown integer properties
-                            break;
-                    }
-                } else if (value instanceof Boolean) {
-                    switch (key) {
-                        case "autoCommit":
-                            config.setAutoCommit((Boolean) value);
-                            break;
-                        case "registerMbeans":
-                            config.setRegisterMbeans((Boolean) value);
-                            break;
-                        default:
-                            // Ignore unknown boolean properties
-                            break;
-                    }
-                } else if (value instanceof String) {
-                    switch (key) {
-                        case "connectionTestQuery":
-                            config.setConnectionTestQuery((String) value);
-                            break;
-                        case "poolName":
-                            config.setPoolName((String) value);
-                            break;
-                        default:
-                            // Ignore unknown string properties
-                            break;
-                    }
-                }
-            });
-        });
-        
-        // Set default values if not provided in configuration
-        if (!config.isAutoCommitSet()) {
-            config.setAutoCommit(false);
-        }
-        if (config.getMaximumPoolSize() == -1) {
-            config.setMaximumPoolSize(30); // Default optimized for payment processing
-        }
-        if (config.getMinimumIdle() == -1) {
-            config.setMinimumIdle(10);
-        }
-        if (config.getConnectionTimeout() == -1) {
-            config.setConnectionTimeout(20000);
-        }
-        if (config.getIdleTimeout() == -1) {
-            config.setIdleTimeout(300000);
-        }
-        if (config.getMaxLifetime() == -1) {
-            config.setMaxLifetime(1200000);
-        }
-        if (config.getLeakDetectionThreshold() == 0) {
-            config.setLeakDetectionThreshold(60000);
-        }
-        if (config.getPoolName() == null) {
-            config.setPoolName("PaymentHikariPool");
-        }
-        if (config.getConnectionTestQuery() == null) {
-            config.setConnectionTestQuery("SELECT 1");
-        }
-        
-        // Enable JMX monitoring
-        config.setRegisterMbeans(true);
-        
-        this.dataSource = new HikariDataSource(config);
-        logger.info("Initialized PaymentTransactionDaoImpl with connection pool: {}", config.getPoolName());
-    }
-    
-    /**
-     * Gets a database connection from the connection pool.
-     * If a transaction is in progress, returns the transaction's connection.
-     *
-     * @return A database connection
-     * @throws ConnectionException if a connection cannot be obtained
-     */
-    private Connection getConnection() throws ConnectionException {
-        Connection conn = transactionConnection.get();
-        if (conn != null) {
-            return conn;
-        }
-        
-        try {
-            return dataSource.getConnection();
-        } catch (SQLException e) {
-            logger.error("Failed to obtain database connection", e);
-            throw new ConnectionException("Failed to obtain database connection", e);
-        }
-    }
-    
-    /**
-     * Closes a database connection if it's not part of an active transaction.
-     *
-     * @param connection The connection to close
-     */
-    private void closeConnection(Connection connection) {
-        if (connection != null && transactionConnection.get() != connection) {
-            try {
-                connection.close();
-            } catch (SQLException e) {
-                logger.warn("Error closing database connection", e);
-            }
-        }
-    }
-    
-    /**
-     * Closes a PreparedStatement.
-     *
-     * @param statement The statement to close
-     */
-    private void closeStatement(PreparedStatement statement) {
-        if (statement != null) {
-            try {
-                statement.close();
-            } catch (SQLException e) {
-                logger.warn("Error closing prepared statement", e);
-            }
-        }
-    }
-    
-    /**
-     * Closes a ResultSet.
-     *
-     * @param resultSet The result set to close
-     */
-    private void closeResultSet(ResultSet resultSet) {
-        if (resultSet != null) {
-            try {
-                resultSet.close();
-            } catch (SQLException e) {
-                logger.warn("Error closing result set", e);
-            }
-        }
+    public PaymentTransactionDaoImpl(ConnectionManager connectionManager) {
+        this.connectionManager = connectionManager;
     }
     
     /**
      * Maps a ResultSet row to a PaymentTransaction object.
-     *
-     * @param rs The ResultSet containing transaction data
-     * @return A PaymentTransaction object
-     * @throws SQLException if a database access error occurs
+     * 
+     * @param rs The ResultSet containing the transaction data
+     * @return A PaymentTransaction object populated with data from the ResultSet
+     * @throws SQLException if a database error occurs
      */
     private PaymentTransaction mapRowToTransaction(ResultSet rs) throws SQLException {
-        UUID transactionId = (UUID) rs.getObject("transaction_id");
-        UUID organizationId = (UUID) rs.getObject("organization_id");
-        UUID accountId = (UUID) rs.getObject("account_id");
-        PaymentStatus status = PaymentStatus.valueOf(rs.getString("status"));
-        BigDecimal amount = rs.getBigDecimal("amount");
-        String currency = rs.getString("currency");
-        Instant createdAt = rs.getTimestamp("created_at").toInstant();
-        Instant updatedAt = rs.getTimestamp("updated_at").toInstant();
-        String merchantId = rs.getString("merchant_id");
-        PaymentType paymentType = PaymentType.valueOf(rs.getString("payment_type"));
-        String transactionReference = rs.getString("transaction_reference");
-        String description = rs.getString("description");
+        PaymentTransaction transaction = new PaymentTransaction();
         
-        return new PaymentTransaction(
-                transactionId, organizationId, accountId, status, amount, currency,
-                createdAt, updatedAt, merchantId, paymentType, transactionReference, description);
+        transaction.setTransactionId(UUID.fromString(rs.getString(ID_COLUMN)));
+        transaction.setOrganizationId(UUID.fromString(rs.getString(ORG_ID_COLUMN)));
+        transaction.setAccountId(UUID.fromString(rs.getString(ACCOUNT_ID_COLUMN)));
+        transaction.setStatus(PaymentStatus.valueOf(rs.getString(STATUS_COLUMN)));
+        transaction.setAmount(rs.getBigDecimal(AMOUNT_COLUMN));
+        transaction.setCurrency(rs.getString(CURRENCY_COLUMN));
+        transaction.setCreatedAt(rs.getTimestamp(CREATED_AT_COLUMN).toLocalDateTime());
+        transaction.setUpdatedAt(rs.getTimestamp(UPDATED_AT_COLUMN).toLocalDateTime());
+        transaction.setMerchantId(rs.getString(MERCHANT_ID_COLUMN));
+        transaction.setPaymentType(rs.getString(PAYMENT_TYPE_COLUMN));
+        transaction.setTransactionReference(rs.getString(REFERENCE_COLUMN));
+        transaction.setDescription(rs.getString(DESCRIPTION_COLUMN));
+        
+        return transaction;
+    }
+    
+    /**
+     * Sets parameters for a PreparedStatement based on a PaymentTransaction object.
+     * 
+     * @param ps The PreparedStatement to set parameters on
+     * @param transaction The PaymentTransaction containing the parameter values
+     * @param includeId Whether to include the ID as a parameter (for updates)
+     * @throws SQLException if a database error occurs
+     */
+    private void setStatementParameters(PreparedStatement ps, PaymentTransaction transaction, boolean includeId) 
+            throws SQLException {
+        int paramIndex = 1;
+        
+        if (!includeId) {
+            ps.setString(paramIndex++, transaction.getTransactionId().toString());
+        }
+        
+        ps.setString(paramIndex++, transaction.getOrganizationId().toString());
+        ps.setString(paramIndex++, transaction.getAccountId().toString());
+        ps.setString(paramIndex++, transaction.getStatus().name());
+        ps.setBigDecimal(paramIndex++, transaction.getAmount());
+        ps.setString(paramIndex++, transaction.getCurrency());
+        
+        if (!includeId) {
+            ps.setTimestamp(paramIndex++, Timestamp.valueOf(transaction.getCreatedAt()));
+        }
+        
+        ps.setTimestamp(paramIndex++, Timestamp.valueOf(
+                includeId ? LocalDateTime.now() : transaction.getUpdatedAt()));
+        ps.setString(paramIndex++, transaction.getMerchantId());
+        ps.setString(paramIndex++, transaction.getPaymentType());
+        
+        if (transaction.getTransactionReference() != null) {
+            ps.setString(paramIndex++, transaction.getTransactionReference());
+        } else {
+            ps.setNull(paramIndex++, Types.VARCHAR);
+        }
+        
+        if (transaction.getDescription() != null) {
+            ps.setString(paramIndex++, transaction.getDescription());
+        } else {
+            ps.setNull(paramIndex++, Types.VARCHAR);
+        }
+        
+        if (includeId) {
+            ps.setString(paramIndex, transaction.getTransactionId().toString());
+        }
+    }
+    
+    /**
+     * Builds a dynamic WHERE clause for filtering transactions based on multiple criteria.
+     * 
+     * @param organizationId The organization ID (optional)
+     * @param accountId The account ID (optional)
+     * @param statuses The set of statuses to filter by (optional)
+     * @param startDate The start date (optional)
+     * @param endDate The end date (optional)
+     * @param minAmount The minimum amount (optional)
+     * @param maxAmount The maximum amount (optional)
+     * @param currency The currency code (optional)
+     * @param merchantId The merchant ID (optional)
+     * @param paymentType The payment type (optional)
+     * @param params The list to populate with parameter values
+     * @return The WHERE clause SQL string
+     */
+    private String buildWhereClause(UUID organizationId, UUID accountId, Set<PaymentStatus> statuses,
+                                   LocalDateTime startDate, LocalDateTime endDate,
+                                   BigDecimal minAmount, BigDecimal maxAmount, String currency,
+                                   String merchantId, String paymentType,
+                                   List<Object> params) {
+        StringBuilder whereClause = new StringBuilder(" WHERE 1=1");
+        
+        if (organizationId != null) {
+            whereClause.append(" AND ").append(ORG_ID_COLUMN).append(" = ?");
+            params.add(organizationId.toString());
+        }
+        
+        if (accountId != null) {
+            whereClause.append(" AND ").append(ACCOUNT_ID_COLUMN).append(" = ?");
+            params.add(accountId.toString());
+        }
+        
+        if (statuses != null && !statuses.isEmpty()) {
+            whereClause.append(" AND ").append(STATUS_COLUMN).append(" IN (");
+            boolean first = true;
+            for (PaymentStatus status : statuses) {
+                if (!first) {
+                    whereClause.append(", ");
+                }
+                whereClause.append("?");
+                params.add(status.name());
+                first = false;
+            }
+            whereClause.append(")");
+        }
+        
+        if (startDate != null && endDate != null) {
+            whereClause.append(" AND ").append(CREATED_AT_COLUMN).append(" BETWEEN ? AND ?");
+            params.add(Timestamp.valueOf(startDate));
+            params.add(Timestamp.valueOf(endDate));
+        } else if (startDate != null) {
+            whereClause.append(" AND ").append(CREATED_AT_COLUMN).append(" >= ?");
+            params.add(Timestamp.valueOf(startDate));
+        } else if (endDate != null) {
+            whereClause.append(" AND ").append(CREATED_AT_COLUMN).append(" <= ?");
+            params.add(Timestamp.valueOf(endDate));
+        }
+        
+        if (minAmount != null && maxAmount != null && currency != null) {
+            whereClause.append(" AND ").append(AMOUNT_COLUMN).append(" BETWEEN ? AND ? AND ")
+                      .append(CURRENCY_COLUMN).append(" = ?");
+            params.add(minAmount);
+            params.add(maxAmount);
+            params.add(currency);
+        } else if (minAmount != null && currency != null) {
+            whereClause.append(" AND ").append(AMOUNT_COLUMN).append(" >= ? AND ")
+                      .append(CURRENCY_COLUMN).append(" = ?");
+            params.add(minAmount);
+            params.add(currency);
+        } else if (maxAmount != null && currency != null) {
+            whereClause.append(" AND ").append(AMOUNT_COLUMN).append(" <= ? AND ")
+                      .append(CURRENCY_COLUMN).append(" = ?");
+            params.add(maxAmount);
+            params.add(currency);
+        } else if (currency != null) {
+            whereClause.append(" AND ").append(CURRENCY_COLUMN).append(" = ?");
+            params.add(currency);
+        }
+        
+        if (merchantId != null) {
+            whereClause.append(" AND ").append(MERCHANT_ID_COLUMN).append(" = ?");
+            params.add(merchantId);
+        }
+        
+        if (paymentType != null) {
+            whereClause.append(" AND ").append(PAYMENT_TYPE_COLUMN).append(" = ?");
+            params.add(paymentType);
+        }
+        
+        return whereClause.toString();
+    }
+    
+    /**
+     * Builds a dynamic ORDER BY clause for sorting transactions.
+     * 
+     * @param sortField The field to sort by
+     * @param sortDirection The sort direction (ASC or DESC)
+     * @return The ORDER BY clause SQL string
+     */
+    private String buildOrderByClause(String sortField, String sortDirection) {
+        StringBuilder orderByClause = new StringBuilder(" ORDER BY ");
+        
+        if (sortField != null) {
+            // Validate and sanitize the sort field to prevent SQL injection
+            String validatedField;
+            switch (sortField.toLowerCase()) {
+                case "created_at":
+                    validatedField = CREATED_AT_COLUMN;
+                    break;
+                case "updated_at":
+                    validatedField = UPDATED_AT_COLUMN;
+                    break;
+                case "amount":
+                    validatedField = AMOUNT_COLUMN;
+                    break;
+                case "status":
+                    validatedField = STATUS_COLUMN;
+                    break;
+                case "merchant_id":
+                    validatedField = MERCHANT_ID_COLUMN;
+                    break;
+                case "payment_type":
+                    validatedField = PAYMENT_TYPE_COLUMN;
+                    break;
+                default:
+                    // Default to created_at if invalid field is provided
+                    validatedField = CREATED_AT_COLUMN;
+            }
+            
+            orderByClause.append(validatedField);
+        } else {
+            // Default sort field
+            orderByClause.append(CREATED_AT_COLUMN);
+        }
+        
+        // Validate sort direction
+        if (sortDirection != null && sortDirection.equalsIgnoreCase("ASC")) {
+            orderByClause.append(" ASC");
+        } else {
+            // Default to DESC
+            orderByClause.append(" DESC");
+        }
+        
+        return orderByClause.toString();
+    }
+    
+    /**
+     * Builds a dynamic LIMIT and OFFSET clause for pagination.
+     * 
+     * @param limit The maximum number of records to return
+     * @param offset The number of records to skip
+     * @return The LIMIT and OFFSET clause SQL string
+     */
+    private String buildLimitOffsetClause(int limit, int offset) {
+        // Validate limit and offset
+        int validLimit = Math.max(1, Math.min(limit, 1000)); // Limit between 1 and 1000
+        int validOffset = Math.max(0, offset); // Offset must be non-negative
+        
+        return " LIMIT " + validLimit + " OFFSET " + validOffset;
+    }
+    
+    /**
+     * Executes a query and maps the results to a list of PaymentTransaction objects.
+     * 
+     * @param sql The SQL query to execute
+     * @param params The parameters for the query
+     * @return A list of PaymentTransaction objects
+     * @throws PaymentDataAccessException if a database error occurs
+     */
+    private List<PaymentTransaction> executeQuery(String sql, Object... params) {
+        List<PaymentTransaction> transactions = new ArrayList<>();
+        
+        try (Connection conn = connectionManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            
+            // Set parameters
+            for (int i = 0; i < params.length; i++) {
+                setParameter(ps, i + 1, params[i]);
+            }
+            
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    transactions.add(mapRowToTransaction(rs));
+                }
+            }
+            
+        } catch (SQLException e) {
+            LOGGER.log(Level.SEVERE, "Error executing query: " + sql, e);
+            throw new PaymentDataAccessException("Error executing query", e);
+        }
+        
+        return transactions;
+    }
+    
+    /**
+     * Sets a parameter on a PreparedStatement with the appropriate type.
+     * 
+     * @param ps The PreparedStatement to set the parameter on
+     * @param index The parameter index
+     * @param value The parameter value
+     * @throws SQLException if a database error occurs
+     */
+    private void setParameter(PreparedStatement ps, int index, Object value) throws SQLException {
+        if (value == null) {
+            ps.setNull(index, Types.NULL);
+        } else if (value instanceof String) {
+            ps.setString(index, (String) value);
+        } else if (value instanceof UUID) {
+            ps.setString(index, value.toString());
+        } else if (value instanceof Integer) {
+            ps.setInt(index, (Integer) value);
+        } else if (value instanceof Long) {
+            ps.setLong(index, (Long) value);
+        } else if (value instanceof BigDecimal) {
+            ps.setBigDecimal(index, (BigDecimal) value);
+        } else if (value instanceof LocalDateTime) {
+            ps.setTimestamp(index, Timestamp.valueOf((LocalDateTime) value));
+        } else if (value instanceof Timestamp) {
+            ps.setTimestamp(index, (Timestamp) value);
+        } else if (value instanceof Boolean) {
+            ps.setBoolean(index, (Boolean) value);
+        } else if (value instanceof PaymentStatus) {
+            ps.setString(index, ((PaymentStatus) value).name());
+        } else {
+            ps.setObject(index, value);
+        }
+    }
+    
+    /**
+     * Executes a count query and returns the result.
+     * 
+     * @param sql The SQL query to execute
+     * @param params The parameters for the query
+     * @return The count result
+     * @throws PaymentDataAccessException if a database error occurs
+     */
+    private long executeCountQuery(String sql, Object... params) {
+        try (Connection conn = connectionManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            
+            // Set parameters
+            for (int i = 0; i < params.length; i++) {
+                setParameter(ps, i + 1, params[i]);
+            }
+            
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getLong(1);
+                }
+                return 0;
+            }
+            
+        } catch (SQLException e) {
+            LOGGER.log(Level.SEVERE, "Error executing count query: " + sql, e);
+            throw new PaymentDataAccessException("Error executing count query", e);
+        }
     }
     
     @Override
-    public PaymentTransaction create(PaymentTransaction transaction) 
-            throws ValidationException, ConnectionException, QueryExecutionException, TransactionException {
-        if (transaction == null) {
-            throw new ValidationException("Transaction cannot be null");
-        }
-        
-        try {
-            transaction.validate();
-        } catch (IllegalArgumentException e) {
-            throw new ValidationException("Invalid transaction data: " + e.getMessage(), e);
-        }
-        
-        // Generate a new transaction ID if not provided
+    public PaymentTransaction create(PaymentTransaction transaction) {
         if (transaction.getTransactionId() == null) {
             transaction.setTransactionId(UUID.randomUUID());
         }
         
-        // Set timestamps if not provided
-        Instant now = Instant.now();
+        LocalDateTime now = LocalDateTime.now();
         if (transaction.getCreatedAt() == null) {
             transaction.setCreatedAt(now);
         }
@@ -277,1639 +616,938 @@ public class PaymentTransactionDaoImpl implements PaymentTransactionDAO {
             transaction.setUpdatedAt(now);
         }
         
-        // Set initial status if not provided
-        if (transaction.getStatus() == null) {
-            transaction.setStatus(PaymentStatus.CREATED);
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        
-        try {
-            conn = getConnection();
+        try (Connection conn = connectionManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(INSERT_QUERY)) {
             
-            String sql = "INSERT INTO payment_transaction " +
-                    "(transaction_id, organization_id, account_id, status, amount, currency, " +
-                    "created_at, updated_at, merchant_id, payment_type, transaction_reference, description) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            setStatementParameters(ps, transaction, false);
             
-            stmt = conn.prepareStatement(sql);
-            stmt.setObject(1, transaction.getTransactionId());
-            stmt.setObject(2, transaction.getOrganizationId());
-            stmt.setObject(3, transaction.getAccountId());
-            stmt.setString(4, transaction.getStatus().name());
-            stmt.setBigDecimal(5, transaction.getAmount());
-            stmt.setString(6, transaction.getCurrency());
-            stmt.setTimestamp(7, Timestamp.from(transaction.getCreatedAt()));
-            stmt.setTimestamp(8, Timestamp.from(transaction.getUpdatedAt()));
-            stmt.setString(9, transaction.getMerchantId());
-            stmt.setString(10, transaction.getPaymentType().name());
-            stmt.setString(11, transaction.getTransactionReference());
-            stmt.setString(12, transaction.getDescription());
-            
-            int rowsAffected = stmt.executeUpdate();
-            
+            int rowsAffected = ps.executeUpdate();
             if (rowsAffected != 1) {
-                throw new QueryExecutionException("Failed to create transaction, unexpected rows affected: " + rowsAffected);
+                throw new PaymentDataAccessException("Failed to create transaction, affected rows: " + rowsAffected);
             }
             
-            if (transactionConnection.get() == null) {
-                conn.commit();
-            }
-            
-            logger.info("Created payment transaction: {}", transaction.getTransactionId());
             return transaction;
             
         } catch (SQLException e) {
-            handleSqlException(conn, e, "Error creating payment transaction");
-            return null; // This line will never be reached due to exception handling
-        } finally {
-            closeStatement(stmt);
-            closeConnection(conn);
+            LOGGER.log(Level.SEVERE, "Error creating transaction: " + transaction.getTransactionId(), e);
+            throw new PaymentDataAccessException("Error creating transaction", e);
         }
     }
     
     @Override
-    public Optional<PaymentTransaction> findById(UUID id) 
-            throws ConnectionException, QueryExecutionException {
-        if (id == null) {
-            return Optional.empty();
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
-        
+    public Optional<PaymentTransaction> findById(UUID id) {
         try {
-            conn = getConnection();
-            
-            PaymentQueryBuilder queryBuilder = PaymentQueryBuilder.create()
-                    .buildTransactionDetailsQuery(id);
-            
-            stmt = queryBuilder.buildPreparedStatement(conn);
-            rs = stmt.executeQuery();
-            
-            if (rs.next()) {
-                PaymentTransaction transaction = mapRowToTransaction(rs);
-                return Optional.of(transaction);
-            } else {
-                return Optional.empty();
-            }
-            
-        } catch (SQLException e) {
-            handleSqlException(conn, e, "Error finding payment transaction by ID: " + id);
-            return Optional.empty(); // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
+            List<PaymentTransaction> transactions = executeQuery(SELECT_BY_ID_QUERY, id.toString());
+            return transactions.isEmpty() ? Optional.empty() : Optional.of(transactions.get(0));
+        } catch (Exception e) {
+            LOGGER.log(Level.SEVERE, "Error finding transaction by ID: " + id, e);
+            throw new PaymentDataAccessException("Error finding transaction by ID", e);
         }
     }
     
     @Override
-    public PaymentTransaction update(PaymentTransaction transaction) 
-            throws ValidationException, ResourceNotFoundException, ConnectionException, 
-                   QueryExecutionException, TransactionException {
-        if (transaction == null) {
-            throw new ValidationException("Transaction cannot be null");
-        }
-        
-        if (transaction.getTransactionId() == null) {
-            throw new ValidationException("Transaction ID cannot be null for update operation");
-        }
-        
-        try {
-            transaction.validate();
-        } catch (IllegalArgumentException e) {
-            throw new ValidationException("Invalid transaction data: " + e.getMessage(), e);
-        }
-        
-        // Verify the transaction exists
+    public PaymentTransaction update(PaymentTransaction transaction) {
+        // Check if transaction exists
         if (!exists(transaction.getTransactionId())) {
-            throw new ResourceNotFoundException("Transaction not found with ID: " + transaction.getTransactionId());
+            throw new PaymentEntityNotFoundException("Transaction not found: " + transaction.getTransactionId());
         }
         
-        // Update the timestamp
-        transaction.setUpdatedAt(Instant.now());
+        transaction.setUpdatedAt(LocalDateTime.now());
         
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        
-        try {
-            conn = getConnection();
+        try (Connection conn = connectionManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(UPDATE_QUERY)) {
             
-            String sql = "UPDATE payment_transaction SET " +
-                    "organization_id = ?, account_id = ?, status = ?, amount = ?, currency = ?, " +
-                    "updated_at = ?, merchant_id = ?, payment_type = ?, transaction_reference = ?, description = ? " +
-                    "WHERE transaction_id = ?";
+            setStatementParameters(ps, transaction, true);
             
-            stmt = conn.prepareStatement(sql);
-            stmt.setObject(1, transaction.getOrganizationId());
-            stmt.setObject(2, transaction.getAccountId());
-            stmt.setString(3, transaction.getStatus().name());
-            stmt.setBigDecimal(4, transaction.getAmount());
-            stmt.setString(5, transaction.getCurrency());
-            stmt.setTimestamp(6, Timestamp.from(transaction.getUpdatedAt()));
-            stmt.setString(7, transaction.getMerchantId());
-            stmt.setString(8, transaction.getPaymentType().name());
-            stmt.setString(9, transaction.getTransactionReference());
-            stmt.setString(10, transaction.getDescription());
-            stmt.setObject(11, transaction.getTransactionId());
-            
-            int rowsAffected = stmt.executeUpdate();
-            
+            int rowsAffected = ps.executeUpdate();
             if (rowsAffected != 1) {
-                throw new QueryExecutionException("Failed to update transaction, unexpected rows affected: " + rowsAffected);
+                throw new PaymentDataAccessException("Failed to update transaction, affected rows: " + rowsAffected);
             }
             
-            if (transactionConnection.get() == null) {
-                conn.commit();
-            }
-            
-            logger.info("Updated payment transaction: {}", transaction.getTransactionId());
             return transaction;
             
         } catch (SQLException e) {
-            handleSqlException(conn, e, "Error updating payment transaction: " + transaction.getTransactionId());
-            return null; // This line will never be reached due to exception handling
-        } finally {
-            closeStatement(stmt);
-            closeConnection(conn);
+            LOGGER.log(Level.SEVERE, "Error updating transaction: " + transaction.getTransactionId(), e);
+            throw new PaymentDataAccessException("Error updating transaction", e);
         }
     }
     
     @Override
-    public boolean delete(UUID id) 
-            throws ConnectionException, QueryExecutionException, TransactionException {
-        if (id == null) {
-            return false;
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        
-        try {
-            conn = getConnection();
+    public boolean delete(UUID id) {
+        try (Connection conn = connectionManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(DELETE_QUERY)) {
             
-            String sql = "DELETE FROM payment_transaction WHERE transaction_id = ?";
-            stmt = conn.prepareStatement(sql);
-            stmt.setObject(1, id);
+            ps.setString(1, id.toString());
             
-            int rowsAffected = stmt.executeUpdate();
-            
-            if (transactionConnection.get() == null) {
-                conn.commit();
-            }
-            
-            if (rowsAffected > 0) {
-                logger.info("Deleted payment transaction: {}", id);
-                return true;
-            } else {
-                logger.info("No payment transaction found to delete with ID: {}", id);
-                return false;
-            }
+            int rowsAffected = ps.executeUpdate();
+            return rowsAffected == 1;
             
         } catch (SQLException e) {
-            handleSqlException(conn, e, "Error deleting payment transaction: " + id);
-            return false; // This line will never be reached due to exception handling
-        } finally {
-            closeStatement(stmt);
-            closeConnection(conn);
+            LOGGER.log(Level.SEVERE, "Error deleting transaction: " + id, e);
+            throw new PaymentDataAccessException("Error deleting transaction", e);
         }
     }
     
     @Override
-    public List<PaymentTransaction> query(PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
-        
-        try {
-            conn = getConnection();
-            
-            PaymentQueryBuilder queryBuilder = PaymentQueryBuilder.create()
-                    .buildTransactionQuery()
-                    .applyFilters(filterParams);
-            
-            stmt = queryBuilder.buildPreparedStatement(conn);
-            rs = stmt.executeQuery();
-            
-            List<PaymentTransaction> transactions = new ArrayList<>();
-            while (rs.next()) {
-                transactions.add(mapRowToTransaction(rs));
-            }
-            
-            return transactions;
-            
-        } catch (SQLException e) {
-            handleSqlException(conn, e, "Error querying payment transactions");
-            return List.of(); // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
+    public List<PaymentTransaction> query(Object params) {
+        if (!(params instanceof PaymentFilterParams)) {
+            throw new IllegalArgumentException("Query params must be of type PaymentFilterParams");
         }
+        
+        return findByFilterParams((PaymentFilterParams) params);
     }
     
     @Override
-    public long count(PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
-        
+    public Connection beginTransaction() {
         try {
-            conn = getConnection();
-            
-            // Create a count query based on the filter parameters
-            PaymentQueryBuilder queryBuilder = PaymentQueryBuilder.create()
-                    .count("t.transaction_id")
-                    .from("payment_transaction t");
-            
-            // Apply filters but skip pagination and sorting
-            if (filterParams != null) {
-                // Create a copy of filter params without pagination and sorting
-                PaymentFilterParams countFilters = new PaymentFilterParams();
-                countFilters.setOrganizationId(filterParams.getOrganizationId());
-                countFilters.setAccountId(filterParams.getAccountId());
-                countFilters.setDateRange(filterParams.getDateRange());
-                countFilters.setAmountRange(filterParams.getAmountRange());
-                countFilters.setStatusFilter(filterParams.getStatusFilter());
-                countFilters.setMerchantId(filterParams.getMerchantId());
-                countFilters.setPaymentType(filterParams.getPaymentType());
-                countFilters.setSearchTerm(filterParams.getSearchTerm());
-                
-                queryBuilder.applyFilters(countFilters);
-            }
-            
-            stmt = queryBuilder.buildPreparedStatement(conn);
-            rs = stmt.executeQuery();
-            
-            if (rs.next()) {
-                return rs.getLong(1);
-            }
-            
-            return 0;
-            
-        } catch (SQLException e) {
-            handleSqlException(conn, e, "Error counting payment transactions");
-            return 0; // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
-        }
-    }
-    
-    @Override
-    public boolean exists(UUID id) 
-            throws ConnectionException, QueryExecutionException {
-        if (id == null) {
-            return false;
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
-        
-        try {
-            conn = getConnection();
-            
-            String sql = "SELECT 1 FROM payment_transaction WHERE transaction_id = ?";
-            stmt = conn.prepareStatement(sql);
-            stmt.setObject(1, id);
-            
-            rs = stmt.executeQuery();
-            return rs.next();
-            
-        } catch (SQLException e) {
-            handleSqlException(conn, e, "Error checking if payment transaction exists: " + id);
-            return false; // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
-        }
-    }
-    
-    @Override
-    public void beginTransaction() 
-            throws ConnectionException, TransactionException {
-        if (transactionConnection.get() != null) {
-            throw new TransactionException("Transaction already in progress");
-        }
-        
-        try {
-            Connection conn = getConnection();
+            Connection conn = connectionManager.getConnection();
             conn.setAutoCommit(false);
-            transactionConnection.set(conn);
-            logger.debug("Transaction started");
+            return conn;
         } catch (SQLException e) {
-            logger.error("Failed to begin transaction", e);
-            throw new TransactionException("Failed to begin transaction", e);
+            LOGGER.log(Level.SEVERE, "Error beginning transaction", e);
+            throw new PaymentDataAccessException("Error beginning transaction", e);
         }
     }
     
     @Override
-    public void commitTransaction() 
-            throws TransactionException {
-        Connection conn = transactionConnection.get();
-        if (conn == null) {
-            throw new TransactionException("No transaction in progress");
-        }
-        
+    public void commitTransaction(Connection connection) {
         try {
-            conn.commit();
-            logger.debug("Transaction committed");
+            connection.commit();
+            connection.setAutoCommit(true);
         } catch (SQLException e) {
-            logger.error("Failed to commit transaction", e);
-            throw new TransactionException("Failed to commit transaction", e);
-        } finally {
-            try {
-                conn.setAutoCommit(true);
-                conn.close();
-            } catch (SQLException e) {
-                logger.warn("Error closing transaction connection", e);
-            }
-            transactionConnection.remove();
+            LOGGER.log(Level.SEVERE, "Error committing transaction", e);
+            throw new PaymentDataAccessException("Error committing transaction", e);
         }
     }
     
     @Override
-    public void rollbackTransaction() 
-            throws TransactionException {
-        Connection conn = transactionConnection.get();
-        if (conn == null) {
-            throw new TransactionException("No transaction in progress");
-        }
-        
+    public void rollbackTransaction(Connection connection) {
         try {
-            conn.rollback();
-            logger.debug("Transaction rolled back");
+            connection.rollback();
+            connection.setAutoCommit(true);
         } catch (SQLException e) {
-            logger.error("Failed to rollback transaction", e);
-            throw new TransactionException("Failed to rollback transaction", e);
-        } finally {
-            try {
-                conn.setAutoCommit(true);
-                conn.close();
-            } catch (SQLException e) {
-                logger.warn("Error closing transaction connection", e);
-            }
-            transactionConnection.remove();
+            LOGGER.log(Level.SEVERE, "Error rolling back transaction", e);
+            throw new PaymentDataAccessException("Error rolling back transaction", e);
         }
     }
     
     @Override
-    public List<PaymentTransaction> batchCreate(List<PaymentTransaction> transactions) 
-            throws ValidationException, ConnectionException, QueryExecutionException, TransactionException {
-        if (transactions == null || transactions.isEmpty()) {
-            return List.of();
+    public List<PaymentTransaction> batchCreate(List<PaymentTransaction> entities) {
+        if (entities == null || entities.isEmpty()) {
+            return Collections.emptyList();
         }
         
-        // Validate all transactions before processing
-        for (PaymentTransaction transaction : transactions) {
-            if (transaction == null) {
-                throw new ValidationException("Transaction cannot be null");
-            }
+        try (Connection conn = connectionManager.getConnection()) {
+            conn.setAutoCommit(false);
             
-            try {
-                transaction.validate();
-            } catch (IllegalArgumentException e) {
-                throw new ValidationException("Invalid transaction data: " + e.getMessage(), e);
-            }
-            
-            // Generate a new transaction ID if not provided
-            if (transaction.getTransactionId() == null) {
-                transaction.setTransactionId(UUID.randomUUID());
-            }
-            
-            // Set timestamps if not provided
-            Instant now = Instant.now();
-            if (transaction.getCreatedAt() == null) {
-                transaction.setCreatedAt(now);
-            }
-            if (transaction.getUpdatedAt() == null) {
-                transaction.setUpdatedAt(now);
-            }
-            
-            // Set initial status if not provided
-            if (transaction.getStatus() == null) {
-                transaction.setStatus(PaymentStatus.CREATED);
-            }
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        boolean localTransaction = false;
-        
-        try {
-            conn = getConnection();
-            
-            // Start a local transaction if not already in a transaction
-            if (transactionConnection.get() == null) {
-                conn.setAutoCommit(false);
-                localTransaction = true;
-            }
-            
-            String sql = "INSERT INTO payment_transaction " +
-                    "(transaction_id, organization_id, account_id, status, amount, currency, " +
-                    "created_at, updated_at, merchant_id, payment_type, transaction_reference, description) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-            
-            stmt = conn.prepareStatement(sql);
-            
-            for (PaymentTransaction transaction : transactions) {
-                stmt.setObject(1, transaction.getTransactionId());
-                stmt.setObject(2, transaction.getOrganizationId());
-                stmt.setObject(3, transaction.getAccountId());
-                stmt.setString(4, transaction.getStatus().name());
-                stmt.setBigDecimal(5, transaction.getAmount());
-                stmt.setString(6, transaction.getCurrency());
-                stmt.setTimestamp(7, Timestamp.from(transaction.getCreatedAt()));
-                stmt.setTimestamp(8, Timestamp.from(transaction.getUpdatedAt()));
-                stmt.setString(9, transaction.getMerchantId());
-                stmt.setString(10, transaction.getPaymentType().name());
-                stmt.setString(11, transaction.getTransactionReference());
-                stmt.setString(12, transaction.getDescription());
+            try (PreparedStatement ps = conn.prepareStatement(INSERT_QUERY)) {
+                for (PaymentTransaction transaction : entities) {
+                    if (transaction.getTransactionId() == null) {
+                        transaction.setTransactionId(UUID.randomUUID());
+                    }
+                    
+                    LocalDateTime now = LocalDateTime.now();
+                    if (transaction.getCreatedAt() == null) {
+                        transaction.setCreatedAt(now);
+                    }
+                    if (transaction.getUpdatedAt() == null) {
+                        transaction.setUpdatedAt(now);
+                    }
+                    
+                    setStatementParameters(ps, transaction, false);
+                    ps.addBatch();
+                }
                 
-                stmt.addBatch();
-            }
-            
-            int[] rowsAffected = stmt.executeBatch();
-            
-            // Verify all transactions were created
-            for (int i = 0; i < rowsAffected.length; i++) {
-                if (rowsAffected[i] != 1) {
-                    if (localTransaction) {
+                int[] results = ps.executeBatch();
+                
+                // Check if all inserts were successful
+                for (int i = 0; i < results.length; i++) {
+                    if (results[i] != 1 && results[i] != Statement.SUCCESS_NO_INFO) {
                         conn.rollback();
+                        throw new PaymentDataAccessException("Failed to create transaction at index " + i);
                     }
-                    throw new QueryExecutionException("Failed to create transaction at index " + i + 
-                            ", unexpected rows affected: " + rowsAffected[i]);
                 }
-            }
-            
-            if (localTransaction) {
+                
                 conn.commit();
+                return entities;
+            } catch (Exception e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(true);
             }
-            
-            logger.info("Created {} payment transactions in batch", transactions.size());
-            return transactions;
-            
         } catch (SQLException e) {
-            if (localTransaction && conn != null) {
-                try {
-                    conn.rollback();
-                } catch (SQLException rollbackEx) {
-                    logger.error("Failed to rollback transaction", rollbackEx);
-                }
-            }
-            handleSqlException(conn, e, "Error creating payment transactions in batch");
-            return List.of(); // This line will never be reached due to exception handling
-        } finally {
-            closeStatement(stmt);
-            if (localTransaction) {
-                try {
-                    if (conn != null) {
-                        conn.setAutoCommit(true);
-                    }
-                } catch (SQLException e) {
-                    logger.warn("Error resetting auto-commit", e);
-                }
-            }
-            closeConnection(conn);
+            LOGGER.log(Level.SEVERE, "Error in batch create", e);
+            throw new PaymentDataAccessException("Error in batch create", e);
         }
     }
     
     @Override
-    public List<PaymentTransaction> batchUpdate(List<PaymentTransaction> transactions) 
-            throws ValidationException, ResourceNotFoundException, ConnectionException, 
-                   QueryExecutionException, TransactionException {
-        if (transactions == null || transactions.isEmpty()) {
-            return List.of();
+    public List<PaymentTransaction> batchUpdate(List<PaymentTransaction> entities) {
+        if (entities == null || entities.isEmpty()) {
+            return Collections.emptyList();
         }
         
-        // Validate all transactions before processing
-        for (PaymentTransaction transaction : transactions) {
-            if (transaction == null) {
-                throw new ValidationException("Transaction cannot be null");
-            }
+        try (Connection conn = connectionManager.getConnection()) {
+            conn.setAutoCommit(false);
             
-            if (transaction.getTransactionId() == null) {
-                throw new ValidationException("Transaction ID cannot be null for update operation");
-            }
-            
-            try {
-                transaction.validate();
-            } catch (IllegalArgumentException e) {
-                throw new ValidationException("Invalid transaction data: " + e.getMessage(), e);
-            }
-            
-            // Verify the transaction exists
-            if (!exists(transaction.getTransactionId())) {
-                throw new ResourceNotFoundException("Transaction not found with ID: " + transaction.getTransactionId());
-            }
-            
-            // Update the timestamp
-            transaction.setUpdatedAt(Instant.now());
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        boolean localTransaction = false;
-        
-        try {
-            conn = getConnection();
-            
-            // Start a local transaction if not already in a transaction
-            if (transactionConnection.get() == null) {
-                conn.setAutoCommit(false);
-                localTransaction = true;
-            }
-            
-            String sql = "UPDATE payment_transaction SET " +
-                    "organization_id = ?, account_id = ?, status = ?, amount = ?, currency = ?, " +
-                    "updated_at = ?, merchant_id = ?, payment_type = ?, transaction_reference = ?, description = ? " +
-                    "WHERE transaction_id = ?";
-            
-            stmt = conn.prepareStatement(sql);
-            
-            for (PaymentTransaction transaction : transactions) {
-                stmt.setObject(1, transaction.getOrganizationId());
-                stmt.setObject(2, transaction.getAccountId());
-                stmt.setString(3, transaction.getStatus().name());
-                stmt.setBigDecimal(4, transaction.getAmount());
-                stmt.setString(5, transaction.getCurrency());
-                stmt.setTimestamp(6, Timestamp.from(transaction.getUpdatedAt()));
-                stmt.setString(7, transaction.getMerchantId());
-                stmt.setString(8, transaction.getPaymentType().name());
-                stmt.setString(9, transaction.getTransactionReference());
-                stmt.setString(10, transaction.getDescription());
-                stmt.setObject(11, transaction.getTransactionId());
-                
-                stmt.addBatch();
-            }
-            
-            int[] rowsAffected = stmt.executeBatch();
-            
-            // Verify all transactions were updated
-            for (int i = 0; i < rowsAffected.length; i++) {
-                if (rowsAffected[i] != 1) {
-                    if (localTransaction) {
+            try (PreparedStatement ps = conn.prepareStatement(UPDATE_QUERY)) {
+                for (PaymentTransaction transaction : entities) {
+                    // Check if transaction exists
+                    if (!exists(transaction.getTransactionId())) {
                         conn.rollback();
+                        throw new PaymentEntityNotFoundException("Transaction not found: " + transaction.getTransactionId());
                     }
-                    throw new QueryExecutionException("Failed to update transaction at index " + i + 
-                            ", unexpected rows affected: " + rowsAffected[i]);
+                    
+                    transaction.setUpdatedAt(LocalDateTime.now());
+                    setStatementParameters(ps, transaction, true);
+                    ps.addBatch();
                 }
-            }
-            
-            if (localTransaction) {
-                conn.commit();
-            }
-            
-            logger.info("Updated {} payment transactions in batch", transactions.size());
-            return transactions;
-            
-        } catch (SQLException e) {
-            if (localTransaction && conn != null) {
-                try {
-                    conn.rollback();
-                } catch (SQLException rollbackEx) {
-                    logger.error("Failed to rollback transaction", rollbackEx);
-                }
-            }
-            handleSqlException(conn, e, "Error updating payment transactions in batch");
-            return List.of(); // This line will never be reached due to exception handling
-        } finally {
-            closeStatement(stmt);
-            if (localTransaction) {
-                try {
-                    if (conn != null) {
-                        conn.setAutoCommit(true);
-                    }
-                } catch (SQLException e) {
-                    logger.warn("Error resetting auto-commit", e);
-                }
-            }
-            closeConnection(conn);
-        }
-    }
-    
-    @Override
-    public int batchDelete(List<UUID> ids) 
-            throws ConnectionException, QueryExecutionException, TransactionException {
-        if (ids == null || ids.isEmpty()) {
-            return 0;
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        boolean localTransaction = false;
-        
-        try {
-            conn = getConnection();
-            
-            // Start a local transaction if not already in a transaction
-            if (transactionConnection.get() == null) {
-                conn.setAutoCommit(false);
-                localTransaction = true;
-            }
-            
-            String sql = "DELETE FROM payment_transaction WHERE transaction_id = ?";
-            stmt = conn.prepareStatement(sql);
-            
-            for (UUID id : ids) {
-                if (id != null) {
-                    stmt.setObject(1, id);
-                    stmt.addBatch();
-                }
-            }
-            
-            int[] rowsAffected = stmt.executeBatch();
-            
-            if (localTransaction) {
-                conn.commit();
-            }
-            
-            int totalDeleted = 0;
-            for (int count : rowsAffected) {
-                totalDeleted += count;
-            }
-            
-            logger.info("Deleted {} payment transactions in batch", totalDeleted);
-            return totalDeleted;
-            
-        } catch (SQLException e) {
-            if (localTransaction && conn != null) {
-                try {
-                    conn.rollback();
-                } catch (SQLException rollbackEx) {
-                    logger.error("Failed to rollback transaction", rollbackEx);
-                }
-            }
-            handleSqlException(conn, e, "Error deleting payment transactions in batch");
-            return 0; // This line will never be reached due to exception handling
-        } finally {
-            closeStatement(stmt);
-            if (localTransaction) {
-                try {
-                    if (conn != null) {
-                        conn.setAutoCommit(true);
-                    }
-                } catch (SQLException e) {
-                    logger.warn("Error resetting auto-commit", e);
-                }
-            }
-            closeConnection(conn);
-        }
-    }
-    
-    @Override
-    public List<PaymentTransaction> findByOrganizationId(UUID organizationId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (organizationId == null) {
-            throw new IllegalArgumentException("Organization ID cannot be null");
-        }
-        
-        // Create filter params if null
-        PaymentFilterParams params = filterParams != null ? filterParams : new PaymentFilterParams();
-        
-        // Set organization ID in filter params
-        params.setOrganizationId(organizationId);
-        
-        // Use the general query method with the updated filter params
-        return query(params);
-    }
-    
-    @Override
-    public List<PaymentTransaction> findByOrganizationIdAndAccountId(UUID organizationId, UUID accountId, 
-            PaymentFilterParams filterParams) throws ConnectionException, QueryExecutionException {
-        if (organizationId == null) {
-            throw new IllegalArgumentException("Organization ID cannot be null");
-        }
-        
-        if (accountId == null) {
-            throw new IllegalArgumentException("Account ID cannot be null");
-        }
-        
-        // Create filter params if null
-        PaymentFilterParams params = filterParams != null ? filterParams : new PaymentFilterParams();
-        
-        // Set organization ID and account ID in filter params
-        params.setOrganizationId(organizationId);
-        params.setAccountId(accountId);
-        
-        // Use the general query method with the updated filter params
-        return query(params);
-    }
-    
-    @Override
-    public List<PaymentTransaction> findByStatus(PaymentStatus status, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (status == null) {
-            throw new IllegalArgumentException("Status cannot be null");
-        }
-        
-        // Create filter params if null
-        PaymentFilterParams params = filterParams != null ? filterParams : new PaymentFilterParams();
-        
-        // Set status in filter params
-        StatusFilter statusFilter = new StatusFilter();
-        statusFilter.addStatus(status);
-        params.setStatusFilter(statusFilter);
-        
-        // Use the general query method with the updated filter params
-        return query(params);
-    }
-    
-    @Override
-    public List<PaymentTransaction> findByStatusIn(StatusFilter statusFilter, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (statusFilter == null || statusFilter.getStatuses().isEmpty()) {
-            throw new IllegalArgumentException("Status filter cannot be null or empty");
-        }
-        
-        // Create filter params if null
-        PaymentFilterParams params = filterParams != null ? filterParams : new PaymentFilterParams();
-        
-        // Set status filter in filter params
-        params.setStatusFilter(statusFilter);
-        
-        // Use the general query method with the updated filter params
-        return query(params);
-    }
-    
-    @Override
-    public List<PaymentTransaction> findByCreatedAtBetween(DateRangeFilter dateRange, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (dateRange == null) {
-            throw new IllegalArgumentException("Date range cannot be null");
-        }
-        
-        // Create filter params if null
-        PaymentFilterParams params = filterParams != null ? filterParams : new PaymentFilterParams();
-        
-        // Set date range in filter params
-        params.setDateRange(dateRange);
-        
-        // Use the general query method with the updated filter params
-        return query(params);
-    }
-    
-    @Override
-    public List<PaymentTransaction> findByUpdatedAtBetween(DateRangeFilter dateRange, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (dateRange == null) {
-            throw new IllegalArgumentException("Date range cannot be null");
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
-        
-        try {
-            conn = getConnection();
-            
-            PaymentQueryBuilder queryBuilder = PaymentQueryBuilder.create()
-                    .buildTransactionQuery();
-            
-            // Apply date range to updated_at field
-            queryBuilder.dateRange("t.updated_at", 
-                    dateRange.getStartDate(), 
-                    dateRange.getEndDate());
-            
-            // Apply other filters if provided
-            if (filterParams != null) {
-                // Create a copy of filter params without date range
-                PaymentFilterParams otherFilters = new PaymentFilterParams();
-                otherFilters.setOrganizationId(filterParams.getOrganizationId());
-                otherFilters.setAccountId(filterParams.getAccountId());
-                otherFilters.setAmountRange(filterParams.getAmountRange());
-                otherFilters.setStatusFilter(filterParams.getStatusFilter());
-                otherFilters.setMerchantId(filterParams.getMerchantId());
-                otherFilters.setPaymentType(filterParams.getPaymentType());
-                otherFilters.setSearchTerm(filterParams.getSearchTerm());
-                otherFilters.setSortCriteria(filterParams.getSortCriteria());
-                otherFilters.setPagination(filterParams.getPagination());
                 
-                queryBuilder.applyFilters(otherFilters);
-            }
-            
-            stmt = queryBuilder.buildPreparedStatement(conn);
-            rs = stmt.executeQuery();
-            
-            List<PaymentTransaction> transactions = new ArrayList<>();
-            while (rs.next()) {
-                transactions.add(mapRowToTransaction(rs));
-            }
-            
-            return transactions;
-            
-        } catch (SQLException e) {
-            handleSqlException(conn, e, "Error finding payment transactions by updated date range");
-            return List.of(); // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
-        }
-    }
-    
-    @Override
-    public List<PaymentTransaction> findByAmountBetween(AmountRangeFilter amountRange, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (amountRange == null) {
-            throw new IllegalArgumentException("Amount range cannot be null");
-        }
-        
-        // Create filter params if null
-        PaymentFilterParams params = filterParams != null ? filterParams : new PaymentFilterParams();
-        
-        // Set amount range in filter params
-        params.setAmountRange(amountRange);
-        
-        // Use the general query method with the updated filter params
-        return query(params);
-    }
-    
-    @Override
-    public List<PaymentTransaction> findByMerchantId(String merchantId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (merchantId == null || merchantId.isEmpty()) {
-            throw new IllegalArgumentException("Merchant ID cannot be null or empty");
-        }
-        
-        // Create filter params if null
-        PaymentFilterParams params = filterParams != null ? filterParams : new PaymentFilterParams();
-        
-        // Set merchant ID in filter params
-        params.setMerchantId(merchantId);
-        
-        // Use the general query method with the updated filter params
-        return query(params);
-    }
-    
-    @Override
-    public List<PaymentTransaction> findByPaymentType(PaymentType paymentType, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (paymentType == null) {
-            throw new IllegalArgumentException("Payment type cannot be null");
-        }
-        
-        // Create filter params if null
-        PaymentFilterParams params = filterParams != null ? filterParams : new PaymentFilterParams();
-        
-        // Set payment type in filter params
-        params.setPaymentType(paymentType.name());
-        
-        // Use the general query method with the updated filter params
-        return query(params);
-    }
-    
-    @Override
-    public Optional<PaymentTransaction> findByTransactionReference(String reference) 
-            throws ConnectionException, QueryExecutionException {
-        if (reference == null || reference.isEmpty()) {
-            return Optional.empty();
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
-        
-        try {
-            conn = getConnection();
-            
-            String sql = "SELECT * FROM payment_transaction WHERE transaction_reference = ?";
-            stmt = conn.prepareStatement(sql);
-            stmt.setString(1, reference);
-            
-            rs = stmt.executeQuery();
-            
-            if (rs.next()) {
-                PaymentTransaction transaction = mapRowToTransaction(rs);
-                return Optional.of(transaction);
-            } else {
-                return Optional.empty();
-            }
-            
-        } catch (SQLException e) {
-            handleSqlException(conn, e, "Error finding payment transaction by reference: " + reference);
-            return Optional.empty(); // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
-        }
-    }
-    
-    @Override
-    public PaymentTransaction updateStatus(UUID transactionId, PaymentStatus newStatus) 
-            throws ResourceNotFoundException, ValidationException, ConnectionException, 
-                   QueryExecutionException, TransactionException {
-        if (transactionId == null) {
-            throw new ValidationException("Transaction ID cannot be null");
-        }
-        
-        if (newStatus == null) {
-            throw new ValidationException("New status cannot be null");
-        }
-        
-        // Get the current transaction
-        PaymentTransaction transaction = findById(transactionId)
-                .orElseThrow(() -> new ResourceNotFoundException("Transaction not found with ID: " + transactionId));
-        
-        // Validate the status transition
-        try {
-            PaymentStatus.validateTransition(transaction.getStatus(), newStatus);
-        } catch (IllegalStateException e) {
-            throw new ValidationException("Invalid status transition: " + e.getMessage(), e);
-        }
-        
-        // Update the status
-        transaction.updateStatus(newStatus);
-        
-        // Save the updated transaction
-        return update(transaction);
-    }
-    
-    @Override
-    public PaymentTransaction captureTransaction(UUID transactionId, BigDecimal captureAmount) 
-            throws ResourceNotFoundException, ValidationException, ConnectionException, 
-                   QueryExecutionException, TransactionException {
-        if (transactionId == null) {
-            throw new ValidationException("Transaction ID cannot be null");
-        }
-        
-        if (captureAmount == null || captureAmount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new ValidationException("Capture amount must be greater than zero");
-        }
-        
-        // Get the current transaction
-        PaymentTransaction transaction = findById(transactionId)
-                .orElseThrow(() -> new ResourceNotFoundException("Transaction not found with ID: " + transactionId));
-        
-        // Validate that the transaction can be captured
-        if (!transaction.canCapture()) {
-            throw new ValidationException("Transaction cannot be captured. Current status: " + transaction.getStatus());
-        }
-        
-        // Validate the capture amount
-        if (captureAmount.compareTo(transaction.getAmount()) > 0) {
-            throw new ValidationException("Capture amount cannot exceed the authorized amount");
-        }
-        
-        // Begin a transaction if not already in one
-        boolean localTransaction = false;
-        if (transactionConnection.get() == null) {
-            beginTransaction();
-            localTransaction = true;
-        }
-        
-        try {
-            // Update the transaction status to CAPTURED
-            transaction.updateStatus(PaymentStatus.CAPTURED);
-            
-            // If partial capture, update the amount
-            if (captureAmount.compareTo(transaction.getAmount()) < 0) {
-                transaction.setAmount(captureAmount);
-            }
-            
-            // Save the updated transaction
-            PaymentTransaction updatedTransaction = update(transaction);
-            
-            // Create a payment event for the capture
-            createPaymentEvent(transaction.getTransactionId(), "CAPTURE", 
-                    PaymentStatus.AUTHORIZED, PaymentStatus.CAPTURED, 
-                    Map.of("captureAmount", captureAmount.toString()));
-            
-            // Commit the transaction if we started it
-            if (localTransaction) {
-                commitTransaction();
-            }
-            
-            return updatedTransaction;
-        } catch (Exception e) {
-            // Rollback the transaction if we started it
-            if (localTransaction) {
-                try {
-                    rollbackTransaction();
-                } catch (TransactionException rollbackEx) {
-                    logger.error("Failed to rollback transaction", rollbackEx);
-                }
-            }
-            
-            // Rethrow the exception
-            if (e instanceof ResourceNotFoundException) {
-                throw (ResourceNotFoundException) e;
-            } else if (e instanceof ValidationException) {
-                throw (ValidationException) e;
-            } else if (e instanceof ConnectionException) {
-                throw (ConnectionException) e;
-            } else if (e instanceof QueryExecutionException) {
-                throw (QueryExecutionException) e;
-            } else if (e instanceof TransactionException) {
-                throw (TransactionException) e;
-            } else {
-                throw new QueryExecutionException("Error capturing transaction: " + e.getMessage(), e);
-            }
-        }
-    }
-    
-    @Override
-    public PaymentTransaction refundTransaction(UUID transactionId, BigDecimal refundAmount) 
-            throws ResourceNotFoundException, ValidationException, ConnectionException, 
-                   QueryExecutionException, TransactionException {
-        if (transactionId == null) {
-            throw new ValidationException("Transaction ID cannot be null");
-        }
-        
-        if (refundAmount == null || refundAmount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new ValidationException("Refund amount must be greater than zero");
-        }
-        
-        // Get the current transaction
-        PaymentTransaction transaction = findById(transactionId)
-                .orElseThrow(() -> new ResourceNotFoundException("Transaction not found with ID: " + transactionId));
-        
-        // Validate that the transaction can be refunded
-        if (!transaction.canRefund()) {
-            throw new ValidationException("Transaction cannot be refunded. Current status: " + transaction.getStatus());
-        }
-        
-        // Validate the refund amount
-        if (refundAmount.compareTo(transaction.getAmount()) > 0) {
-            throw new ValidationException("Refund amount cannot exceed the captured amount");
-        }
-        
-        // Begin a transaction if not already in one
-        boolean localTransaction = false;
-        if (transactionConnection.get() == null) {
-            beginTransaction();
-            localTransaction = true;
-        }
-        
-        try {
-            // Update the transaction status to REFUNDED
-            transaction.updateStatus(PaymentStatus.REFUNDED);
-            
-            // Save the updated transaction
-            PaymentTransaction updatedTransaction = update(transaction);
-            
-            // Create a payment event for the refund
-            createPaymentEvent(transaction.getTransactionId(), "REFUND", 
-                    PaymentStatus.CAPTURED, PaymentStatus.REFUNDED, 
-                    Map.of("refundAmount", refundAmount.toString()));
-            
-            // Commit the transaction if we started it
-            if (localTransaction) {
-                commitTransaction();
-            }
-            
-            return updatedTransaction;
-        } catch (Exception e) {
-            // Rollback the transaction if we started it
-            if (localTransaction) {
-                try {
-                    rollbackTransaction();
-                } catch (TransactionException rollbackEx) {
-                    logger.error("Failed to rollback transaction", rollbackEx);
-                }
-            }
-            
-            // Rethrow the exception
-            if (e instanceof ResourceNotFoundException) {
-                throw (ResourceNotFoundException) e;
-            } else if (e instanceof ValidationException) {
-                throw (ValidationException) e;
-            } else if (e instanceof ConnectionException) {
-                throw (ConnectionException) e;
-            } else if (e instanceof QueryExecutionException) {
-                throw (QueryExecutionException) e;
-            } else if (e instanceof TransactionException) {
-                throw (TransactionException) e;
-            } else {
-                throw new QueryExecutionException("Error refunding transaction: " + e.getMessage(), e);
-            }
-        }
-    }
-    
-    @Override
-    public PaymentTransaction voidTransaction(UUID transactionId) 
-            throws ResourceNotFoundException, ValidationException, ConnectionException, 
-                   QueryExecutionException, TransactionException {
-        if (transactionId == null) {
-            throw new ValidationException("Transaction ID cannot be null");
-        }
-        
-        // Get the current transaction
-        PaymentTransaction transaction = findById(transactionId)
-                .orElseThrow(() -> new ResourceNotFoundException("Transaction not found with ID: " + transactionId));
-        
-        // Validate that the transaction can be voided
-        if (!transaction.canVoid()) {
-            throw new ValidationException("Transaction cannot be voided. Current status: " + transaction.getStatus());
-        }
-        
-        // Begin a transaction if not already in one
-        boolean localTransaction = false;
-        if (transactionConnection.get() == null) {
-            beginTransaction();
-            localTransaction = true;
-        }
-        
-        try {
-            // Update the transaction status to VOIDED
-            transaction.updateStatus(PaymentStatus.VOIDED);
-            
-            // Save the updated transaction
-            PaymentTransaction updatedTransaction = update(transaction);
-            
-            // Create a payment event for the void
-            createPaymentEvent(transaction.getTransactionId(), "VOID", 
-                    PaymentStatus.AUTHORIZED, PaymentStatus.VOIDED, 
-                    Map.of("voidReason", "Merchant initiated void"));
-            
-            // Commit the transaction if we started it
-            if (localTransaction) {
-                commitTransaction();
-            }
-            
-            return updatedTransaction;
-        } catch (Exception e) {
-            // Rollback the transaction if we started it
-            if (localTransaction) {
-                try {
-                    rollbackTransaction();
-                } catch (TransactionException rollbackEx) {
-                    logger.error("Failed to rollback transaction", rollbackEx);
-                }
-            }
-            
-            // Rethrow the exception
-            if (e instanceof ResourceNotFoundException) {
-                throw (ResourceNotFoundException) e;
-            } else if (e instanceof ValidationException) {
-                throw (ValidationException) e;
-            } else if (e instanceof ConnectionException) {
-                throw (ConnectionException) e;
-            } else if (e instanceof QueryExecutionException) {
-                throw (QueryExecutionException) e;
-            } else if (e instanceof TransactionException) {
-                throw (TransactionException) e;
-            } else {
-                throw new QueryExecutionException("Error voiding transaction: " + e.getMessage(), e);
-            }
-        }
-    }
-    
-    @Override
-    public List<PaymentTransaction> findTransactionsRequiringProcessing(Instant cutoffTime, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (cutoffTime == null) {
-            cutoffTime = Instant.now().minusSeconds(300); // Default to 5 minutes ago
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
-        
-        try {
-            conn = getConnection();
-            
-            PaymentQueryBuilder queryBuilder = PaymentQueryBuilder.create()
-                    .buildTransactionQuery()
-                    .where("t.status = ?")
-                    .addParameter(PaymentStatus.PROCESSING.name())
-                    .and("t.updated_at < ?")
-                    .addParameter(Timestamp.from(cutoffTime));
-            
-            // Apply additional filters if provided
-            if (filterParams != null) {
-                // Create a copy of filter params without status filter
-                PaymentFilterParams otherFilters = new PaymentFilterParams();
-                otherFilters.setOrganizationId(filterParams.getOrganizationId());
-                otherFilters.setAccountId(filterParams.getAccountId());
-                otherFilters.setDateRange(filterParams.getDateRange());
-                otherFilters.setAmountRange(filterParams.getAmountRange());
-                otherFilters.setMerchantId(filterParams.getMerchantId());
-                otherFilters.setPaymentType(filterParams.getPaymentType());
-                otherFilters.setSearchTerm(filterParams.getSearchTerm());
-                otherFilters.setSortCriteria(filterParams.getSortCriteria());
-                otherFilters.setPagination(filterParams.getPagination());
+                int[] results = ps.executeBatch();
                 
-                queryBuilder.applyFilters(otherFilters);
+                // Check if all updates were successful
+                for (int i = 0; i < results.length; i++) {
+                    if (results[i] != 1 && results[i] != Statement.SUCCESS_NO_INFO) {
+                        conn.rollback();
+                        throw new PaymentDataAccessException("Failed to update transaction at index " + i);
+                    }
+                }
+                
+                conn.commit();
+                return entities;
+            } catch (Exception e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(true);
             }
-            
-            stmt = queryBuilder.buildPreparedStatement(conn);
-            rs = stmt.executeQuery();
-            
-            List<PaymentTransaction> transactions = new ArrayList<>();
-            while (rs.next()) {
-                transactions.add(mapRowToTransaction(rs));
-            }
-            
-            return transactions;
-            
         } catch (SQLException e) {
-            handleSqlException(conn, e, "Error finding transactions requiring processing");
-            return List.of(); // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
+            LOGGER.log(Level.SEVERE, "Error in batch update", e);
+            throw new PaymentDataAccessException("Error in batch update", e);
         }
     }
     
     @Override
-    public Map<PaymentStatus, Long> countByStatusForOrganization(UUID organizationId) 
-            throws ConnectionException, QueryExecutionException {
-        if (organizationId == null) {
-            throw new IllegalArgumentException("Organization ID cannot be null");
-        }
-        
+    public <R> R executeInTransaction(TransactionOperation<R> operation) {
         Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
-        
         try {
-            conn = getConnection();
-            
-            String sql = "SELECT status, COUNT(*) as count FROM payment_transaction " +
-                    "WHERE organization_id = ? GROUP BY status";
-            
-            stmt = conn.prepareStatement(sql);
-            stmt.setObject(1, organizationId);
-            
-            rs = stmt.executeQuery();
-            
-            Map<PaymentStatus, Long> statusCounts = new HashMap<>();
-            while (rs.next()) {
-                PaymentStatus status = PaymentStatus.valueOf(rs.getString("status"));
-                long count = rs.getLong("count");
-                statusCounts.put(status, count);
+            conn = beginTransaction();
+            R result = operation.execute(conn);
+            commitTransaction(conn);
+            return result;
+        } catch (Exception e) {
+            if (conn != null) {
+                rollbackTransaction(conn);
             }
-            
-            return statusCounts;
-            
-        } catch (SQLException e) {
-            handleSqlException(conn, e, "Error counting transactions by status for organization: " + organizationId);
-            return Map.of(); // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
+            if (e instanceof RuntimeException) {
+                throw (RuntimeException) e;
+            }
+            throw new PaymentDataAccessException("Error executing in transaction", e);
         }
     }
     
     @Override
-    public BigDecimal calculateTotalAmountByStatusForOrganization(UUID organizationId, PaymentStatus status, String currency) 
-            throws ConnectionException, QueryExecutionException {
-        if (organizationId == null) {
-            throw new IllegalArgumentException("Organization ID cannot be null");
+    public long count(Object params) {
+        if (!(params instanceof PaymentFilterParams)) {
+            throw new IllegalArgumentException("Count params must be of type PaymentFilterParams");
         }
         
-        if (status == null) {
-            throw new IllegalArgumentException("Status cannot be null");
-        }
-        
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
-        
-        try {
-            conn = getConnection();
+        return countByFilterParams((PaymentFilterParams) params);
+    }
+    
+    @Override
+    public boolean exists(UUID id) {
+        try (Connection conn = connectionManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(EXISTS_QUERY)) {
             
-            StringBuilder sql = new StringBuilder(
-                    "SELECT SUM(amount) as total FROM payment_transaction " +
-                    "WHERE organization_id = ? AND status = ?");
+            ps.setString(1, id.toString());
             
-            if (currency != null && !currency.isEmpty()) {
-                sql.append(" AND currency = ?");
-            }
-            
-            stmt = conn.prepareStatement(sql.toString());
-            stmt.setObject(1, organizationId);
-            stmt.setString(2, status.name());
-            
-            if (currency != null && !currency.isEmpty()) {
-                stmt.setString(3, currency);
-            }
-            
-            rs = stmt.executeQuery();
-            
-            if (rs.next()) {
-                BigDecimal total = rs.getBigDecimal("total");
-                return total != null ? total : BigDecimal.ZERO;
-            } else {
-                return BigDecimal.ZERO;
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
             }
             
         } catch (SQLException e) {
-            handleSqlException(conn, e, "Error calculating total amount by status for organization: " + organizationId);
-            return BigDecimal.ZERO; // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
+            LOGGER.log(Level.SEVERE, "Error checking if transaction exists: " + id, e);
+            throw new PaymentDataAccessException("Error checking if transaction exists", e);
         }
     }
     
     @Override
-    public List<PaymentTransaction> findByFullTextSearch(String searchText, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        if (searchText == null || searchText.isEmpty()) {
-            throw new IllegalArgumentException("Search text cannot be null or empty");
-        }
-        
-        // Create filter params if null
-        PaymentFilterParams params = filterParams != null ? filterParams : new PaymentFilterParams();
-        
-        // Set search term in filter params
-        params.setSearchTerm(searchText);
-        
-        // Use the general query method with the updated filter params
-        return query(params);
+    public List<PaymentTransaction> findByOrganizationId(UUID organizationId) {
+        return executeQuery("SELECT * FROM " + TABLE_NAME + " WHERE " + ORG_ID_COLUMN + " = ?", 
+                organizationId.toString());
     }
     
     @Override
-    public Map<LocalDate, Long> getTransactionCountByDay(UUID organizationId, DateRangeFilter dateRange) 
-            throws ConnectionException, QueryExecutionException {
-        if (organizationId == null) {
-            throw new IllegalArgumentException("Organization ID cannot be null");
+    public List<PaymentTransaction> findByAccountId(UUID accountId) {
+        return executeQuery("SELECT * FROM " + TABLE_NAME + " WHERE " + ACCOUNT_ID_COLUMN + " = ?", 
+                accountId.toString());
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByOrganizationAndAccountId(UUID organizationId, UUID accountId) {
+        return executeQuery("SELECT * FROM " + TABLE_NAME + " WHERE " + ORG_ID_COLUMN + " = ? AND " + 
+                ACCOUNT_ID_COLUMN + " = ?", organizationId.toString(), accountId.toString());
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByStatus(PaymentStatus status) {
+        return executeQuery(SELECT_BY_STATUS_QUERY, status.name());
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByStatusIn(Set<PaymentStatus> statuses) {
+        if (statuses == null || statuses.isEmpty()) {
+            return Collections.emptyList();
         }
         
+        // Create placeholders for the IN clause
+        String placeholders = statuses.stream()
+                .map(s -> "?")
+                .collect(Collectors.joining(", "));
+        
+        String query = String.format(SELECT_BY_STATUS_IN_QUERY, placeholders);
+        
+        // Convert statuses to parameter array
+        Object[] params = statuses.stream()
+                .map(PaymentStatus::name)
+                .toArray();
+        
+        return executeQuery(query, params);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByStatusAndDate(PaymentStatus status, DateRangeFilter dateRange) {
         if (dateRange == null || dateRange.getStartDate() == null || dateRange.getEndDate() == null) {
-            throw new IllegalArgumentException("Date range with start and end dates is required");
+            throw new IllegalArgumentException("Date range must be provided with start and end dates");
         }
         
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
+        return executeQuery(SELECT_BY_STATUS_AND_DATE_QUERY, 
+                status.name(), 
+                Timestamp.valueOf(dateRange.getStartDate()), 
+                Timestamp.valueOf(dateRange.getEndDate()));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByOrganizationStatusAndDate(UUID organizationId, PaymentStatus status, 
+            DateRangeFilter dateRange) {
+        if (dateRange == null || dateRange.getStartDate() == null || dateRange.getEndDate() == null) {
+            throw new IllegalArgumentException("Date range must be provided with start and end dates");
+        }
         
-        try {
-            conn = getConnection();
+        return executeQuery(SELECT_BY_ORG_STATUS_AND_DATE_QUERY, 
+                organizationId.toString(), 
+                status.name(), 
+                Timestamp.valueOf(dateRange.getStartDate()), 
+                Timestamp.valueOf(dateRange.getEndDate()));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByAccountStatusAndDate(UUID accountId, PaymentStatus status, 
+            DateRangeFilter dateRange) {
+        if (dateRange == null || dateRange.getStartDate() == null || dateRange.getEndDate() == null) {
+            throw new IllegalArgumentException("Date range must be provided with start and end dates");
+        }
+        
+        return executeQuery(SELECT_BY_ACCOUNT_STATUS_AND_DATE_QUERY, 
+                accountId.toString(), 
+                status.name(), 
+                Timestamp.valueOf(dateRange.getStartDate()), 
+                Timestamp.valueOf(dateRange.getEndDate()));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByAmount(AmountRangeFilter amountRange) {
+        if (amountRange == null || amountRange.getMinAmount() == null || 
+                amountRange.getMaxAmount() == null || amountRange.getCurrency() == null) {
+            throw new IllegalArgumentException("Amount range must be provided with min, max, and currency");
+        }
+        
+        return executeQuery(SELECT_BY_AMOUNT_RANGE_QUERY, 
+                amountRange.getMinAmount(), 
+                amountRange.getMaxAmount(), 
+                amountRange.getCurrency());
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByAmountRange(BigDecimal minAmount, BigDecimal maxAmount, String currency) {
+        if (minAmount == null || maxAmount == null || currency == null) {
+            throw new IllegalArgumentException("Min amount, max amount, and currency must be provided");
+        }
+        
+        return executeQuery(SELECT_BY_AMOUNT_RANGE_QUERY, minAmount, maxAmount, currency);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByMerchant(String merchantId) {
+        return executeQuery(SELECT_BY_MERCHANT_QUERY, merchantId);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByMerchantAndStatus(String merchantId, PaymentStatus status) {
+        return executeQuery(SELECT_BY_MERCHANT_AND_STATUS_QUERY, merchantId, status.name());
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByPaymentType(String paymentType) {
+        return executeQuery(SELECT_BY_PAYMENT_TYPE_QUERY, paymentType);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByReference(String reference) {
+        return executeQuery(SELECT_BY_REFERENCE_QUERY, reference);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByCreationDate(LocalDateTime startDate, LocalDateTime endDate) {
+        if (startDate == null || endDate == null) {
+            throw new IllegalArgumentException("Start date and end date must be provided");
+        }
+        
+        return executeQuery(SELECT_BY_CREATION_DATE_QUERY, 
+                Timestamp.valueOf(startDate), 
+                Timestamp.valueOf(endDate));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByUpdateDate(LocalDateTime startDate, LocalDateTime endDate) {
+        if (startDate == null || endDate == null) {
+            throw new IllegalArgumentException("Start date and end date must be provided");
+        }
+        
+        return executeQuery(SELECT_BY_UPDATE_DATE_QUERY, 
+                Timestamp.valueOf(startDate), 
+                Timestamp.valueOf(endDate));
+    }
+    
+    @Override
+    public PaymentTransaction updateStatus(UUID transactionId, PaymentStatus newStatus) {
+        Optional<PaymentTransaction> existingOpt = findById(transactionId);
+        if (!existingOpt.isPresent()) {
+            throw new PaymentEntityNotFoundException("Transaction not found: " + transactionId);
+        }
+        
+        PaymentTransaction existing = existingOpt.get();
+        
+        // Validate state transition
+        if (!existing.canTransitionTo(newStatus)) {
+            throw new PaymentInvalidStateException(
+                    "Invalid state transition from " + existing.getStatus() + " to " + newStatus);
+        }
+        
+        try (Connection conn = connectionManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(UPDATE_STATUS_QUERY)) {
             
-            String sql = "SELECT DATE(created_at) as day, COUNT(*) as count " +
-                    "FROM payment_transaction " +
-                    "WHERE organization_id = ? AND created_at BETWEEN ? AND ? " +
-                    "GROUP BY DATE(created_at) " +
-                    "ORDER BY day";
+            LocalDateTime now = LocalDateTime.now();
             
-            stmt = conn.prepareStatement(sql);
-            stmt.setObject(1, organizationId);
-            stmt.setTimestamp(2, Timestamp.valueOf(dateRange.getStartDate()));
-            stmt.setTimestamp(3, Timestamp.valueOf(dateRange.getEndDate()));
+            ps.setString(1, newStatus.name());
+            ps.setTimestamp(2, Timestamp.valueOf(now));
+            ps.setString(3, transactionId.toString());
             
-            rs = stmt.executeQuery();
-            
-            Map<LocalDate, Long> countByDay = new HashMap<>();
-            while (rs.next()) {
-                LocalDate day = rs.getDate("day").toLocalDate();
-                long count = rs.getLong("count");
-                countByDay.put(day, count);
+            int rowsAffected = ps.executeUpdate();
+            if (rowsAffected != 1) {
+                throw new PaymentDataAccessException("Failed to update transaction status, affected rows: " + rowsAffected);
             }
             
-            return countByDay;
+            // Update the transaction object
+            existing.setStatus(newStatus);
+            existing.setUpdatedAt(now);
+            
+            return existing;
             
         } catch (SQLException e) {
-            handleSqlException(conn, e, "Error getting transaction count by day for organization: " + organizationId);
-            return Map.of(); // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
+            LOGGER.log(Level.SEVERE, "Error updating transaction status: " + transactionId, e);
+            throw new PaymentDataAccessException("Error updating transaction status", e);
         }
     }
     
     @Override
-    public Map<PaymentType, Long> getTransactionCountByPaymentType(UUID organizationId, DateRangeFilter dateRange) 
-            throws ConnectionException, QueryExecutionException {
-        if (organizationId == null) {
-            throw new IllegalArgumentException("Organization ID cannot be null");
+    public List<PaymentTransaction> findByFilterParams(PaymentFilterParams filterParams) {
+        if (filterParams == null) {
+            throw new IllegalArgumentException("Filter parameters must be provided");
         }
         
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
+        List<Object> params = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("SELECT * FROM " + TABLE_NAME);
         
-        try {
-            conn = getConnection();
-            
-            StringBuilder sql = new StringBuilder(
-                    "SELECT payment_type, COUNT(*) as count " +
-                    "FROM payment_transaction " +
-                    "WHERE organization_id = ?");
-            
-            if (dateRange != null && dateRange.getStartDate() != null && dateRange.getEndDate() != null) {
-                sql.append(" AND created_at BETWEEN ? AND ?");
-            }
-            
-            sql.append(" GROUP BY payment_type");
-            
-            stmt = conn.prepareStatement(sql.toString());
-            stmt.setObject(1, organizationId);
-            
-            if (dateRange != null && dateRange.getStartDate() != null && dateRange.getEndDate() != null) {
-                stmt.setTimestamp(2, Timestamp.valueOf(dateRange.getStartDate()));
-                stmt.setTimestamp(3, Timestamp.valueOf(dateRange.getEndDate()));
-            }
-            
-            rs = stmt.executeQuery();
-            
-            Map<PaymentType, Long> countByType = new HashMap<>();
-            while (rs.next()) {
-                PaymentType paymentType = PaymentType.valueOf(rs.getString("payment_type"));
-                long count = rs.getLong("count");
-                countByType.put(paymentType, count);
-            }
-            
-            return countByType;
-            
-        } catch (SQLException e) {
-            handleSqlException(conn, e, "Error getting transaction count by payment type for organization: " + organizationId);
-            return Map.of(); // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
-        }
+        // Build WHERE clause
+        sql.append(buildWhereClause(
+                filterParams.getOrganizationId(),
+                filterParams.getAccountId(),
+                filterParams.getStatuses(),
+                filterParams.getDateRange() != null ? filterParams.getDateRange().getStartDate() : null,
+                filterParams.getDateRange() != null ? filterParams.getDateRange().getEndDate() : null,
+                filterParams.getAmountRange() != null ? filterParams.getAmountRange().getMinAmount() : null,
+                filterParams.getAmountRange() != null ? filterParams.getAmountRange().getMaxAmount() : null,
+                filterParams.getAmountRange() != null ? filterParams.getAmountRange().getCurrency() : null,
+                filterParams.getMerchantId(),
+                filterParams.getPaymentType(),
+                params));
+        
+        // Build ORDER BY clause
+        sql.append(buildOrderByClause(
+                filterParams.getSortField(),
+                filterParams.getSortDirection()));
+        
+        // Build LIMIT and OFFSET clause
+        sql.append(buildLimitOffsetClause(
+                filterParams.getLimit(),
+                filterParams.getOffset()));
+        
+        return executeQuery(sql.toString(), params.toArray());
     }
     
     @Override
-    public Map<PaymentStatus, Long> getTransactionCountByStatus(UUID organizationId, DateRangeFilter dateRange) 
-            throws ConnectionException, QueryExecutionException {
-        if (organizationId == null) {
-            throw new IllegalArgumentException("Organization ID cannot be null");
+    public long countByFilterParams(PaymentFilterParams filterParams) {
+        if (filterParams == null) {
+            throw new IllegalArgumentException("Filter parameters must be provided");
         }
         
-        Connection conn = null;
-        PreparedStatement stmt = null;
-        ResultSet rs = null;
+        List<Object> params = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM " + TABLE_NAME);
         
-        try {
-            conn = getConnection();
-            
-            StringBuilder sql = new StringBuilder(
-                    "SELECT status, COUNT(*) as count " +
-                    "FROM payment_transaction " +
-                    "WHERE organization_id = ?");
-            
-            if (dateRange != null && dateRange.getStartDate() != null && dateRange.getEndDate() != null) {
-                sql.append(" AND created_at BETWEEN ? AND ?");
-            }
-            
-            sql.append(" GROUP BY status");
-            
-            stmt = conn.prepareStatement(sql.toString());
-            stmt.setObject(1, organizationId);
-            
-            if (dateRange != null && dateRange.getStartDate() != null && dateRange.getEndDate() != null) {
-                stmt.setTimestamp(2, Timestamp.valueOf(dateRange.getStartDate()));
-                stmt.setTimestamp(3, Timestamp.valueOf(dateRange.getEndDate()));
-            }
-            
-            rs = stmt.executeQuery();
-            
-            Map<PaymentStatus, Long> countByStatus = new HashMap<>();
-            while (rs.next()) {
-                PaymentStatus status = PaymentStatus.valueOf(rs.getString("status"));
-                long count = rs.getLong("count");
-                countByStatus.put(status, count);
-            }
-            
-            return countByStatus;
-            
-        } catch (SQLException e) {
-            handleSqlException(conn, e, "Error getting transaction count by status for organization: " + organizationId);
-            return Map.of(); // This line will never be reached due to exception handling
-        } finally {
-            closeResultSet(rs);
-            closeStatement(stmt);
-            closeConnection(conn);
-        }
+        // Build WHERE clause
+        sql.append(buildWhereClause(
+                filterParams.getOrganizationId(),
+                filterParams.getAccountId(),
+                filterParams.getStatuses(),
+                filterParams.getDateRange() != null ? filterParams.getDateRange().getStartDate() : null,
+                filterParams.getDateRange() != null ? filterParams.getDateRange().getEndDate() : null,
+                filterParams.getAmountRange() != null ? filterParams.getAmountRange().getMinAmount() : null,
+                filterParams.getAmountRange() != null ? filterParams.getAmountRange().getMaxAmount() : null,
+                filterParams.getAmountRange() != null ? filterParams.getAmountRange().getCurrency() : null,
+                filterParams.getMerchantId(),
+                filterParams.getPaymentType(),
+                params));
+        
+        return executeCountQuery(sql.toString(), params.toArray());
     }
     
     @Override
-    public List<PaymentTransaction> findByOrganizationIdForAllAccounts(UUID organizationId, PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        // This is the same as findByOrganizationId since we're already filtering by organization ID only
-        return findByOrganizationId(organizationId, filterParams);
+    public List<PaymentTransaction> findByOrganizationWithPagination(UUID organizationId, int limit, int offset) {
+        return executeQuery(SELECT_BY_ORG_WITH_PAGINATION_QUERY, 
+                organizationId.toString(), limit, offset);
     }
     
     @Override
-    public List<PaymentTransaction> findForAllOrganizations(PaymentFilterParams filterParams) 
-            throws ConnectionException, QueryExecutionException {
-        // Use the general query method without organization ID filter
-        return query(filterParams);
+    public List<PaymentTransaction> findByAccountWithPagination(UUID accountId, int limit, int offset) {
+        return executeQuery(SELECT_BY_ACCOUNT_WITH_PAGINATION_QUERY, 
+                accountId.toString(), limit, offset);
     }
     
-    /**
-     * Creates a payment event record for transaction history tracking.
-     *
-     * @param transactionId The transaction ID
-     * @param eventType The event type
-     * @param previousStatus The previous status
-     * @param newStatus The new status
-     * @param eventData Additional event data
-     * @throws SQLException if a database access error occurs
-     */
-    private void createPaymentEvent(UUID transactionId, String eventType, 
-            PaymentStatus previousStatus, PaymentStatus newStatus, Map<String, String> eventData) 
-            throws SQLException {
-        Connection conn = getConnection();
-        PreparedStatement stmt = null;
+    @Override
+    public List<PaymentTransaction> findByOrganizationAndAccountWithPagination(UUID organizationId, UUID accountId, 
+            int limit, int offset) {
+        return executeQuery(SELECT_BY_ORG_AND_ACCOUNT_WITH_PAGINATION_QUERY, 
+                organizationId.toString(), accountId.toString(), limit, offset);
+    }
+    
+    @Override
+    public List<PaymentTransaction> searchByText(String searchTerm) {
+        if (searchTerm == null || searchTerm.trim().isEmpty()) {
+            throw new IllegalArgumentException("Search term must be provided");
+        }
         
-        try {
-            String sql = "INSERT INTO payment_event " +
-                    "(event_id, transaction_id, event_type, previous_status, new_status, event_data, created_at, created_by) " +
-                    "VALUES (?, ?, ?, ?, ?, ?::jsonb, ?, ?)";
+        String likePattern = "%" + searchTerm + "%";
+        return executeQuery(SEARCH_BY_TEXT_QUERY, likePattern, likePattern);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findTransactionsForSettlement(LocalDateTime cutoffTime) {
+        return executeQuery(SELECT_FOR_SETTLEMENT_QUERY, 
+                PaymentStatus.AUTHORIZED.name(), Timestamp.valueOf(cutoffTime));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findExpiringAuthorizations(LocalDateTime expirationTime) {
+        return executeQuery(SELECT_EXPIRING_AUTHORIZATIONS_QUERY, 
+                PaymentStatus.AUTHORIZED.name(), Timestamp.valueOf(expirationTime));
+    }
+    
+    @Override
+    public Map<PaymentStatus, BigDecimal> aggregateAmountsByStatus(UUID organizationId, UUID accountId, 
+            LocalDateTime startDate, LocalDateTime endDate) {
+        
+        StringBuilder sql = new StringBuilder(AGGREGATE_AMOUNTS_BY_STATUS_BASE_QUERY);
+        List<Object> params = new ArrayList<>();
+        
+        if (organizationId != null) {
+            sql.append(" AND ").append(ORG_ID_COLUMN).append(" = ?");
+            params.add(organizationId.toString());
+        }
+        
+        if (accountId != null) {
+            sql.append(" AND ").append(ACCOUNT_ID_COLUMN).append(" = ?");
+            params.add(accountId.toString());
+        }
+        
+        if (startDate != null && endDate != null) {
+            sql.append(" AND ").append(CREATED_AT_COLUMN).append(" BETWEEN ? AND ?");
+            params.add(Timestamp.valueOf(startDate));
+            params.add(Timestamp.valueOf(endDate));
+        } else if (startDate != null) {
+            sql.append(" AND ").append(CREATED_AT_COLUMN).append(" >= ?");
+            params.add(Timestamp.valueOf(startDate));
+        } else if (endDate != null) {
+            sql.append(" AND ").append(CREATED_AT_COLUMN).append(" <= ?");
+            params.add(Timestamp.valueOf(endDate));
+        }
+        
+        sql.append(" GROUP BY ").append(STATUS_COLUMN);
+        
+        Map<PaymentStatus, BigDecimal> result = new EnumMap<>(PaymentStatus.class);
+        
+        try (Connection conn = connectionManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             
-            stmt = conn.prepareStatement(sql);
-            stmt.setObject(1, UUID.randomUUID());
-            stmt.setObject(2, transactionId);
-            stmt.setString(3, eventType);
-            stmt.setString(4, previousStatus.name());
-            stmt.setString(5, newStatus.name());
+            // Set parameters
+            for (int i = 0; i < params.size(); i++) {
+                setParameter(ps, i + 1, params.get(i));
+            }
             
-            // Convert event data to JSON string
-            StringBuilder jsonBuilder = new StringBuilder("{");
-            boolean first = true;
-            for (Map.Entry<String, String> entry : eventData.entrySet()) {
-                if (!first) {
-                    jsonBuilder.append(",");
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    PaymentStatus status = PaymentStatus.valueOf(rs.getString(STATUS_COLUMN));
+                    BigDecimal totalAmount = rs.getBigDecimal("total_amount");
+                    result.put(status, totalAmount);
                 }
-                jsonBuilder.append("\"").append(entry.getKey()).append("\":\"").append(entry.getValue()).append("\"");
-                first = false;
             }
-            jsonBuilder.append("}");
-            
-            stmt.setString(6, jsonBuilder.toString());
-            stmt.setTimestamp(7, Timestamp.from(Instant.now()));
-            stmt.setString(8, "system"); // Default to system user
-            
-            stmt.executeUpdate();
             
         } catch (SQLException e) {
-            logger.error("Error creating payment event for transaction: {}", transactionId, e);
-            throw e;
-        } finally {
-            closeStatement(stmt);
+            LOGGER.log(Level.SEVERE, "Error aggregating amounts by status", e);
+            throw new PaymentDataAccessException("Error aggregating amounts by status", e);
         }
+        
+        return result;
     }
     
-    /**
-     * Handles SQL exceptions by rolling back transactions and throwing appropriate exceptions.
-     *
-     * @param conn The database connection
-     * @param e The SQL exception
-     * @param message The error message
-     * @throws ConnectionException if a connection error occurs
-     * @throws QueryExecutionException if a query execution error occurs
-     */
-    private void handleSqlException(Connection conn, SQLException e, String message) 
-            throws ConnectionException, QueryExecutionException {
-        logger.error(message, e);
+    @Override
+    public Map<PaymentStatus, Long> aggregateCountsByStatus(UUID organizationId, UUID accountId, 
+            LocalDateTime startDate, LocalDateTime endDate) {
         
-        // Rollback transaction if auto-commit is disabled
-        if (conn != null) {
-            try {
-                if (!conn.getAutoCommit()) {
-                    conn.rollback();
+        StringBuilder sql = new StringBuilder(AGGREGATE_COUNTS_BY_STATUS_BASE_QUERY);
+        List<Object> params = new ArrayList<>();
+        
+        if (organizationId != null) {
+            sql.append(" AND ").append(ORG_ID_COLUMN).append(" = ?");
+            params.add(organizationId.toString());
+        }
+        
+        if (accountId != null) {
+            sql.append(" AND ").append(ACCOUNT_ID_COLUMN).append(" = ?");
+            params.add(accountId.toString());
+        }
+        
+        if (startDate != null && endDate != null) {
+            sql.append(" AND ").append(CREATED_AT_COLUMN).append(" BETWEEN ? AND ?");
+            params.add(Timestamp.valueOf(startDate));
+            params.add(Timestamp.valueOf(endDate));
+        } else if (startDate != null) {
+            sql.append(" AND ").append(CREATED_AT_COLUMN).append(" >= ?");
+            params.add(Timestamp.valueOf(startDate));
+        } else if (endDate != null) {
+            sql.append(" AND ").append(CREATED_AT_COLUMN).append(" <= ?");
+            params.add(Timestamp.valueOf(endDate));
+        }
+        
+        sql.append(" GROUP BY ").append(STATUS_COLUMN);
+        
+        Map<PaymentStatus, Long> result = new EnumMap<>(PaymentStatus.class);
+        
+        try (Connection conn = connectionManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            
+            // Set parameters
+            for (int i = 0; i < params.size(); i++) {
+                setParameter(ps, i + 1, params.get(i));
+            }
+            
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    PaymentStatus status = PaymentStatus.valueOf(rs.getString(STATUS_COLUMN));
+                    Long count = rs.getLong("count");
+                    result.put(status, count);
                 }
-            } catch (SQLException rollbackEx) {
-                logger.error("Failed to rollback transaction", rollbackEx);
-            }
-        }
-        
-        // Determine the type of exception to throw
-        if (e.getSQLState() != null) {
-            String sqlState = e.getSQLState();
-            
-            // Connection-related errors (class 08)
-            if (sqlState.startsWith("08")) {
-                throw new ConnectionException(message + ": " + e.getMessage(), e);
             }
             
-            // Constraint violations (class 23)
-            if (sqlState.startsWith("23")) {
-                throw new ValidationException(message + ": " + e.getMessage(), e);
-            }
+        } catch (SQLException e) {
+            LOGGER.log(Level.SEVERE, "Error aggregating counts by status", e);
+            throw new PaymentDataAccessException("Error aggregating counts by status", e);
         }
         
-        // Default to query execution exception
-        throw new QueryExecutionException(message + ": " + e.getMessage(), e);
+        return result;
     }
     
-    /**
-     * Closes the connection pool when this DAO is no longer needed.
-     * Should be called during application shutdown.
-     */
-    public void close() {
-        if (dataSource != null && !dataSource.isClosed()) {
-            dataSource.close();
-            logger.info("Closed payment transaction DAO connection pool");
+    @Override
+    public List<PaymentTransaction> findTransactionsForReconciliation(LocalDateTime cutoffTime) {
+        return executeQuery(SELECT_FOR_RECONCILIATION_QUERY, Timestamp.valueOf(cutoffTime));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByMultipleCriteria(UUID organizationId, UUID accountId, 
+            Set<PaymentStatus> statuses, LocalDateTime startDate, LocalDateTime endDate,
+            BigDecimal minAmount, BigDecimal maxAmount, String currency,
+            String merchantId, String paymentType,
+            String sortField, String sortDirection,
+            int limit, int offset) {
+        
+        List<Object> params = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("SELECT * FROM " + TABLE_NAME);
+        
+        // Build WHERE clause
+        sql.append(buildWhereClause(
+                organizationId, accountId, statuses,
+                startDate, endDate,
+                minAmount, maxAmount, currency,
+                merchantId, paymentType,
+                params));
+        
+        // Build ORDER BY clause
+        sql.append(buildOrderByClause(sortField, sortDirection));
+        
+        // Build LIMIT and OFFSET clause
+        sql.append(buildLimitOffsetClause(limit, offset));
+        
+        return executeQuery(sql.toString(), params.toArray());
+    }
+    
+    @Override
+    public long countByMultipleCriteria(UUID organizationId, UUID accountId, 
+            Set<PaymentStatus> statuses, LocalDateTime startDate, LocalDateTime endDate,
+            BigDecimal minAmount, BigDecimal maxAmount, String currency,
+            String merchantId, String paymentType) {
+        
+        List<Object> params = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM " + TABLE_NAME);
+        
+        // Build WHERE clause
+        sql.append(buildWhereClause(
+                organizationId, accountId, statuses,
+                startDate, endDate,
+                minAmount, maxAmount, currency,
+                merchantId, paymentType,
+                params));
+        
+        return executeCountQuery(sql.toString(), params.toArray());
+    }
+    
+    @Override
+    public List<PaymentTransaction> findTransactionsEligibleForStatus(PaymentStatus targetStatus) {
+        // This is a more complex query that depends on the state transition rules
+        // We'll implement a simplified version that gets transactions that could transition to the target status
+        
+        StringBuilder sql = new StringBuilder("SELECT * FROM " + TABLE_NAME + " WHERE ");
+        List<Object> params = new ArrayList<>();
+        
+        switch (targetStatus) {
+            case AUTHORIZED:
+                // Transactions that can be authorized are in PENDING or PROCESSING status
+                sql.append(STATUS_COLUMN).append(" IN (?, ?)");
+                params.add(PaymentStatus.PENDING.name());
+                params.add(PaymentStatus.PROCESSING.name());
+                break;
+                
+            case CAPTURED:
+                // Transactions that can be captured are in AUTHORIZED or PARTIALLY_CAPTURED status
+                sql.append(STATUS_COLUMN).append(" IN (?, ?)");
+                params.add(PaymentStatus.AUTHORIZED.name());
+                params.add(PaymentStatus.PARTIALLY_CAPTURED.name());
+                break;
+                
+            case PARTIALLY_CAPTURED:
+                // Only AUTHORIZED transactions can be partially captured
+                sql.append(STATUS_COLUMN).append(" = ?");
+                params.add(PaymentStatus.AUTHORIZED.name());
+                break;
+                
+            case REFUNDED:
+                // Transactions that can be refunded are in CAPTURED or PARTIALLY_REFUNDED status
+                sql.append(STATUS_COLUMN).append(" IN (?, ?)");
+                params.add(PaymentStatus.CAPTURED.name());
+                params.add(PaymentStatus.PARTIALLY_REFUNDED.name());
+                break;
+                
+            case PARTIALLY_REFUNDED:
+                // Only CAPTURED transactions can be partially refunded
+                sql.append(STATUS_COLUMN).append(" = ?");
+                params.add(PaymentStatus.CAPTURED.name());
+                break;
+                
+            case VOIDED:
+                // Only AUTHORIZED transactions can be voided
+                sql.append(STATUS_COLUMN).append(" = ?");
+                params.add(PaymentStatus.AUTHORIZED.name());
+                break;
+                
+            default:
+                // For other statuses, return empty list as they may have special rules
+                return Collections.emptyList();
         }
+        
+        return executeQuery(sql.toString(), params.toArray());
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByOrganizationAndStatusWithPagination(UUID organizationId, 
+            PaymentStatus status, int limit, int offset) {
+        
+        String sql = "SELECT * FROM " + TABLE_NAME + 
+                " WHERE " + ORG_ID_COLUMN + " = ? AND " + STATUS_COLUMN + " = ? " +
+                "ORDER BY " + CREATED_AT_COLUMN + " DESC LIMIT ? OFFSET ?";
+        
+        return executeQuery(sql, organizationId.toString(), status.name(), limit, offset);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByAccountAndStatusWithPagination(UUID accountId, 
+            PaymentStatus status, int limit, int offset) {
+        
+        String sql = "SELECT * FROM " + TABLE_NAME + 
+                " WHERE " + ACCOUNT_ID_COLUMN + " = ? AND " + STATUS_COLUMN + " = ? " +
+                "ORDER BY " + CREATED_AT_COLUMN + " DESC LIMIT ? OFFSET ?";
+        
+        return executeQuery(sql, accountId.toString(), status.name(), limit, offset);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByOrganizationAccountAndStatusWithPagination(UUID organizationId, 
+            UUID accountId, PaymentStatus status, int limit, int offset) {
+        
+        String sql = "SELECT * FROM " + TABLE_NAME + 
+                " WHERE " + ORG_ID_COLUMN + " = ? AND " + ACCOUNT_ID_COLUMN + " = ? AND " + 
+                STATUS_COLUMN + " = ? " +
+                "ORDER BY " + CREATED_AT_COLUMN + " DESC LIMIT ? OFFSET ?";
+        
+        return executeQuery(sql, organizationId.toString(), accountId.toString(), status.name(), limit, offset);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByMerchantWithPagination(String merchantId, int limit, int offset) {
+        String sql = "SELECT * FROM " + TABLE_NAME + 
+                " WHERE " + MERCHANT_ID_COLUMN + " = ? " +
+                "ORDER BY " + CREATED_AT_COLUMN + " DESC LIMIT ? OFFSET ?";
+        
+        return executeQuery(sql, merchantId, limit, offset);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByMerchantAndStatusWithPagination(String merchantId, 
+            PaymentStatus status, int limit, int offset) {
+        
+        String sql = "SELECT * FROM " + TABLE_NAME + 
+                " WHERE " + MERCHANT_ID_COLUMN + " = ? AND " + STATUS_COLUMN + " = ? " +
+                "ORDER BY " + CREATED_AT_COLUMN + " DESC LIMIT ? OFFSET ?";
+        
+        return executeQuery(sql, merchantId, status.name(), limit, offset);
+    }
+    
+    @Override
+    public Optional<PaymentTransaction> findLatestByAccount(UUID accountId) {
+        List<PaymentTransaction> transactions = executeQuery(SELECT_LATEST_BY_ACCOUNT_QUERY, accountId.toString());
+        return transactions.isEmpty() ? Optional.empty() : Optional.of(transactions.get(0));
+    }
+    
+    @Override
+    public Optional<PaymentTransaction> findLatestByMerchant(String merchantId) {
+        List<PaymentTransaction> transactions = executeQuery(SELECT_LATEST_BY_MERCHANT_QUERY, merchantId);
+        return transactions.isEmpty() ? Optional.empty() : Optional.of(transactions.get(0));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByStatusCreatedBefore(PaymentStatus status, LocalDateTime cutoffTime) {
+        return executeQuery(SELECT_BY_STATUS_CREATED_BEFORE_QUERY, 
+                status.name(), Timestamp.valueOf(cutoffTime));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByStatusUpdatedBefore(PaymentStatus status, LocalDateTime cutoffTime) {
+        return executeQuery(SELECT_BY_STATUS_UPDATED_BEFORE_QUERY, 
+                status.name(), Timestamp.valueOf(cutoffTime));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByOrganizationAndDateRange(UUID organizationId, 
+            LocalDateTime startDate, LocalDateTime endDate) {
+        
+        return executeQuery(SELECT_BY_ORG_AND_DATE_RANGE_QUERY, 
+                organizationId.toString(), 
+                Timestamp.valueOf(startDate), 
+                Timestamp.valueOf(endDate));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByAccountAndDateRange(UUID accountId, 
+            LocalDateTime startDate, LocalDateTime endDate) {
+        
+        return executeQuery(SELECT_BY_ACCOUNT_AND_DATE_RANGE_QUERY, 
+                accountId.toString(), 
+                Timestamp.valueOf(startDate), 
+                Timestamp.valueOf(endDate));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByMerchantAndDateRange(String merchantId, 
+            LocalDateTime startDate, LocalDateTime endDate) {
+        
+        return executeQuery(SELECT_BY_MERCHANT_AND_DATE_RANGE_QUERY, 
+                merchantId, 
+                Timestamp.valueOf(startDate), 
+                Timestamp.valueOf(endDate));
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByDescriptionContaining(String searchTerm) {
+        return executeQuery(SELECT_BY_DESCRIPTION_CONTAINING_QUERY, "%" + searchTerm + "%");
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByReferenceContaining(String searchTerm) {
+        return executeQuery(SELECT_BY_REFERENCE_CONTAINING_QUERY, "%" + searchTerm + "%");
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByOrganizationAndPaymentType(UUID organizationId, String paymentType) {
+        return executeQuery(SELECT_BY_ORG_AND_PAYMENT_TYPE_QUERY, 
+                organizationId.toString(), paymentType);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByAccountAndPaymentType(UUID accountId, String paymentType) {
+        return executeQuery(SELECT_BY_ACCOUNT_AND_PAYMENT_TYPE_QUERY, 
+                accountId.toString(), paymentType);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByMerchantAndPaymentType(String merchantId, String paymentType) {
+        return executeQuery(SELECT_BY_MERCHANT_AND_PAYMENT_TYPE_QUERY, 
+                merchantId, paymentType);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByCurrency(String currency) {
+        return executeQuery(SELECT_BY_CURRENCY_QUERY, currency);
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByCurrencyAndStatus(String currency, PaymentStatus status) {
+        return executeQuery(SELECT_BY_CURRENCY_AND_STATUS_QUERY, 
+                currency, status.name());
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByOrganizationCurrencyAndStatus(UUID organizationId, 
+            String currency, PaymentStatus status) {
+        
+        return executeQuery(SELECT_BY_ORG_CURRENCY_AND_STATUS_QUERY, 
+                organizationId.toString(), currency, status.name());
+    }
+    
+    @Override
+    public List<PaymentTransaction> findByAccountCurrencyAndStatus(UUID accountId, 
+            String currency, PaymentStatus status) {
+        
+        return executeQuery(SELECT_BY_ACCOUNT_CURRENCY_AND_STATUS_QUERY, 
+                accountId.toString(), currency, status.name());
     }
 }

@@ -1,183 +1,128 @@
-@import "tailwindcss";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 :root {
-  /* Base colors */
   --background: #ffffff;
   --foreground: #171717;
   
   /* Payment status colors */
-  --payment-success: #10b981; /* Green for successful/completed payments */
-  --payment-pending: #f59e0b; /* Amber for pending/processing payments */
-  --payment-error: #ef4444;   /* Red for failed/error payments */
-  --payment-attention: #6366f1; /* Purple for payments requiring attention */
+  --payment-success: #10b981;
+  --payment-pending: #f59e0b;
+  --payment-error: #ef4444;
+  --payment-info: #3b82f6;
+  --payment-neutral: #6b7280;
+  
+  /* Payment UI specific colors */
+  --payment-card-border: #e5e7eb;
+  --payment-card-background: #f9fafb;
+  --payment-highlight: rgba(59, 130, 246, 0.1);
 }
 
-/* Theme variables for consistent usage throughout the application */
-:root {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-payment-success: var(--payment-success);
-  --color-payment-pending: var(--payment-pending);
-  --color-payment-error: var(--payment-error);
-  --color-payment-attention: var(--payment-attention);
+@layer base {
+  :root {
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --font-sans: var(--font-geist-sans);
+    --font-mono: var(--font-geist-mono);
+    
+    /* Payment status theme variables */
+    --color-success: var(--payment-success);
+    --color-pending: var(--payment-pending);
+    --color-error: var(--payment-error);
+    --color-info: var(--payment-info);
+    --color-neutral: var(--payment-neutral);
+  }
 }
 
-/* Dark mode overrides */
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
     
-    /* Adjust payment status colors for dark mode for better visibility */
-    --payment-success: #34d399; /* Lighter green for dark mode */
-    --payment-pending: #fbbf24; /* Brighter amber for dark mode */
-    --payment-error: #f87171;   /* Lighter red for dark mode */
-    --payment-attention: #818cf8; /* Lighter purple for dark mode */
+    /* Dark mode payment status colors */
+    --payment-success: #34d399;
+    --payment-pending: #fbbf24;
+    --payment-error: #f87171;
+    --payment-info: #60a5fa;
+    --payment-neutral: #9ca3af;
+    
+    /* Dark mode payment UI specific colors */
+    --payment-card-border: #374151;
+    --payment-card-background: #1f2937;
+    --payment-highlight: rgba(59, 130, 246, 0.2);
   }
 }
 
-/* Base styles */
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans, 'Geist Sans', Arial, sans-serif);
+  font-family: var(--font-sans, Arial, Helvetica, sans-serif);
 }
 
-/* Payment status utility classes */
+/* Payment status indicator styles */
+.payment-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
 .payment-status-success {
-  color: var(--color-payment-success);
+  background-color: rgba(16, 185, 129, 0.1);
+  color: var(--payment-success);
 }
 
 .payment-status-pending {
-  color: var(--color-payment-pending);
+  background-color: rgba(245, 158, 11, 0.1);
+  color: var(--payment-pending);
 }
 
 .payment-status-error {
-  color: var(--color-payment-error);
+  background-color: rgba(239, 68, 68, 0.1);
+  color: var(--payment-error);
 }
 
-.payment-status-attention {
-  color: var(--color-payment-attention);
+.payment-status-info {
+  background-color: rgba(59, 130, 246, 0.1);
+  color: var(--payment-info);
 }
 
-/* Background variants for payment status indicators */
-.payment-status-bg-success {
-  background-color: var(--color-payment-success);
-}
-
-.payment-status-bg-pending {
-  background-color: var(--color-payment-pending);
-}
-
-.payment-status-bg-error {
-  background-color: var(--color-payment-error);
-}
-
-.payment-status-bg-attention {
-  background-color: var(--color-payment-attention);
-}
-
-/* Border variants for payment status indicators */
-.payment-status-border-success {
-  border-color: var(--color-payment-success);
-}
-
-.payment-status-border-pending {
-  border-color: var(--color-payment-pending);
-}
-
-.payment-status-border-error {
-  border-color: var(--color-payment-error);
-}
-
-.payment-status-border-attention {
-  border-color: var(--color-payment-attention);
-}
-
-/* Responsive utility classes for payment layouts */
-/* Mobile-first approach with stacked card layout for payment transactions */
+/* Payment card styles */
 .payment-card {
-  @apply w-full rounded-lg border p-4 mb-4;
+  border: 1px solid var(--payment-card-border);
+  background-color: var(--payment-card-background);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  transition: all 0.2s ease;
 }
 
-.payment-grid {
-  @apply grid grid-cols-1 gap-4;
+.payment-card:hover {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
 }
 
-.payment-action-btn {
-  @apply w-full py-3 px-4 rounded-md font-medium text-center;
+/* Payment amount formatting */
+.payment-amount {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
 }
 
-.payment-form-input {
-  @apply w-full h-11 px-3 py-2 rounded-md border;
-}
-
-/* Tablet and desktop responsive classes */
-@media (min-width: 640px) {
-  .sm\:payment-grid {
-    @apply grid-cols-2 gap-6;
+@media (prefers-color-scheme: dark) {
+  .payment-status-success {
+    background-color: rgba(52, 211, 153, 0.1);
   }
   
-  .sm\:payment-action-btn {
-    @apply w-auto py-2;
+  .payment-status-pending {
+    background-color: rgba(251, 191, 36, 0.1);
   }
   
-  .sm\:payment-table {
-    @apply table w-full;
+  .payment-status-error {
+    background-color: rgba(248, 113, 113, 0.1);
   }
   
-  .sm\:payment-table-row {
-    @apply table-row;
+  .payment-status-info {
+    background-color: rgba(96, 165, 250, 0.1);
   }
-  
-  .sm\:payment-table-cell {
-    @apply table-cell p-3;
-  }
-}
-
-@media (min-width: 768px) {
-  .md\:payment-grid {
-    @apply grid-cols-3 gap-6;
-  }
-  
-  .md\:payment-filters {
-    @apply flex-row justify-between;
-  }
-}
-
-@media (min-width: 1024px) {
-  .lg\:payment-grid {
-    @apply grid-cols-4 gap-8;
-  }
-  
-  .lg\:payment-dashboard {
-    @apply grid-cols-3;
-  }
-}
-
-/* Touch-friendly targets for mobile payment interactions */
-.payment-touch-target {
-  @apply min-h-[44px] min-w-[44px];
-}
-
-/* Font loading for Vite compatibility */
-/* 
- * Note: Vite doesn't use Next.js font loading system
- * Use standard CSS @font-face or Google Fonts import
- */
-@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist+Sans:wght@400;500;600;700&display=swap');
-
-/* Font variables */
-:root {
-  --font-sans: 'Geist Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-/* Typography utility classes */
-.font-sans {
-  font-family: var(--font-sans);
-}
-
-.font-mono {
-  font-family: var(--font-mono);
 }
